@@ -2,7 +2,7 @@ module github.com/puredevotion/coredns-plugins/sni_tls
 
 go 1.26.0
 
-toolchain go1.26.3
+toolchain go1.26.5
 
 require (
 	github.com/coredns/caddy v1.1.4-0.20250930002214-15135a999495
