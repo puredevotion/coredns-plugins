@@ -1,0 +1,131 @@
+# Hermetic CI: every plugin must build and test with no secrets, no private DNS,
+# and no network beyond the Go module proxy. That is the gate that makes this
+# repo publishable — a tree needing anything from a private environment cannot
+# be built by anyone but its author.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so dependency CVEs surface without waiting for a commit.
+    - cron: "0 6 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [radnr, sni_tls]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+
+      - name: Verify module graph is tidy
+        working-directory: ${{ matrix.plugin }}
+        run: |
+          go mod tidy -diff
+
+      - name: Vet
+        working-directory: ${{ matrix.plugin }}
+        run: go vet ./...
+
+      - name: Test with race detector
+        working-directory: ${{ matrix.plugin }}
+        run: go test -race -covermode=atomic -coverprofile=cover.out ./...
+
+      # Proves the tree needs no network at build time. Deps come from the
+      # module cache populated above; GOFLAGS=-mod=mod + GOPROXY=off fails
+      # loudly if anything still wants to be fetched.
+      - name: Test offline (hermetic gate)
+        working-directory: ${{ matrix.plugin }}
+        env:
+          GOPROXY: off
+          GOFLAGS: -mod=mod
+        run: go test ./...
+
+      - name: Coverage summary
+        working-directory: ${{ matrix.plugin }}
+        run: go tool cover -func=cover.out | tail -1
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sni_tls/go.mod
+          cache-dependency-path: sni_tls/go.sum
+      # Short smoke run per push. Not a substitute for a long campaign; it
+      # catches regressions that break the target itself.
+      - name: Fuzz SNI lookup (60s)
+        working-directory: sni_tls
+        run: go test -run=NONE -fuzz=FuzzGetCertificate -fuzztime=60s ./...
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: sni_tls/testdata/fuzz/
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [radnr, sni_tls]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+      - name: govulncheck
+        working-directory: ${{ matrix.plugin }}
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  no-private-references:
+    # Structural counterpart to the hermetic build: catches internal hostnames,
+    # private address ranges, and org-specific names before they are published.
+    # A denylist alone fails open, which is why the offline build above is the
+    # real gate — this is the cheap fast check.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan for private references
+        run: |
+          set -uo pipefail
+          patterns='\.home\.arpa|\.internal\.arpa|192\.168\.|10\.(4[0-9]|[0-9])\.|172\.(1[6-9]|2[0-9]|3[01])\.|100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.'
+          if grep -rInE "$patterns" \
+               --include='*.go' --include='*.md' --include='*.yml' \
+               --include='*.yaml' --include='*.json' --include='*.mod' . ; then
+            echo "::error::private reference found — see matches above"
+            exit 1
+          fi
+          echo "no private references found"
+
+  gofmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sni_tls/go.mod
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::not gofmt-clean:"; echo "$unformatted"; exit 1
+          fi
+          echo "gofmt clean"

@@ -1,69 +1,117 @@
 # coredns-plugins
 
-CoreDNS plugins for encrypted-DNS discovery and LAN-facing resolver behaviour.
+External CoreDNS plugins for encrypted-DNS discovery and multi-certificate TLS,
+plus a Dagger pipeline that builds a CoreDNS binary with them compiled in.
 
-> **Status: empty.** No plugin source has been committed yet. This repository
-> exists so the plugins have a public home from their first commit rather than
-> being extracted from a private tree later. Do not depend on this.
+| Plugin | What it does | Status |
+|---|---|---|
+| [`sni_tls`](sni_tls/) | Replaces the stock `tls` directive with SNI-based certificate selection, so one listener can serve several hostnames whose certs come from different issuers | Implemented, tested, not yet run in production |
+| [`radnr`](radnr/) | Advertises an encrypted DNS resolver on the LAN via the RFC 9463 DNR option in IPv6 Router Advertisements, plus optional RFC 8106 RDNSS | Wire/protocol layer complete and RFC-conformant; not yet run in production |
 
-## Scope
+Neither plugin has been through a production deployment yet. The test suites are
+thorough (see below) but "passes its tests" is not "battle-tested" — treat both
+as working code awaiting real-world mileage.
 
-Plugins here cover DNS behaviour that upstream CoreDNS doesn't provide, with an
-emphasis on standards-based encrypted-DNS discovery:
+## Why these exist
 
-- **DDR** (Discovery of Designated Resolvers, [RFC 9462]) — letting clients
-  discover that a DoT/DoH/DoQ endpoint exists and upgrade to it automatically,
-  including the verified-upgrade path where the designated resolver's
-  certificate carries the resolver IP as a SAN.
-- **DNR** (Discovery of Network-designated Resolvers, [RFC 9463]) — encrypted
-  resolver configuration delivered via DHCP/RA rather than discovered by query.
-- LAN resolver behaviour that assumes split-horizon and internal PKI: internal
-  names served authoritatively, everything else forwarded over an encrypted
-  upstream.
+**`sni_tls`** — CoreDNS's stock `tls` plugin loads exactly one cert/key pair per
+listener, with no SNI-based selection. If you serve both a public name and an
+internal-only name over DoT/DoH/DoQ, those two names need certificates from two
+different issuers (a public ACME CA cannot sign `.arpa` or `.internal`), and the
+stock plugin cannot put both on one `tls://` block. The usual workaround is a
+second CoreDNS instance with its own address, cert, and copy of the zone data.
+`sni_tls` collapses that back into one instance. Design rationale, rejected
+alternatives, and the verified-DDR caveat: [`docs/sni-tls-plugin.md`](docs/sni-tls-plugin.md).
 
-[RFC 9462]: https://www.rfc-editor.org/rfc/rfc9462.html
+**`radnr`** — [RFC 9463] defines a DHCP/RA option that hands clients an encrypted
+resolver's authentication domain name directly, so DoT/DoH/DoQ works with no
+per-device configuration. Support exists client-side (systemd-resolved ≥ 256,
+Windows 11) but router-side emitters are scarce. This plugin makes CoreDNS one.
+
 [RFC 9463]: https://www.rfc-editor.org/rfc/rfc9463.html
-
-## How CoreDNS plugins work
-
-Plugins are compiled *into* the CoreDNS binary — there is no runtime plugin
-loading. Using one means adding it to `plugin.cfg` and building CoreDNS, so each
-plugin here documents its own build and `Corefile` snippet.
-
-Plugin ordering in `plugin.cfg` is semantically significant: it determines the
-order handlers run in, not just registration. Getting it wrong produces plugins
-that silently never see a query.
-
-## Plugins
-
-None committed yet. Each will get its own directory with a `README`, a
-`setup_test.go`, and a worked `Corefile` example.
 
 ## Building
 
-Standard CoreDNS out-of-tree plugin build: clone CoreDNS, add the plugin to
-`plugin.cfg`, `go generate && go build`. Per-plugin instructions will live with
-each plugin.
+Plugins are compiled *into* CoreDNS — there is no runtime plugin loading. Each
+plugin is its own Go module so it can be developed and tested standalone, then
+pulled into a CoreDNS build with a `go.mod replace` directive.
+
+Test a plugin on its own:
+
+```sh
+cd sni_tls && go test -race ./...
+cd radnr   && go test -race ./...
+```
+
+Build a CoreDNS binary with both compiled in, via Dagger (from `ci/`):
+
+```sh
+dagger call test-plugin   --source=.. --plugin-dir=sni_tls
+dagger call lint-plugin   --source=.. --plugin-dir=sni_tls
+dagger call build-coredns --source=.. --coredns-version=1.14.6
+dagger call containerize  --source=.. --coredns-version=1.14.6 \
+  export --path=./coredns-plugins.tar
+```
+
+`BuildCoredns` clones the pinned upstream CoreDNS tag, patches `plugin.cfg`
+(`sni_tls` replaces stock `tls`; `radnr` is inserted next to `health`), runs
+`go generate` to regenerate `zplugin.go`, and builds. `Containerize` wraps the
+binary in a distroless base and returns an OCI tarball — it does not push. See
+[`ci/main.go`](ci/main.go) for why pushing is left to the caller.
+
+Two ordering constraints the pipeline encodes, both of which were real bugs:
+
+- **`go generate` must run before `go mod tidy`.** Tidy-first sees nothing
+  importing the replaced modules yet and strips the `replace` as unused.
+- **`plugin.cfg` order is semantic**, not just registration order. It determines
+  the order handlers run in; a plugin in the wrong slot can silently never see a
+  query.
+
+## Deploying
+
+The container needs `CAP_NET_BIND_SERVICE` to bind port 53 as a non-root user
+(the distroless base has no shell, so upstream's `setcap` approach isn't
+available). On Kubernetes:
+
+```yaml
+securityContext:
+  capabilities:
+    add: ["NET_BIND_SERVICE"]
+```
+
+`radnr` additionally needs host networking and `CAP_NET_RAW` to send Router
+Advertisements.
+
+> **`radnr` puts a second RA sender on your LAN.** That can disrupt IPv6 for
+> every device on the segment. It defaults to `RouterLifetime=0` (explicitly not
+> a default router) and refuses to advertise prefixes, and it has a `dry-run`
+> mode that logs what it would send and transmits nothing. Start there. Read
+> [`radnr/README.md`](radnr/README.md) before running it live.
+
+> **Do not deploy `sni_tls` with more than one certificate on an instance
+> serving RFC 9462 verified DDR.** An unmatched-SNI client could be served a
+> cert without the required IP-SAN, silently defeating verified discovery. The
+> caveat is explained in [`docs/sni-tls-plugin.md`](docs/sni-tls-plugin.md).
 
 ## Testing
 
-Plugins are tested at three levels, because unit tests alone don't catch the
-failures that matter in a resolver:
+Both plugins are covered by unit tests, and `sni_tls` additionally has:
 
-- unit tests against `plugin/test` harnesses, including `setup_test.go` for
-  Corefile parsing — malformed config must fail loudly at startup, not degrade
-  silently at query time
-- integration tests issuing real queries against a built CoreDNS
-- protocol conformance: responses checked against the relevant RFC, including
-  the negative cases (malformed SVCB, absent designated resolver, failed
-  certificate validation), since a broken upgrade path that fails *open* is
-  worse than no upgrade path at all
+- a real loopback TLS 1.3 handshake asserting ML-KEM (post-quantum) negotiation
+  (`pqc_test.go`)
+- a fuzz target over SNI lookup (`fuzz_test.go`)
+- partial-cert-set tests: one cert source being absent must not take the other
+  listener down, since certs from different issuers rotate independently
+
+`radnr` has byte-exact golden tests against the RFC 9463/9460/8415 encoding
+rules, and covers Router Solicitation responses (RFC 4861 §6.2.6, rate-limited)
+and interval jitter (§6.2.1).
+
+Everything runs offline — `GOPROXY=off go test ./...` passes in both modules.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). This repository is the source of truth —
-issues and pull requests here are the real thing, not a mirror of something
-private.
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Licence
 
