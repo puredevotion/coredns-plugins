@@ -74,14 +74,32 @@ overwrite) rather than one directive taking a list — keeps the Corefile
 diff-friendly when adding a third hostname later (one new line, not editing
 an existing line's argument list).
 
+## Cert hot-reload (resolved)
+
+The open question below about `reload`-plugin piggybacking was checked
+against `coredns/plugin/reload`'s actual source: it SHA512-hashes the
+*parsed Corefile*, not the cert files a directive references. A cert rotated
+at the same on-disk path (the k8s Secret-volume symlink-swap pattern this
+plugin's fallback-cert caveat already assumes) never changes that hash, so
+`reload` never restarts the server and a re-`Setup()` never happens. The
+"hot for free via `reload`" plan in the original design was wrong — needed
+for the home.arpa + sevenwoods.nl dual-cert case, where the private-CA and
+public-CA certs rotate independently and neither should require a manual
+CoreDNS bounce.
+
+Implemented instead (`reload.go`): a `liveStore` wraps the `certStore`
+behind an `atomic.Pointer`, polled every 30s (fixed, not Corefile-configurable
+— see the constant's doc comment for why). Each tick re-hashes the raw
+cert/key file bytes; only on a changed hash does it rebuild via
+`buildCertStore` and atomically swap. A rebuild failure (e.g. caught
+mid-rotation, one file replaced but not the other) is logged and the
+previous store is kept — a transient reload glitch must never blank out an
+already-running TLS listener. Lifecycle (`OnStartup`/`OnShutdown`, wired to
+`OnStartup`/`OnRestart`/`OnFinalShutdown`/`OnRestartFailed`) mirrors the
+`radnr` plugin's convention in this repo rather than inventing a new shape.
+
 ## Open questions / risks
 
-- Whether CoreDNS's plugin ABI (`caddy`-derived `Setup(c *caddy.Controller)`)
-  gives clean access to reload the same `tls.Config` object in place, or
-  whether `reload` fully tears down and reconstructs the server instance
-  (in which case "hot" cert reload was never actually free — needs reading
-  `coredns/plugin/reload`'s source before assuming this works as described
-  above).
 - Go's `tls.Certificate.Leaf` population gotcha (step 1) is a common
   correctness bug in hand-rolled `GetCertificate` implementations — must
   parse SANs explicitly, don't rely on `Leaf` being non-nil.

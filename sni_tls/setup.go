@@ -44,9 +44,15 @@ func setup(c *caddy.Controller) error {
 		return plugin.Error("sni_tls", err)
 	}
 
+	live := newLiveStore(pairs, store, digestPairs(pairs))
+	c.OnStartup(live.OnStartup)
+	c.OnRestart(live.OnShutdown)
+	c.OnFinalShutdown(live.OnShutdown)
+	c.OnRestartFailed(live.OnStartup)
+
 	// #nosec G402 -- MinVersion set explicitly below, matching plugin/pkg/tls's default.
 	config.TLSConfig = &ctls.Config{
-		GetCertificate: store.GetCertificate,
+		GetCertificate: live.GetCertificate,
 		MinVersion:     ctls.VersionTLS12,
 	}
 
