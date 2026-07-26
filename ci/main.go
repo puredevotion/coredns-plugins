@@ -188,22 +188,26 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 		WithExec([]string{"go", "mod", "tidy"}).
 		WithExec([]string{"go", "build", "-o", "/coredns-out/coredns", "."}).
 		// radnr needs a raw ICMPv6 socket (CAP_NET_RAW) to send Router
-		// Advertisements. This image runs as a nonroot user, and Kubernetes/
-		// containerd only populate a container's Bounding capability set
-		// from securityContext.capabilities.add -- NOT the Ambient set a
-		// nonroot process needs for an added capability to survive its own
-		// execve (confirmed live: CapBnd had NET_RAW, CapEff/CapAmb did not,
-		// "operation not permitted" on the raw socket). File capabilities
-		// sidestep this entirely: pP' = file_permitted & bounding_set at
-		// exec time, independent of the pre-exec process' ambient/effective
-		// state -- this is the textbook mechanism for "let this one binary
-		// use a capability regardless of who runs it," and it's exactly
-		// this repo's multi-stage-build shape (COPY a setcap'd binary into
-		// a distroless final stage is a common, well-supported pattern).
-		// securityContext.capabilities.add still must include NET_RAW too
-		// (it's the bounding-set half of the intersection above) -- this
-		// setcap alone is not sufficient on its own.
-		WithExec([]string{"setcap", "cap_net_raw+ep", "/coredns-out/coredns"})
+		// Advertisements, and binding <1024 (CAP_NET_BIND_SERVICE) is needed
+		// by any deployment of this image that serves real DNS on :53/:853/
+		// :443 as the nonroot user it runs as. Kubernetes/containerd only
+		// populate a container's Bounding capability set from
+		// securityContext.capabilities.add -- NOT the Ambient set a nonroot
+		// process needs for an added capability to survive its own execve
+		// (confirmed live: CapBnd had NET_RAW, CapEff/CapAmb did not,
+		// "operation not permitted" on the raw socket; the stale comment
+		// below this function once claimed PodSecurityContext alone was
+		// sufficient for CAP_NET_BIND_SERVICE too -- it isn't, same gap).
+		// File capabilities sidestep this entirely: pP' = file_permitted &
+		// bounding_set at exec time, independent of the pre-exec process'
+		// ambient/effective state -- this is the textbook mechanism for
+		// "let this one binary use a capability regardless of who runs it,"
+		// and it's exactly this repo's multi-stage-build shape (COPY a
+		// setcap'd binary into a distroless final stage is a common,
+		// well-supported pattern). securityContext.capabilities.add must
+		// still include both capabilities too (that's the bounding-set half
+		// of the intersection above) -- setcap alone is not sufficient.
+		WithExec([]string{"setcap", "cap_net_raw,cap_net_bind_service+ep", "/coredns-out/coredns"})
 
 	// Fail the build here, immediately, if setcap silently no-op'd (e.g. a
 	// build sandbox lacking CAP_SETFCAP itself) rather than discovering it
@@ -214,8 +218,10 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 	if err != nil {
 		return nil, fmt.Errorf("BuildCoredns: getcap failed: %w", err)
 	}
-	if !strings.Contains(capOut, "cap_net_raw") {
-		return nil, fmt.Errorf("BuildCoredns: setcap did not stick -- getcap shows %q, expected cap_net_raw", capOut)
+	for _, want := range []string{"cap_net_raw", "cap_net_bind_service"} {
+		if !strings.Contains(capOut, want) {
+			return nil, fmt.Errorf("BuildCoredns: setcap did not stick -- getcap shows %q, expected %s", capOut, want)
+		}
 	}
 
 	return ctr.File("/coredns-out/coredns"), nil
@@ -237,16 +243,28 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 const runtimeBaseRef = "gcr.io/distroless/static-debian12:nonroot"
 
 // coredns needs CAP_NET_BIND_SERVICE to bind port 53 as the nonroot user this
-// image runs as (matches upstream's Dockerfile, which uses setcap in a builder
-// stage — not available here since distroless has no shell/setcap binary).
-// This image relies on the Kubernetes PodSecurityContext granting the
-// capability at the container level instead:
+// image runs as. BuildCoredns's setcap step (above) grants this at the file
+// level, matching upstream's Dockerfile approach (setcap in a builder stage —
+// distroless has no shell/setcap of its own to do this here directly).
+//
+// Every deployment of this image must ALSO add both capabilities via
+// securityContext, even one that never touches a raw socket: setcap alone is
+// not sufficient (the bounding set gates what a file capability can actually
+// grant at exec time), and Kubernetes/containerd do not populate a nonroot
+// container's Ambient set from securityContext.capabilities.add on their own
+// (confirmed live) -- the file capability is what actually lets the grant
+// survive execve, not the securityContext entry by itself. Both are required
+// together:
 //
 //	securityContext:
 //	  capabilities:
-//	    add: ["NET_BIND_SERVICE"]
+//	    add: ["NET_RAW", "NET_BIND_SERVICE"]
 //
-// Required wherever this image is deployed.
+// Omitting either half reproduces one of two failures already hit live:
+// "exec ...: operation not permitted" (missing from securityContext, so the
+// bounding set doesn't contain what the file wants to grant) or an EPERM at
+// bind()/socket() time (present in securityContext but the binary itself
+// never had the file capability, back before this setcap step existed).
 
 // Containerize packages a built coredns binary (from BuildCoredns) into a
 // minimal runtime image and returns it as an OCI tarball (Container.AsTarball)
