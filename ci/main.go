@@ -105,7 +105,13 @@ func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 		WithExec([]string{"apt-get", "update"}).
 		WithExec([]string{"apt-get", "install", "-y", "--no-install-recommends", "git"}).
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
-		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build"))
+		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
+		// golang:1.26 ships gcc, so cgo defaults on and go build produces a
+		// dynamically-linked binary. Containerize packages that binary onto
+		// distroless/static, which has no libc at all — the runtime symptom
+		// is `exec /coredns: no such file or directory` (the missing ELF
+		// interpreter, not a missing file). Force a static binary instead.
+		WithEnvVariable("CGO_ENABLED", "0")
 }
 
 // BuildCoredns clones the pinned upstream CoreDNS tag, patches plugin.cfg to
