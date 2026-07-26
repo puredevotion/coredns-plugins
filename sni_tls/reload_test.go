@@ -53,11 +53,9 @@ func TestDigestPairs_MissingFileIsStableSentinel(t *testing.T) {
 
 // --- liveStore.reloadOnce: swap-on-change, keep-old-on-error -----------------
 
-// TestLiveStore_ReloadOnce_SwapsOnRotation is the core hot-reload behavior:
-// rotating a cert file at the same on-disk path (the k8s Secret-volume
-// symlink-swap pattern) must be picked up on the next poll without a CoreDNS
-// restart, and GetCertificate must start serving the new cert's key material
-// immediately.
+// TestLiveStore_ReloadOnce_SwapsOnRotation is the core hot-reload behavior: a
+// cert rotated at the same path must be picked up on the next poll, no
+// CoreDNS restart needed.
 func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
 
@@ -88,9 +86,8 @@ func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 	}
 }
 
-// TestLiveStore_ReloadOnce_NoopWhenUnchanged confirms a poll tick that finds
-// no file changes doesn't rebuild/swap the store (cheap steady-state, and
-// avoids log spam every interval).
+// TestLiveStore_ReloadOnce_NoopWhenUnchanged: an unchanged poll tick must not
+// rebuild/swap — steady-state should be cheap and quiet.
 func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
 	store, err := buildCertStore([][2]string{{certPath, keyPath}})
@@ -109,11 +106,9 @@ func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 	}
 }
 
-// TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure covers a rotation caught
-// mid-write: the cert file changed (so the digest differs and a rebuild is
-// attempted) but the result is unloadable (e.g. corrupt/partial PEM here). The
-// previously active store must remain in place rather than the TLS listener
-// losing its certs on a transient reload error.
+// TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure covers a rotation
+// caught mid-write (digest changed, but the new file is unloadable): the
+// listener must keep serving the last-good cert, not lose it.
 func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
 	store, err := buildCertStore([][2]string{{certPath, keyPath}})
@@ -143,10 +138,9 @@ func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 
 // --- liveStore lifecycle: OnStartup/OnShutdown are safe to call repeatedly --
 
-// TestLiveStore_Lifecycle_StartStopRestart mirrors the caddy.Controller
-// OnStartup -> OnRestart(=Shutdown) -> OnRestartFailed(=Startup) sequence a
-// Corefile-driven `reload` attempt can produce, and must not deadlock, panic,
-// or leak the poll goroutine past the final Stop.
+// TestLiveStore_Lifecycle_StartStopRestart mirrors the
+// OnStartup->OnRestart->OnRestartFailed sequence a Corefile reload can
+// produce; must not deadlock, panic, or leak the poll goroutine.
 func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
 	store, err := buildCertStore([][2]string{{certPath, keyPath}})

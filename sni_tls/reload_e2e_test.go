@@ -6,14 +6,10 @@ import (
 	"testing"
 )
 
-// TestReload_EndToEnd_RealTLSHandshake is the "as real as possible" version of
-// TestLiveStore_ReloadOnce_SwapsOnRotation: instead of calling GetCertificate
-// directly, it opens a real TCP listener with a tls.Config wired to
-// live.GetCertificate (exactly how setup() wires config.TLSConfig), and does a
-// genuine client tls.Dial handshake with SNI, before and after rotating the
-// cert file on disk. Proves the whole path — Corefile args -> certStore ->
-// atomic swap -> crypto/tls's own GetCertificate callback invocation during a
-// live handshake — not just the plugin's internal call sequence.
+// TestReload_EndToEnd_RealTLSHandshake proves the whole path — certStore,
+// atomic swap, crypto/tls's own GetCertificate invocation — via a real
+// tls.Dial/SNI handshake before and after rotating the cert file, not just
+// the plugin's internal call sequence like TestLiveStore_ReloadOnce_SwapsOnRotation.
 func TestReload_EndToEnd_RealTLSHandshake(t *testing.T) {
 	const sni = "dns.example.com"
 
