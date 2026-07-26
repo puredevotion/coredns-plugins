@@ -87,12 +87,9 @@ func (r *RADNR) OnShutdown() error {
 // var so tests can inject a fake and exercise dial() without a real socket.
 var listenFn = ndpListen
 
-// dialNDP opens the actual ICMPv6 raw socket via ndp.Listen. Factored out of
-// ndpListen into its own package var (same seam pattern as listenFn) because
-// opening a raw ICMPv6 socket requires CAP_NET_RAW/root — unavailable in an
-// unprivileged sandbox/CI — so tests substitute a fake here to cover
-// ndpListen's success path for real, while still exercising the genuine
-// net.InterfaceByName lookup around it.
+// dialNDP is its own package var, same seam as listenFn, because opening the
+// raw ICMPv6 socket needs CAP_NET_RAW/root: tests fake this one call and
+// still exercise ndpListen's real net.InterfaceByName lookup around it.
 var dialNDP = func(ifi *net.Interface, addr ndp.Addr) (advertiser.Conn, error) {
 	c, _, err := ndp.Listen(ifi, addr)
 	if err != nil {
@@ -101,6 +98,7 @@ var dialNDP = func(ifi *net.Interface, addr ndp.Addr) (advertiser.Conn, error) {
 	return c, nil
 }
 
+// ndpListen opens a real ndp transport on the named interface.
 func ndpListen(name string) (advertiser.Conn, error) {
 	ifi, err := net.InterfaceByName(name)
 	if err != nil {

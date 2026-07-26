@@ -10,23 +10,19 @@ import (
 	"github.com/puredevotion/coredns-plugins/radnr/internal/advertiser"
 )
 
-// TestNdpListen_UnknownInterface exercises ndpListen's real net.InterfaceByName
-// failure branch — no socket privilege needed, this fails before ever reaching
-// dialNDP.
+// TestNdpListen_UnknownInterface exercises the real net.InterfaceByName
+// failure branch, which needs no socket privilege since it fails before
+// reaching dialNDP.
 func TestNdpListen_UnknownInterface(t *testing.T) {
 	if _, err := ndpListen("radnr-test-nonexistent-iface-0"); err == nil {
 		t.Fatal("expected error for a nonexistent interface, got nil")
 	}
 }
 
-// TestNdpListen_RealRawSocket_RequiresPrivilege documents (and, when run with
-// CAP_NET_RAW/root, actually verifies) the real ndp.Listen call this plugin
-// depends on in production: given a genuine interface, the unmodified dialNDP
-// opens an actual ICMPv6 raw socket. Unprivileged sandboxes/CI can't create
-// that socket (EPERM/EACCES), so this test accepts either outcome — a real
-// success (privileged runner) or a real permission error (everyone else) —
-// rather than skipping outright, so the attempt itself (and the real
-// net.InterfaceByName lookup preceding it) still runs and is covered.
+// TestNdpListen_RealRawSocket_RequiresPrivilege exercises the actual
+// ndp.Listen call for real rather than skipping: it accepts either a
+// genuine success (privileged runner) or a genuine permission error
+// (everyone else), so the attempt itself stays covered instead of assumed.
 func TestNdpListen_RealRawSocket_RequiresPrivilege(t *testing.T) {
 	ifi, err := realLinkLocalInterface()
 	if err != nil {
@@ -46,10 +42,9 @@ func TestNdpListen_RealRawSocket_RequiresPrivilege(t *testing.T) {
 	}
 }
 
-// realLinkLocalInterface finds a real, up network interface carrying a
-// link-local IPv6 address — what ndp.Listen(ifi, ndp.LinkLocal) actually
-// requires — without hardcoding an interface name that won't exist on every
-// machine or CI runner this test runs on.
+// realLinkLocalInterface finds a link-local-IPv6 interface — what
+// ndp.Listen(ifi, ndp.LinkLocal) requires — instead of hardcoding a name
+// that won't exist on every runner.
 func realLinkLocalInterface() (*net.Interface, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
@@ -71,11 +66,8 @@ func realLinkLocalInterface() (*net.Interface, error) {
 	return nil, errors.New("no interface with a link-local IPv6 address found")
 }
 
-// TestNdpListen_StubbedSuccess covers ndpListen's success path (the one line
-// TestNdpListen_RealRawSocket_RequiresPrivilege can't reach without root) by
-// substituting dialNDP for a fake — this is the "use mocks/stubs" fallback:
-// the real net.InterfaceByName lookup against a genuine interface still runs
-// unmocked, only the raw-socket layer underneath it is stubbed.
+// TestNdpListen_StubbedSuccess covers the success path root would otherwise
+// gate: dialNDP is faked, but net.InterfaceByName still runs for real.
 func TestNdpListen_StubbedSuccess(t *testing.T) {
 	orig := dialNDP
 	defer func() { dialNDP = orig }()
@@ -99,10 +91,9 @@ func TestNdpListen_StubbedSuccess(t *testing.T) {
 	}
 }
 
-// TestNdpListen_StubbedFailure covers dialNDP's own error-propagation branch
-// (ndp.Listen failing for a reason other than "no CAP_NET_RAW", e.g. the
-// interface going down mid-open) without needing to reproduce that condition
-// for real.
+// TestNdpListen_StubbedFailure covers ndpListen propagating a dialNDP error
+// for reasons other than missing privilege (e.g. the interface going down
+// mid-open), without needing to reproduce that condition for real.
 func TestNdpListen_StubbedFailure(t *testing.T) {
 	orig := dialNDP
 	defer func() { dialNDP = orig }()
@@ -118,12 +109,10 @@ func TestNdpListen_StubbedFailure(t *testing.T) {
 }
 
 // TestOnStartup_RealDialError_NoRunnerInjected covers OnStartup's dial-error
-// return branch (radnr.go's `if err != nil { return err }` right after
-// `dial(r.Cfg)`) which every other OnStartup test skips by either injecting a
-// fakeRunner or using DryRun. A real (non-dry-run) config with no runner
-// injected forces OnStartup down the genuine dial() -> listenFn -> ndpListen
-// path; pointing it at a nonexistent interface makes that fail deterministically
-// without touching socket privileges.
+// return, which every other OnStartup test skips via a fakeRunner or DryRun.
+// A real config with no runner forces the genuine dial->listenFn->ndpListen
+// path; a nonexistent interface fails it deterministically, no privilege
+// needed.
 func TestOnStartup_RealDialError_NoRunnerInjected(t *testing.T) {
 	cfg := validCfg()
 	cfg.DryRun = false
