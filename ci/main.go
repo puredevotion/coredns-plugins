@@ -23,6 +23,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"dagger/coredns-plugins-ci/internal/dagger"
 )
@@ -103,7 +104,10 @@ func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 	return dag.Container().
 		From("golang:1.26").
 		WithExec([]string{"apt-get", "update"}).
-		WithExec([]string{"apt-get", "install", "-y", "--no-install-recommends", "git"}).
+		// libcap2-bin: setcap, used after the build to grant cap_net_raw to
+		// the binary itself (see BuildCoredns) so radnr's raw ICMPv6 socket
+		// works for the nonroot user this image runs as.
+		WithExec([]string{"apt-get", "install", "-y", "--no-install-recommends", "git", "libcap2-bin"}).
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
 		// golang:1.26 ships gcc, so cgo defaults on and go build produces a
@@ -165,7 +169,37 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 	ctr = ctr.
 		WithExec([]string{"go", "generate"}).
 		WithExec([]string{"go", "mod", "tidy"}).
-		WithExec([]string{"go", "build", "-o", "/coredns-out/coredns", "."})
+		WithExec([]string{"go", "build", "-o", "/coredns-out/coredns", "."}).
+		// radnr needs a raw ICMPv6 socket (CAP_NET_RAW) to send Router
+		// Advertisements. This image runs as a nonroot user, and Kubernetes/
+		// containerd only populate a container's Bounding capability set
+		// from securityContext.capabilities.add -- NOT the Ambient set a
+		// nonroot process needs for an added capability to survive its own
+		// execve (confirmed live: CapBnd had NET_RAW, CapEff/CapAmb did not,
+		// "operation not permitted" on the raw socket). File capabilities
+		// sidestep this entirely: pP' = file_permitted & bounding_set at
+		// exec time, independent of the pre-exec process' ambient/effective
+		// state -- this is the textbook mechanism for "let this one binary
+		// use a capability regardless of who runs it," and it's exactly
+		// this repo's multi-stage-build shape (COPY a setcap'd binary into
+		// a distroless final stage is a common, well-supported pattern).
+		// securityContext.capabilities.add still must include NET_RAW too
+		// (it's the bounding-set half of the intersection above) -- this
+		// setcap alone is not sufficient on its own.
+		WithExec([]string{"setcap", "cap_net_raw+ep", "/coredns-out/coredns"})
+
+	// Fail the build here, immediately, if setcap silently no-op'd (e.g. a
+	// build sandbox lacking CAP_SETFCAP itself) rather than discovering it
+	// only after a full push+deploy cycle -- distroless has no getcap to
+	// check this from inside the final runtime image, so this is the only
+	// point this repo's pipeline can verify it at all.
+	capOut, err := ctr.WithExec([]string{"getcap", "/coredns-out/coredns"}).Stdout(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("BuildCoredns: getcap failed: %w", err)
+	}
+	if !strings.Contains(capOut, "cap_net_raw") {
+		return nil, fmt.Errorf("BuildCoredns: setcap did not stick -- getcap shows %q, expected cap_net_raw", capOut)
+	}
 
 	return ctr.File("/coredns-out/coredns"), nil
 }
@@ -202,6 +236,17 @@ const runtimeBaseRef = "gcr.io/distroless/static-debian12:nonroot"
 // — not pushed to a registry. See the package doc comment for why the push
 // step is deliberately outside this function (mTLS client-cert auth to the registry,
 // which Dagger's native registry auth doesn't support).
+//
+// Before returning, this runs `/coredns -plugins` inside the actual runtime
+// container and checks every plugin in pluginCfgPatches shows up in its
+// output. BuildCoredns compiling successfully does NOT mean the binary can
+// run in this base image: golang:1.26 defaults cgo on, which produces a
+// dynamically-linked binary that fails to exec at all
+// (`exec /coredns: no such file or directory`) against distroless/static's
+// total absence of libc. That broke silently all the way through build, tar,
+// SBOM, and push in coredns-radnr's first live deploy — the container
+// started and immediately CrashLoopBackOff'd. Running the binary here, in
+// the exact image that ships, is the only check that would have caught it.
 func (m *CorednsPluginsCi) Containerize(ctx context.Context, source *dagger.Directory, corednsVersion string) (*dagger.File, error) {
 	binary, err := m.BuildCoredns(ctx, source, corednsVersion)
 	if err != nil {
@@ -215,8 +260,21 @@ func (m *CorednsPluginsCi) Containerize(ctx context.Context, source *dagger.Dire
 		WithWorkdir("/").
 		WithExposedPort(53).
 		WithExposedPort(853). // DoT
-		WithExposedPort(443). // DoH/DoH3
-		WithEntrypoint([]string{"/coredns"})
+		WithExposedPort(443)  // DoH/DoH3
 
-	return ctr.AsTarball(), nil
+	// -plugins prints the compiled-in plugin list and exits 0 — no network,
+	// no listeners, no config file needed. Runs BEFORE WithEntrypoint so
+	// WithExec invokes /coredns directly rather than appending args to it.
+	out, err := ctr.WithExec([]string{"/coredns", "-plugins"}).Stdout(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("Containerize: smoke test failed to exec /coredns in %s (likely a dynamically-linked binary against a libc-free base — check CGO_ENABLED): %w", runtimeBaseRef, err)
+	}
+	for pluginDir, p := range pluginCfgPatches {
+		name := p.cfgLine[:strings.IndexByte(p.cfgLine, ':')]
+		if !strings.Contains(out, name) {
+			return nil, fmt.Errorf("Containerize: smoke test ran but %q (plugin dir %s) is missing from `/coredns -plugins` output:\n%s", name, pluginDir, out)
+		}
+	}
+
+	return ctr.WithEntrypoint([]string{"/coredns"}).AsTarball(), nil
 }
