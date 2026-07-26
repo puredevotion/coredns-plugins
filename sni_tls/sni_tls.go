@@ -21,14 +21,43 @@ type certStore struct {
 }
 
 // GetCertificate implements the tls.Config.GetCertificate callback: look up the
-// client's requested SNI, fall back to the first-loaded cert if unmatched.
+// client's requested SNI, then its RFC 6125 §6.4.3 single-level wildcard form
+// (dns.sevenwoods.nl -> *.sevenwoods.nl) so a wildcard cert's SAN actually
+// gets selected for concrete hostnames under it -- caught live: a real LE
+// wildcard cert (*.sevenwoods.nl) loaded alongside a per-host cert silently
+// never matched any real SNI at all (the map key was the literal string
+// "*.sevenwoods.nl", which no real ClientHello ever sends), falling through
+// to the fallback cert on every connection instead. Falls back to the
+// first-loaded cert if neither matches.
 func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if hello.ServerName != "" {
-		if cert, ok := s.byName[strings.ToLower(hello.ServerName)]; ok {
+		name := strings.ToLower(hello.ServerName)
+		if cert, ok := s.byName[name]; ok {
 			return cert, nil
+		}
+		if wildcard, ok := wildcardOf(name); ok {
+			if cert, ok := s.byName[wildcard]; ok {
+				return cert, nil
+			}
 		}
 	}
 	return s.fallback, nil
+}
+
+// wildcardOf returns name's RFC 6125 §6.4.3 single-level wildcard form (its
+// leftmost label replaced with "*"), and whether name has enough labels for
+// that to be meaningful. A bare single-label name has no wildcard form --
+// *.example.com must not match example.com itself, matching how every TLS
+// client actually verifies wildcard certs. Multi-label names only get the
+// wildcard's own domain's protection: *.sevenwoods.nl matches
+// dns.sevenwoods.nl but not a.b.sevenwoods.nl (single wildcard level, not
+// suffix matching).
+func wildcardOf(name string) (string, bool) {
+	i := strings.IndexByte(name, '.')
+	if i < 0 {
+		return "", false
+	}
+	return "*" + name[i:], true
 }
 
 // loadCert loads a cert/key pair via tls.LoadX509KeyPair and returns it
