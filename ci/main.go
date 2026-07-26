@@ -103,11 +103,22 @@ func (m *CorednsPluginsCi) LintPlugin(ctx context.Context, source *dagger.Direct
 func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 	return dag.Container().
 		From("golang:1.26").
-		WithExec([]string{"apt-get", "update"}).
+		// update+install combined in one step (not two, as a bare `apt-get
+		// update` was before): this Dagger engine is long-lived
+		// (kube-pod://dagger-engine-0, shared across CI runs), and a
+		// separate `apt-get update` step reuses its OLD cached layer
+		// whenever its own command text is unchanged, regardless of how
+		// stale the index inside it is -- caught live when adding
+		// libcap2-bin below to `install` alone didn't invalidate that
+		// cache, and "Unable to locate package libcap2-bin" turned out to
+		// mean a stale reused index, not a wrong package name. Combining
+		// them means any change to what's installed also forces a fresh
+		// update, every time.
+		//
 		// libcap2-bin: setcap, used after the build to grant cap_net_raw to
 		// the binary itself (see BuildCoredns) so radnr's raw ICMPv6 socket
 		// works for the nonroot user this image runs as.
-		WithExec([]string{"apt-get", "install", "-y", "--no-install-recommends", "git", "libcap2-bin"}).
+		WithExec([]string{"sh", "-c", "apt-get update && apt-get install -y --no-install-recommends git libcap2-bin"}).
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
 		// golang:1.26 ships gcc, so cgo defaults on and go build produces a
