@@ -63,6 +63,75 @@ func TestGetCertificate_CaseInsensitive(t *testing.T) {
 	}
 }
 
+// TestGetCertificate_Wildcard covers the real-world case that motivated
+// wildcardOf: a wildcard cert (e.g. Let's Encrypt's *.sevenwoods.nl) loaded
+// alongside a per-host cert. Before wildcardOf existed, no real ClientHello
+// SNI ever matched the literal map key "*.sevenwoods.nl" -- caught live via
+// an actual TLS handshake against a real LE wildcard cert, which silently
+// fell through to the fallback cert on every connection.
+func TestGetCertificate_Wildcard(t *testing.T) {
+	wildcard := &tls.Certificate{}
+	perHost := &tls.Certificate{}
+	other := &tls.Certificate{}
+
+	store := &certStore{
+		byName: map[string]*tls.Certificate{
+			"*.sevenwoods.nl": wildcard,
+			"dns.home.arpa":   perHost,
+		},
+		fallback: other,
+	}
+
+	tests := []struct {
+		serverName string
+		want       *tls.Certificate
+	}{
+		{"dns.sevenwoods.nl", wildcard},    // single-label subdomain: matches
+		{"argocd.sevenwoods.nl", wildcard}, // any single-label subdomain matches
+		{"dns.home.arpa", perHost},         // exact match still wins over any wildcard derivation
+		{"sevenwoods.nl", other},           // bare domain itself: wildcard must NOT match this
+		{"a.b.sevenwoods.nl", other},       // two labels deep: single-level wildcard must NOT match
+		{"DNS.SEVENWOODS.NL", wildcard},    // case-insensitive, same as exact-match SNI comparison
+	}
+
+	for _, tc := range tests {
+		got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: tc.serverName})
+		if err != nil {
+			t.Errorf("ServerName=%q: unexpected error: %v", tc.serverName, err)
+		}
+		if got != tc.want {
+			t.Errorf("ServerName=%q: got wrong cert", tc.serverName)
+		}
+	}
+}
+
+func TestWildcardOf(t *testing.T) {
+	tests := []struct {
+		name   string
+		want   string
+		wantOK bool
+	}{
+		{"dns.sevenwoods.nl", "*.sevenwoods.nl", true},
+		{"a.b.sevenwoods.nl", "*.b.sevenwoods.nl", true},
+		// "sevenwoods.nl" has a dot too, so it derives *.nl -- wildcardOf only
+		// asks "is there a leftmost label to replace", not "is the remainder
+		// a plausible real-world wildcard cert domain". That's fine: it's
+		// only ever used to look up an existing store entry, and nobody
+		// loads a "*.nl" cert. The actual safety property -- a bare domain
+		// must not match ITS OWN wildcard -- is covered by
+		// TestGetCertificate_Wildcard's {"sevenwoods.nl", other} case.
+		{"sevenwoods.nl", "*.nl", true},
+		{"nl", "", false}, // truly single-label: no dot, no wildcard form
+		{"", "", false},
+	}
+	for _, tc := range tests {
+		got, ok := wildcardOf(tc.name)
+		if ok != tc.wantOK || got != tc.want {
+			t.Errorf("wildcardOf(%q) = (%q, %v), want (%q, %v)", tc.name, got, ok, tc.want, tc.wantOK)
+		}
+	}
+}
+
 // --- loadCert: real cert/key loading + SAN extraction -----------------------
 
 // TestLoadCert_ExtractsSANs exercises the actual tls.LoadX509KeyPair +
