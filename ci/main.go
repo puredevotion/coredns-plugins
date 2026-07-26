@@ -118,7 +118,12 @@ func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 		// libcap2-bin: setcap, used after the build to grant cap_net_raw to
 		// the binary itself (see BuildCoredns) so radnr's raw ICMPv6 socket
 		// works for the nonroot user this image runs as.
-		WithExec([]string{"sh", "-c", "apt-get update && apt-get install -y --no-install-recommends git libcap2-bin"}).
+		// -o Acquire::ForceIPv4=true: this build runs in a k8s pod on a
+		// dual-stack CNI, and apt tried only deb.debian.org's AAAA records
+		// (all four, all "Network is unreachable") with no IPv4 fallback --
+		// caught live. Forcing IPv4 sidesteps whatever IPv6 egress gap
+		// exists in this runner's network path.
+		WithExec([]string{"sh", "-c", "apt-get -o Acquire::ForceIPv4=true update && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends git libcap2-bin"}).
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
 		// golang:1.26 ships gcc, so cgo defaults on and go build produces a
