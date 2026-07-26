@@ -103,41 +103,27 @@ func (m *CorednsPluginsCi) LintPlugin(ctx context.Context, source *dagger.Direct
 func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 	return dag.Container().
 		From("golang:1.26").
-		// update+install combined in one step (not two, as a bare `apt-get
-		// update` was before): this Dagger engine is long-lived
-		// (kube-pod://dagger-engine-0, shared across CI runs), and a
-		// separate `apt-get update` step reuses its OLD cached layer
-		// whenever its own command text is unchanged, regardless of how
-		// stale the index inside it is -- caught live when adding
-		// libcap2-bin below to `install` alone didn't invalidate that
-		// cache, and "Unable to locate package libcap2-bin" turned out to
-		// mean a stale reused index, not a wrong package name. Combining
-		// them means any change to what's installed also forces a fresh
-		// update, every time.
+		// The actual root cause of three straight failed theories (stale
+		// cache, IPv6-only, "flaky mirror"): this container runs inside the
+		// shared Dagger engine, which k8s/dagger/networkpolicy.yaml in the
+		// consuming homelab repo deliberately fences to egress on port 443
+		// only (issue #27, "fence the privileged Dagger engine") plus a
+		// scoped hole to the internal Zot registry. golang:1.26's default
+		// apt sources point at http://deb.debian.org (port 80), which that
+		// policy actively refuses -- "Connection refused" on every mirror
+		// IP, every time, is a NetworkPolicy doing exactly its job, not
+		// flakiness. Rewriting the sources to https (still deb.debian.org,
+		// just the port the policy already allows) is the actual fix --
+		// classic and deb822-format sources files both handled since
+		// Debian's default format changed to deb822 in trixie.
 		//
 		// libcap2-bin: setcap, used after the build to grant cap_net_raw to
 		// the binary itself (see BuildCoredns) so radnr's raw ICMPv6 socket
 		// works for the nonroot user this image runs as.
-		// -o Acquire::ForceIPv4=true: this build runs in a k8s pod on a
-		// dual-stack CNI, and apt tried only deb.debian.org's AAAA records
-		// (all four, all "Network is unreachable") with no IPv4 fallback --
-		// caught live. Forcing IPv4 sidesteps that.
-		//
-		// Retry loop: ForceIPv4 alone still hit "Unable to connect to
-		// deb.debian.org:http" on the very next run -- transient mirror/
-		// network flakiness (deb.debian.org is an anycast CDN; a plain
-		// `apt-get install git` with no special flags has succeeded in
-		// this same environment on every prior run), not a fixed
-		// misconfiguration. Retrying is the correct response to that class
-		// of failure, not another one-shot theory.
 		WithExec([]string{"sh", "-c", `
-			for i in 1 2 3 4 5; do
-				apt-get -o Acquire::ForceIPv4=true update && \
-				apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends git libcap2-bin && exit 0
-				echo "apt attempt $i failed, retrying in 5s..." >&2
-				sleep 5
-			done
-			exit 1
+			sed -i 's|http://deb.debian.org|https://deb.debian.org|g' \
+				/etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources 2>/dev/null
+			apt-get update && apt-get install -y --no-install-recommends git libcap2-bin
 		`}).
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
