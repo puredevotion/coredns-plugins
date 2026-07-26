@@ -121,9 +121,24 @@ func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 		// -o Acquire::ForceIPv4=true: this build runs in a k8s pod on a
 		// dual-stack CNI, and apt tried only deb.debian.org's AAAA records
 		// (all four, all "Network is unreachable") with no IPv4 fallback --
-		// caught live. Forcing IPv4 sidesteps whatever IPv6 egress gap
-		// exists in this runner's network path.
-		WithExec([]string{"sh", "-c", "apt-get -o Acquire::ForceIPv4=true update && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends git libcap2-bin"}).
+		// caught live. Forcing IPv4 sidesteps that.
+		//
+		// Retry loop: ForceIPv4 alone still hit "Unable to connect to
+		// deb.debian.org:http" on the very next run -- transient mirror/
+		// network flakiness (deb.debian.org is an anycast CDN; a plain
+		// `apt-get install git` with no special flags has succeeded in
+		// this same environment on every prior run), not a fixed
+		// misconfiguration. Retrying is the correct response to that class
+		// of failure, not another one-shot theory.
+		WithExec([]string{"sh", "-c", `
+			for i in 1 2 3 4 5; do
+				apt-get -o Acquire::ForceIPv4=true update && \
+				apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends git libcap2-bin && exit 0
+				echo "apt attempt $i failed, retrying in 5s..." >&2
+				sleep 5
+			done
+			exit 1
+		`}).
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
 		// golang:1.26 ships gcc, so cgo defaults on and go build produces a
