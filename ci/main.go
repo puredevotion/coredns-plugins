@@ -66,15 +66,31 @@ var pluginCfgPatches = map[string]struct {
 	},
 }
 
-// goBase returns a Go build container with the plugin source mounted and module
-// cache wired to a persistent Dagger cache volume (shared across runs on the
-// engine, same convention as ci/dagger/main.go's goBase).
+// goBase returns a Go build container with the plugin source copied in and
+// module cache wired to a persistent Dagger cache volume (shared across runs
+// on the engine, same convention as ci/dagger/main.go's goBase).
+//
+// WithDirectory (copy), not WithMountedDirectory (bind mount), for `source`:
+// per BuildKit's own documented behavior (see dagger/dagger#6421), a mounted
+// directory only gets content-hash cache validation when it is BOTH a
+// non-root mount AND read-only; a plain writable WithMountedDirectory (what
+// every call site here used before) skips that check entirely and can
+// legally reuse a cached downstream layer even when the mounted content
+// actually changed. WithDirectory copies the content into the container's
+// own filesystem layer instead, which is always content-addressed like any
+// other layer -- no such carve-out. This is the suspected mechanism behind
+// coredns-radnr's 539a57a incident (deployment.yaml's own history note): a
+// pod found live serving a cert for an SNI name absent from its Corefile,
+// root-caused at the time only as far as "stale/cached vendored-source
+// layer." BuildCoredns's vendored-plugin mount (below) is the highest-stakes
+// instance of this same pattern -- it's what actually ends up compiled into
+// the shipped binary.
 func (m *CorednsPluginsCi) goBase(source *dagger.Directory) *dagger.Container {
 	return dag.Container().
 		From("golang:1.26").
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
-		WithMountedDirectory("/src", source).
+		WithDirectory("/src", source).
 		WithWorkdir("/src")
 }
 
@@ -111,7 +127,7 @@ func (m *CorednsPluginsCi) LintPlugin(ctx context.Context, source *dagger.Direct
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
 		WithMountedCache("/root/.cache/golangci-lint", dag.CacheVolume("golangci-lint")).
-		WithMountedDirectory("/src", source).
+		WithDirectory("/src", source).
 		WithWorkdir("/src/" + pluginDir).
 		WithExec([]string{"golangci-lint", "run", "--timeout=5m", "./..."}).
 		Stdout(ctx)
@@ -134,7 +150,7 @@ func (m *CorednsPluginsCi) GitleaksScan(ctx context.Context, source *dagger.Dire
 
 	return dag.Container().
 		From(gitleaksImage).
-		WithMountedDirectory("/src", source).
+		WithDirectory("/src", source).
 		WithWorkdir("/src").
 		WithExec([]string{"gitleaks", "git", "--log-opts=" + base + "..HEAD", "--redact", "--no-banner", "."}).
 		Stdout(ctx)
@@ -147,7 +163,7 @@ func (m *CorednsPluginsCi) YamlLint(ctx context.Context, source *dagger.Director
 	return dag.Container().
 		From("alpine:3.21").
 		WithExec([]string{"apk", "add", "--no-cache", "yamllint"}).
-		WithMountedDirectory("/src", source).
+		WithDirectory("/src", source).
 		WithWorkdir("/src").
 		WithExec([]string{"yamllint", "-c", ".yamllint.yml", "-f", "parsable", ".github/workflows"}).
 		Stdout(ctx)
@@ -211,8 +227,8 @@ func (m *CorednsPluginsCi) OpengrepScan(ctx context.Context, source *dagger.Dire
 		WithEnvVariable("PYTHONUTF8", "1").
 		WithEnvVariable("LC_ALL", "C.UTF-8").
 		WithFile("/usr/local/bin/opengrep", bin, dagger.ContainerWithFileOpts{Permissions: 0o755}).
-		WithMountedDirectory("/rules", rules).
-		WithMountedDirectory("/src", source).
+		WithDirectory("/rules", rules).
+		WithDirectory("/src", source).
 		WithWorkdir("/src").
 		WithExec([]string{"opengrep", "scan", "-f", "/rules/go", "--error", "."}).
 		Stdout(ctx)
@@ -271,13 +287,18 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 			"https://github.com/coredns/coredns.git", "/coredns"}).
 		WithWorkdir("/coredns")
 
-	// Mount each known plugin's vendored source into the CoreDNS tree and
-	// patch plugin.cfg + go.mod to pull it in. Order doesn't matter across
-	// plugins (each patch only touches its own line), but every patch must
-	// land before `go generate`.
+	// Copy (not bind-mount) each known plugin's vendored source into the
+	// CoreDNS tree and patch plugin.cfg + go.mod to pull it in -- see
+	// goBase's doc comment for why this must be WithDirectory, not
+	// WithMountedDirectory: this is the exact layer whose content ends up
+	// compiled into the shipped binary, so it's the highest-stakes place in
+	// this file for BuildKit's mount-caching carve-out to silently serve
+	// stale plugin source. Order doesn't matter across plugins (each patch
+	// only touches its own line), but every patch must land before `go
+	// generate`.
 	for pluginDir, p := range pluginCfgPatches {
 		vendoredPath := fmt.Sprintf("/vendored/%s", pluginDir)
-		ctr = ctr.WithMountedDirectory(vendoredPath, source.Directory(pluginDir))
+		ctr = ctr.WithDirectory(vendoredPath, source.Directory(pluginDir))
 
 		switch {
 		case p.replaceStockLine != "":
