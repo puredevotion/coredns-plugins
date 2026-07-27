@@ -29,6 +29,7 @@ const reloadInterval = 30 * time.Second
 // polled in-process instead.
 type liveStore struct {
 	pairs   [][2]string
+	strict  bool
 	current atomic.Pointer[certStore]
 	digest  atomic.Pointer[[32]byte]
 	cancel  context.CancelFunc
@@ -36,8 +37,8 @@ type liveStore struct {
 
 // newLiveStore wraps an already-loaded certStore for polling; setup() still
 // fails loudly on the initial buildCertStore error before reaching this.
-func newLiveStore(pairs [][2]string, initial *certStore, initialDigest [32]byte) *liveStore {
-	l := &liveStore{pairs: pairs}
+func newLiveStore(pairs [][2]string, strict bool, initial *certStore, initialDigest [32]byte) *liveStore {
+	l := &liveStore{pairs: pairs, strict: strict}
 	l.current.Store(initial)
 	l.digest.Store(&initialDigest)
 	return l
@@ -93,7 +94,7 @@ func (l *liveStore) reloadOnce() {
 	if newDigest == *l.digest.Load() {
 		return
 	}
-	store, err := buildCertStore(l.pairs)
+	store, err := buildCertStore(l.pairs, l.strict)
 	if err != nil {
 		log.Warningf("cert reload skipped, keeping previous store: %v", err)
 		return

@@ -14,12 +14,12 @@ func TestReload_EndToEnd_RealTLSHandshake(t *testing.T) {
 	const sni = "dns.example.com"
 
 	certPath, keyPath := writeTestCert(t, "primary", sni)
-	store, err := buildCertStore([][2]string{{certPath, keyPath}})
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, store, digestPairs(pairs))
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
 	serverConf := &tls.Config{GetCertificate: live.GetCertificate}
 

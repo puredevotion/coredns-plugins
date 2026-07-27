@@ -59,12 +59,12 @@ func TestDigestPairs_MissingFileIsStableSentinel(t *testing.T) {
 func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
 
-	store, err := buildCertStore([][2]string{{certPath, keyPath}})
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, store, digestPairs(pairs))
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
 	before, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: "dns.example.com"})
 	if err != nil {
@@ -90,12 +90,12 @@ func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 // rebuild/swap — steady-state should be cheap and quiet.
 func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
-	store, err := buildCertStore([][2]string{{certPath, keyPath}})
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, store, digestPairs(pairs))
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
 	before := live.current.Load()
 	live.reloadOnce()
@@ -111,12 +111,12 @@ func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 // listener must keep serving the last-good cert, not lose it.
 func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
-	store, err := buildCertStore([][2]string{{certPath, keyPath}})
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, store, digestPairs(pairs))
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
 	before := live.current.Load()
 
@@ -143,12 +143,12 @@ func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 // produce; must not deadlock, panic, or leak the poll goroutine.
 func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
-	store, err := buildCertStore([][2]string{{certPath, keyPath}})
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, store, digestPairs(pairs))
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
 	if err := live.OnStartup(); err != nil {
 		t.Fatalf("OnStartup: %v", err)

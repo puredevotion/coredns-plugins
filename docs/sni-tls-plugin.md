@@ -74,6 +74,56 @@ overwrite) rather than one directive taking a list — keeps the Corefile
 diff-friendly when adding a third hostname later (one new line, not editing
 an existing line's argument list).
 
+## Verified-DDR caveat and the `strict` option
+
+By default, an SNI that matches no loaded cert (or no SNI at all) is served
+the *first-loaded* cert as a fallback — matching the stock `tls` plugin's
+SNI-agnostic single-cert behavior, so a single-cert deployment behaves
+exactly as it did before this plugin existed.
+
+That fallback becomes a real risk the moment an instance serves **more than
+one cert** and also serves RFC 9462 §4.2 *verified* DNS Designated Resolver
+(DDR) discovery for one of those names: verified discovery only holds if the
+cert returned for the DDR-advertised VIP carries that VIP's IP address as a
+SAN. A client that dials the right VIP but sends the wrong (or no) SNI — a
+bug, a stale cache, a misbehaving library, or someone probing the listener —
+would, under the default fallback, silently receive *some* cert. If that
+happens to be a cert without the expected IP-SAN, "verified" discovery
+completed against a cert that doesn't actually verify anything.
+
+This isn't hypothetical for this repo: `coredns-radnr`'s `539a57a` image
+rebuild was forced after this exact instance was found live serving a cert
+for an SNI name not present in its own Corefile at all (root-caused to a
+stale/cached vendored-source build layer, not a `sni_tls` logic bug — but the
+failure mode observed was precisely "wrong cert served, no error surfaced").
+
+`strict` closes this off. Set via a block-only `sni_tls` line (no cert/key
+args):
+
+```
+tls://.:853 {
+  sni_tls /etc/coredns/tls/primary.crt   /etc/coredns/tls/primary.key
+  sni_tls /etc/coredns/tls/secondary.crt /etc/coredns/tls/secondary.key
+  sni_tls {
+    strict
+  }
+  forward . 127.0.0.1:53
+  cache 30
+  errors
+}
+```
+
+With `strict` set, `GetCertificate` never falls back: an unmatched or absent
+SNI returns an error instead of a cert, which makes Go's TLS server abort the
+handshake. The client sees a failed connection, not a wrongly-verified one —
+fail closed instead of fail silent. Exact and wildcard SNI matches are
+unaffected; `strict` only removes the guess-on-miss path.
+
+**Rule of thumb for this repo:** any instance serving more than one cert AND
+any verified-DDR VIP must set `strict`. A single-cert instance has no reason
+to (there's only ever one cert to serve regardless of SNI, so fallback vs.
+strict makes no observable difference — but strict is harmless there too).
+
 ## Cert hot-reload (resolved)
 
 The open question below about `reload`-plugin piggybacking was checked
