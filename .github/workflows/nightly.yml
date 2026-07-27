@@ -1,0 +1,171 @@
+# Nightly re-scan: reruns the full gate against whatever's on main, even when
+# nobody has pushed. ci.yml's own weekly cron only catches drift adjacent to a
+# push; this catches a new CVE or Opengrep rule landing against plugin code
+# nobody has touched in weeks — the actual gap the DevSecOps review flagged.
+#
+# Separate grype DB cache from homelab's in-cluster one: this repo runs on
+# GH-hosted ubuntu-latest (so external fork PRs keep getting free CI), which
+# has no path to the internal cluster's NFS-cached DB. Same nightly cadence,
+# physically separate cache — the architecture call made for this upgrade.
+name: nightly
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [radnr, sni_tls]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+      - run: go test -race -covermode=atomic -coverprofile=cover.out ./...
+        working-directory: ${{ matrix.plugin }}
+
+  golangci-lint:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [radnr, sni_tls]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62.2
+          working-directory: ${{ matrix.plugin }}
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [radnr, sni_tls]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+      - run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+        working-directory: ${{ matrix.plugin }}
+
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - run: |
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+      - run: gitleaks git --log-opts="--all" --redact --no-banner .
+
+  opengrep:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          curl -sSfL -o /usr/local/bin/opengrep \
+            https://github.com/opengrep/opengrep/releases/download/v1.25.0/opengrep_manylinux_x86
+          chmod +x /usr/local/bin/opengrep
+          git clone --depth 1 https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+      - env:
+          PYTHONUTF8: "1"
+          LC_ALL: "C.UTF-8"
+        run: opengrep scan -f /tmp/opengrep-rules/go --error .
+
+  sbom-scan:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [radnr, sni_tls]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+
+      # Date-keyed so same-day PR runs (which also do a sbom-scan) hit this
+      # cache instead of each paying a cold `grype db update`; this nightly
+      # job is what actually refreshes it once per day via `grype db update`
+      # below, then re-saves the cache for the rest of the day to reuse.
+      - name: Compute date key
+        id: date
+        run: echo "today=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore/refresh grype DB cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/grype/db
+          key: grype-db-${{ steps.date.outputs.today }}
+          restore-keys: |
+            grype-db-
+
+      - name: Generate CycloneDX SBOM
+        working-directory: ${{ matrix.plugin }}
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0
+          "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json -output sbom.cdx.json
+
+      - name: Install grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin v0.116.0
+          grype db update
+
+      - run: grype "sbom:${{ matrix.plugin }}/sbom.cdx.json" --fail-on high
+
+  fuzz:
+    # Longer window than ci.yml's 60s push-time smoke — an actual campaign,
+    # not just a check that the target still builds and runs.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: sni_tls/go.mod
+          cache-dependency-path: sni_tls/go.sum
+      - name: Fuzz SNI lookup (900s)
+        working-directory: sni_tls
+        run: go test -run=NONE -fuzz=FuzzGetCertificate -fuzztime=900s ./...
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-fuzz-crashers
+          path: sni_tls/testdata/fuzz/
+
+  containerize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Dagger
+        run: curl -fsSL https://dagger.io/install.sh | DAGGER_VERSION=0.21.7 sh
+      - working-directory: ci
+        run: |
+          set -euo pipefail
+          dagger --silent call containerize \
+            --source=.. --coredns-version=1.14.6 \
+            export --path=../coredns-plugins.tar
+          tar -tf ../coredns-plugins.tar >/dev/null

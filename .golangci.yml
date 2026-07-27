@@ -1,0 +1,23 @@
+# golangci-lint config, shared shape across every Go repo in this ecosystem
+# (dafs's ci/ module, homelab's ci/dagger + experiments/ra-dnr) — one
+# consistent lint/SAST bar regardless of which repo is public.
+#
+# staticcheck, govet, and errcheck are already in golangci-lint's default
+# linter set; listed explicitly anyway so the four required linters are
+# visible here rather than implied by defaults that could silently drift.
+# gosec is the one that isn't on by default — it's what actually closes the
+# Go-SAST gap (hardcoded credentials, weak crypto, command injection via
+# unsanitized exec.Command args, etc.).
+run:
+  timeout: 5m
+
+linters:
+  disable-all: false
+  enable:
+    - govet
+    - staticcheck
+    - errcheck
+    - gosec
+
+issues:
+  exclude-use-default: false

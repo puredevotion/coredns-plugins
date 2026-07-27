@@ -129,3 +129,160 @@ jobs:
             echo "::error::not gofmt-clean:"; echo "$unformatted"; exit 1
           fi
           echo "gofmt clean"
+
+  golangci-lint:
+    # Upgraded from a bare `go vet` — see .golangci.yml (root) for the enabled
+    # linter set (govet, staticcheck, errcheck, gosec), kept identical across
+    # every Go repo in this ecosystem. Mirrors ci/main.go's LintPlugin.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [radnr, sni_tls]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62.2
+          working-directory: ${{ matrix.plugin }}
+
+  gitleaks:
+    # This repo had no secret scanning at all before this. Mirrors ci/main.go's
+    # GitleaksScan: `base..HEAD` on a PR, full history on push/schedule — same
+    # convention as dafs's own gitleaks job. fetch-depth: 0 because the log
+    # range needs real history, not the default shallow clone.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install gitleaks
+        run: |
+          curl -sSfL -o /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          sudo install /tmp/gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+
+      - name: Scan for secrets
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            range="${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
+          else
+            range="--all"
+          fi
+          gitleaks git --log-opts="$range" --redact --no-banner .
+
+  yaml-lint:
+    # Mirrors ci/main.go's YamlLint. Repo root's .yamllint.yml relaxes
+    # line-length/document-start, both of which flag normal GH Actions YAML.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install yamllint
+        run: pip install --no-cache-dir yamllint==1.35.1
+      - name: yamllint
+        run: yamllint -c .yamllint.yml -f parsable .github/workflows
+
+  sbom-scan:
+    # This repo generated no SBOM at all before this — only homelab's separate
+    # deploy-side pipeline did (syft against the built container, not tied to
+    # source). `mod` rather than `app`: these plugins are libraries with no
+    # `main` package of their own (see ci/main.go's Sbom doc comment).
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [radnr, sni_tls]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+
+      - name: Generate CycloneDX SBOM
+        working-directory: ${{ matrix.plugin }}
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.7.0
+          "$(go env GOPATH)/bin/cyclonedx-gomod" mod -json -output sbom.cdx.json
+
+      # Date-keyed cache shared with nightly.yml's own grype-db refresh: a
+      # same-day PR restores whatever nightly.yml last populated instead of
+      # every PR paying a cold `grype db update` (separate from homelab's
+      # in-cluster cache — this runs on GH-hosted ubuntu-latest, no path to
+      # that cluster).
+      - name: Compute date key
+        id: date
+        run: echo "today=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - name: Restore grype DB cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/grype/db
+          key: grype-db-${{ steps.date.outputs.today }}
+          restore-keys: |
+            grype-db-
+
+      - name: Install grype
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
+            | sh -s -- -b /usr/local/bin v0.116.0
+          grype version
+
+      - name: Scan the generated SBOM for known vulnerabilities
+        run: grype "sbom:${{ matrix.plugin }}/sbom.cdx.json" --fail-on high
+
+  opengrep:
+    # Mirrors ci/main.go's OpengrepScan and homelab's ci/dagger module: broad
+    # static-analysis coverage (injection, unsafe deserialization, hardcoded
+    # crypto) beyond golangci-lint's gosec linter. Same Opengrep version and
+    # rule source across the ecosystem.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install opengrep
+        run: |
+          curl -sSfL -o /usr/local/bin/opengrep \
+            https://github.com/opengrep/opengrep/releases/download/v1.25.0/opengrep_manylinux_x86
+          chmod +x /usr/local/bin/opengrep
+      - name: Clone opengrep-rules
+        run: git clone --depth 1 https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+      - name: Static analysis (Opengrep)
+        env:
+          PYTHONUTF8: "1"
+          LC_ALL: "C.UTF-8"
+        run: opengrep scan -f /tmp/opengrep-rules/go --error .
+
+  containerize:
+    # Wires BuildCoredns/Containerize (ci/main.go) into THIS repo's own
+    # merge-gate CI. Before this, those functions only ran from homelab's
+    # separate deploy pipeline, triggered only when someone bumped the
+    # flake.lock pin — so a broken build (the exact CGO/static-link-against-
+    # distroless class of bug ci/main.go's own comments describe as having
+    # happened once already, see Containerize's doc comment) could merge to
+    # main here completely undetected. This is the one job in this workflow
+    # that shells out to the Dagger CLI rather than reimplementing the check
+    # natively: BuildCoredns's clone+patch+go-generate logic is real,
+    # nontrivial, and already correct in ci/main.go — duplicating it here in
+    # raw bash would be a second, divergeable copy of the same logic, which is
+    # exactly what having it in Dagger is meant to avoid.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Dagger
+        run: curl -fsSL https://dagger.io/install.sh | DAGGER_VERSION=0.21.7 sh
+      - name: Build + containerize (sni_tls + radnr wired in)
+        working-directory: ci
+        run: |
+          set -euo pipefail
+          dagger --silent call containerize \
+            --source=.. --coredns-version=1.14.6 \
+            export --path=../coredns-plugins.tar
+          cd ..
+          ls -la coredns-plugins.tar
+          tar -tf coredns-plugins.tar >/dev/null
