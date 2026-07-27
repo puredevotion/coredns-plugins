@@ -20,6 +20,14 @@ type certStore struct {
 	fallback *tls.Certificate
 }
 
+// Content-only touch 2026-07-27: coredns-radnr's deployed image (built from
+// this package at commit efb186f0a407) was observed live serving a cert for
+// an SNI name that isn't configured in its own Corefile at all -- behavior
+// this file's logic cannot produce given a single configured cert/key pair.
+// Forcing a fresh build (this comment changes the source content hash) to
+// rule out a stale/cached vendored copy in the homelab CI pipeline as the
+// cause before investigating further.
+
 // GetCertificate implements the tls.Config.GetCertificate callback: look up the
 // client's requested SNI, then its RFC 6125 §6.4.3 single-level wildcard form
 // (dns.sevenwoods.nl -> *.sevenwoods.nl) so a wildcard cert's SAN actually
