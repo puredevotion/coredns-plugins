@@ -185,6 +185,14 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 	// schedule one.
 	ctr = ctr.
 		WithExec([]string{"go", "generate"}).
+		// Force these past their CoreDNS-1.14.6-pinned versions explicitly:
+		// grype found real High CVEs in the built binary (GO-2026-5970 /
+		// x/text, GHSA-hrxh-6v49-42gf / grpc) even though the radnr/sni_tls
+		// go.mod files here already require newer ones — `go mod tidy`
+		// alone wasn't reliably picking the higher version across the
+		// merged CoreDNS+plugin module graph, so pin the floor directly
+		// rather than depend on MVS resolving it the way we expect.
+		WithExec([]string{"go", "get", "golang.org/x/text@v0.39.0", "google.golang.org/grpc@v1.82.1"}).
 		WithExec([]string{"go", "mod", "tidy"}).
 		WithExec([]string{"go", "build", "-o", "/coredns-out/coredns", "."}).
 		// radnr needs a raw ICMPv6 socket (CAP_NET_RAW) to send Router
