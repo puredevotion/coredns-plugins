@@ -29,6 +29,25 @@ type EncryptedDNS struct {
 	SvcParams       []byte // pre-encoded RFC 9460 SvcParams (see pkg/svcparams)
 }
 
+// checkedUint16 converts n to uint16, erroring instead of silently truncating
+// if it doesn't fit — every length prefix in the RFC 9463 wire format is a
+// 16-bit field.
+func checkedUint16(n int, what string) (uint16, error) {
+	if n < 0 || n > 0xffff {
+		return 0, fmt.Errorf("dnr: %s length %d exceeds uint16 range", what, n)
+	}
+	return uint16(n), nil
+}
+
+// checkedByteMax converts n to a byte, erroring instead of silently
+// truncating if it exceeds max (which itself must fit in a byte).
+func checkedByteMax(n, max int, what string) (byte, error) {
+	if n < 0 || n > max {
+		return 0, fmt.Errorf("dnr: %s exceeds %d octets", what, max)
+	}
+	return byte(n), nil //nolint:gosec // G115: bounds-checked immediately above; this is the checked conversion itself, not a suppressed truncation.
+}
+
 // Marshal encodes the option to its RA wire form, zero-padded to a multiple of
 // 8 octets. It returns an error if the option is invalid (empty/oversized ADN,
 // non-IPv6 address, or oversized fields).
@@ -37,8 +56,9 @@ func (o EncryptedDNS) Marshal() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(adn) > 0xffff {
-		return nil, fmt.Errorf("dnr: ADN too long")
+	adnLen, err := checkedUint16(len(adn), "ADN")
+	if err != nil {
+		return nil, err
 	}
 
 	var addrBytes []byte
@@ -49,22 +69,24 @@ func (o EncryptedDNS) Marshal() ([]byte, error) {
 		b := a.As16()
 		addrBytes = append(addrBytes, b[:]...)
 	}
-	if len(addrBytes) > 0xffff {
-		return nil, fmt.Errorf("dnr: too many addresses")
+	addrLen, err := checkedUint16(len(addrBytes), "address list")
+	if err != nil {
+		return nil, err
 	}
-	if len(o.SvcParams) > 0xffff {
-		return nil, fmt.Errorf("dnr: svcparams too long")
+	svcParamsLen, err := checkedUint16(len(o.SvcParams), "svcparams")
+	if err != nil {
+		return nil, err
 	}
 
 	// Body after the 2-octet (Type,Length) header.
 	var body []byte
 	body = binary.BigEndian.AppendUint16(body, o.ServicePriority)
 	body = binary.BigEndian.AppendUint32(body, o.Lifetime)
-	body = binary.BigEndian.AppendUint16(body, uint16(len(adn)))
+	body = binary.BigEndian.AppendUint16(body, adnLen)
 	body = append(body, adn...)
-	body = binary.BigEndian.AppendUint16(body, uint16(len(addrBytes)))
+	body = binary.BigEndian.AppendUint16(body, addrLen)
 	body = append(body, addrBytes...)
-	body = binary.BigEndian.AppendUint16(body, uint16(len(o.SvcParams)))
+	body = binary.BigEndian.AppendUint16(body, svcParamsLen)
 	body = append(body, o.SvcParams...)
 
 	total := 2 + len(body)
@@ -171,10 +193,11 @@ func encodeADN(name string) ([]byte, error) {
 		if len(label) == 0 {
 			return nil, fmt.Errorf("dnr: empty label in ADN %q", name)
 		}
-		if len(label) > 63 {
-			return nil, fmt.Errorf("dnr: label %q exceeds 63 octets", label)
+		labelLen, err := checkedByteMax(len(label), 63, fmt.Sprintf("label %q", label))
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, byte(len(label)))
+		out = append(out, labelLen)
 		out = append(out, label...)
 	}
 	out = append(out, 0x00) // root

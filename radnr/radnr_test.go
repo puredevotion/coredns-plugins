@@ -109,7 +109,7 @@ func TestOnStartup_DryRunUsesNopConn(t *testing.T) {
 	if err := r.OnStartup(); err != nil {
 		t.Fatalf("dry-run OnStartup: %v", err)
 	}
-	defer r.OnShutdown()
+	defer func() { _ = r.OnShutdown() }()
 	time.Sleep(20 * time.Millisecond) // let the advertiser loop run once
 }
 

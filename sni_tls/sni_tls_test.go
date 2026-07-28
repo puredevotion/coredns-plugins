@@ -132,6 +132,96 @@ func TestWildcardOf(t *testing.T) {
 	}
 }
 
+// --- certStore.GetCertificate: strict mode (no fallback) --------------------
+
+// TestGetCertificate_Strict_RejectsUnmatchedOrAbsentSNI is the behavior the
+// verified-DDR caveat in docs/sni-tls-plugin.md asks for: on an instance
+// serving more than one cert, strict mode must refuse to guess. An
+// unmatched or absent SNI must fail the handshake (return an error, no
+// cert), never silently hand out a cert lacking the connecting VIP's
+// required IP-SAN.
+func TestGetCertificate_Strict_RejectsUnmatchedOrAbsentSNI(t *testing.T) {
+	primary := &tls.Certificate{}
+	secondary := &tls.Certificate{}
+
+	store := &certStore{
+		byName: map[string]*tls.Certificate{
+			"dns.example.com":      primary,
+			"dns.internal.example": secondary,
+		},
+		fallback: primary,
+		strict:   true,
+	}
+
+	// Exact matches still work in strict mode -- strict only removes the
+	// fallback path, it doesn't change matching.
+	for _, sni := range []string{"dns.example.com", "dns.internal.example"} {
+		got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: sni})
+		if err != nil {
+			t.Errorf("ServerName=%q: unexpected error in strict mode for a configured name: %v", sni, err)
+		}
+		if got == nil {
+			t.Errorf("ServerName=%q: expected a cert, got nil", sni)
+		}
+	}
+
+	// Unmatched and absent SNI must hard-fail, not fall back.
+	for _, sni := range []string{"unknown.example.org", ""} {
+		got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: sni})
+		if err == nil {
+			t.Errorf("ServerName=%q: expected error in strict mode, got nil (cert=%v)", sni, got)
+		}
+		if got != nil {
+			t.Errorf("ServerName=%q: expected no cert in strict mode, got %v", sni, got)
+		}
+	}
+}
+
+// TestGetCertificate_NonStrict_StillFallsBack guards the default: strict is
+// opt-in, so existing single-cert deployments (and any multi-cert
+// deployment that hasn't turned it on) keep today's fallback behavior
+// unchanged.
+func TestGetCertificate_NonStrict_StillFallsBack(t *testing.T) {
+	primary := &tls.Certificate{}
+	store := &certStore{
+		byName:   map[string]*tls.Certificate{"dns.example.com": primary},
+		fallback: primary,
+		strict:   false,
+	}
+	got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: "unknown.example.org"})
+	if err != nil {
+		t.Fatalf("non-strict mode must not error on unmatched SNI: %v", err)
+	}
+	if got != primary {
+		t.Fatal("non-strict mode must still fall back to the configured fallback cert")
+	}
+}
+
+// --- buildCertStore: strict propagation --------------------------------------
+
+// TestBuildCertStore_Strict_PropagatesToGetCertificate confirms the strict
+// flag passed into buildCertStore actually reaches the resulting store's
+// GetCertificate behavior, not just a field set in isolation.
+func TestBuildCertStore_Strict_PropagatesToGetCertificate(t *testing.T) {
+	primaryCert, primaryKey := writeTestCert(t, "primary", "dns.example.com")
+
+	store, err := buildCertStore([][2]string{{primaryCert, primaryKey}}, true)
+	if err != nil {
+		t.Fatalf("buildCertStore: %v", err)
+	}
+	if !store.strict {
+		t.Fatal("buildCertStore(strict=true) must produce a store with strict set")
+	}
+	if _, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: "unknown.example.org"}); err == nil {
+		t.Fatal("expected strict store to reject unmatched SNI")
+	}
+	// The configured name must still resolve.
+	got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: "dns.example.com"})
+	if err != nil || got == nil {
+		t.Fatalf("expected configured SNI to still resolve in strict mode: got=%v err=%v", got, err)
+	}
+}
+
 // --- loadCert: real cert/key loading + SAN extraction -----------------------
 
 // TestLoadCert_ExtractsSANs exercises the actual tls.LoadX509KeyPair +
@@ -226,7 +316,7 @@ func TestBuildCertStore_EndToEnd(t *testing.T) {
 	store, err := buildCertStore([][2]string{
 		{primaryCert, primaryKey},
 		{secondaryCert, secondaryKey},
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
@@ -255,7 +345,7 @@ func TestBuildCertStore_EndToEnd(t *testing.T) {
 // Corefile listing certs that never materialize should fail loudly, not
 // silently produce a store with no fallback and no certs.
 func TestBuildCertStore_PropagatesLoadError(t *testing.T) {
-	_, err := buildCertStore([][2]string{{"/nonexistent/cert.pem", "/nonexistent/key.pem"}})
+	_, err := buildCertStore([][2]string{{"/nonexistent/cert.pem", "/nonexistent/key.pem"}}, false)
 	if err == nil || !strings.Contains(err.Error(), "sni_tls") {
 		t.Fatalf("expected wrapped sni_tls error, got %v", err)
 	}
@@ -274,7 +364,7 @@ func TestBuildCertStore_TolerantOfMissingSecondCert(t *testing.T) {
 	store, err := buildCertStore([][2]string{
 		{primaryCert, primaryKey},
 		{"/etc/coredns/tls/secondary.crt", "/etc/coredns/tls/secondary.key"}, // never copied by the gate
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore must tolerate one missing pair when another loads: %v", err)
 	}
@@ -300,7 +390,7 @@ func TestBuildCertStore_TolerantOfMissingFirstCert(t *testing.T) {
 	store, err := buildCertStore([][2]string{
 		{"/etc/coredns/tls/primary.crt", "/etc/coredns/tls/primary.key"}, // never copied
 		{secondaryCert, secondaryKey},
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore must tolerate the first pair missing when a later one loads: %v", err)
 	}
@@ -314,7 +404,7 @@ func TestBuildCertStore_TolerantOfMissingFirstCert(t *testing.T) {
 // empty slice reaching buildCertStore directly is a valid input with nothing
 // to load — not an error, just a store with no fallback.
 func TestBuildCertStore_Empty(t *testing.T) {
-	store, err := buildCertStore(nil)
+	store, err := buildCertStore(nil, false)
 	if err != nil {
 		t.Fatalf("buildCertStore(nil): %v", err)
 	}

@@ -7,8 +7,14 @@ package config
 import (
 	"fmt"
 	"net/netip"
+	"regexp"
 	"strings"
+	"unicode/utf8"
 )
+
+// invalidLabelChar matches the first character NOT in the LDH (letters,
+// digits, hyphen) set a DNS label may contain.
+var invalidLabelChar = regexp.MustCompile(`[^0-9A-Za-z-]`)
 
 // Config is the validated daemon configuration.
 type Config struct {
@@ -98,10 +104,9 @@ func validateADN(name string) error {
 		if label == "" {
 			return fmt.Errorf("config: empty label in ADN %q", name)
 		}
-		for _, r := range label {
-			if !(r == '-' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
-				return fmt.Errorf("config: invalid character %q in ADN %q", r, name)
-			}
+		if loc := invalidLabelChar.FindStringIndex(label); loc != nil {
+			r, _ := utf8.DecodeRuneInString(label[loc[0]:])
+			return fmt.Errorf("config: invalid character %q in ADN %q", r, name)
 		}
 	}
 	return nil

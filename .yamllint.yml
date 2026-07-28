@@ -1,0 +1,14 @@
+# Relaxed from yamllint's defaults for GitHub Actions workflow files:
+# line-length and document-start (`---`) both flag normal, valid workflow
+# YAML that every GH-authored example and this repo's existing ci.yml already
+# uses without either.
+extends: default
+
+rules:
+  line-length: disable
+  document-start: disable
+  truthy:
+    # `on:` in a workflow trigger is a YAML 1.1 boolean unless quoted — GitHub
+    # Actions' own schema expects the bare form, so allow it rather than
+    # forcing every workflow file to write `"on":`.
+    check-keys: false

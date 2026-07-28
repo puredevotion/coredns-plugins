@@ -41,6 +41,23 @@ its `plugin.cfg` ordering requirement stated explicitly — ordering is
 semantically significant and getting it wrong produces a plugin that never sees
 a query.
 
+## Versioning
+
+Releases are managed by [release-please](https://github.com/googleapis/release-please),
+which reads Conventional Commits (already this repo's style — `feat(...)`,
+`fix(...)`, `chore(...)`) to maintain a standing "release" PR. Merging it tags
+`vX.Y.Z`, cuts a GitHub Release, and updates `CHANGELOG.md`. Commit prefixes
+matter for this: `fix:`/`fix(scope):` bumps patch, `feat:`/`feat(scope):`
+bumps minor, and a `BREAKING CHANGE:` footer (or `!` after the type) bumps
+major. A commit whose message doesn't follow this format is simply invisible
+to release-please — it still merges, it just won't appear in the next
+release's changelog entry.
+
+Consumers (e.g. homelab's `flake.lock` pin) still pin by commit SHA, not by
+tag — a real `vX.Y.Z` gives them something meaningful to check the changelog
+against before advancing that pin, even though the pin mechanism itself
+hasn't changed.
+
 ## Licence
 
 Contributions are under [MIT](LICENSE). By opening a PR you agree your work can

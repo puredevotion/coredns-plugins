@@ -1,0 +1,79 @@
+# Release-please: on every push to main, maintains a "chore(main): release
+# X.Y.Z" PR aggregating Conventional Commits (this repo's commit style
+# already, see git log) since the last release. Merging that PR tags the repo
+# (vX.Y.Z), cuts a GitHub Release, and updates CHANGELOG.md.
+#
+# Why this exists: homelab's consuming CI (ci-coredns-plugins.yml) pins this
+# repo by raw commit SHA in flake.lock, with no version of its own to point
+# at and no signal when a real fix has landed here. That gap is what forced
+# a "content-only rebuild" workaround once already (deployment.yaml's history
+# note on image 539a57a) — advancing flake.lock's SHA was the only way to
+# get a fresh image pushed at all, even when the actual fix was a no-op diff.
+# A real vX.Y.Z per merge closes that propagation gap for real: on a release,
+# this notifies homelab via repository_dispatch, and a workflow there
+# (coredns-plugins-bump.yml) opens a PR bumping flake.lock's pin to the new
+# rev automatically — no more waiting for someone to remember to bump it, and
+# no more forcing a content-identical commit just to get a fresh image built.
+name: release-please
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Mints a short-lived (~1h) installation token via homelab's existing
+      # `homelab-arc` GitHub App (see docs/homelab-dispatch-app.md — reused
+      # rather than a new App: already installed on puredevotion/homelab and
+      # nowhere else, which is exactly the scope this needs too; just needs
+      # Contents: Read and write added alongside its existing ARC-runner
+      # permissions, and a second private key generated for this use so
+      # nothing here ever touches the key ARC itself depends on). No
+      # standing credential in this repo either way — CLIENT_ID is the App's
+      # public client ID (not sensitive, a repo Variable), PRIVATE_KEY is the
+      # actual secret. `owner`/`repositories` below scope the minted token to
+      # puredevotion/homelab specifically — this job's own repo (coredns-
+      # plugins) is not it, so those inputs are required, not optional.
+      - name: mint homelab-scoped installation token
+        # Guarded on the App actually being configured, not just on
+        # release_created: create-github-app-token hard-fails on an
+        # empty/missing client-id or private-key rather than producing an
+        # empty token, so this must not even attempt to run before the App
+        # exists -- that would turn "App not set up yet" into a broken
+        # release-please run instead of the graceful skip below.
+        if: ${{ steps.release.outputs.release_created && vars.HOMELAB_DISPATCH_APP_CLIENT_ID }}
+        id: homelab-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.HOMELAB_DISPATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.HOMELAB_DISPATCH_APP_PRIVATE_KEY }}
+          owner: puredevotion
+          repositories: homelab
+
+      - name: notify homelab of new release
+        if: ${{ steps.release.outputs.release_created }}
+        env:
+          GH_TOKEN: ${{ steps.homelab-token.outputs.token }}
+          REV: ${{ steps.release.outputs.sha }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "::warning::homelab-dispatch-bot App not configured (HOMELAB_DISPATCH_APP_CLIENT_ID/HOMELAB_DISPATCH_APP_PRIVATE_KEY) — skipping homelab notification. Release ${TAG} (${REV}) still needs a manual flake.lock bump."
+            exit 0
+          fi
+          gh api repos/puredevotion/homelab/dispatches \
+            -f event_type=coredns-plugins-release \
+            -F "client_payload[sha]=${REV}" \
+            -F "client_payload[tag]=${TAG}"

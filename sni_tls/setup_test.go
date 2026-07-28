@@ -99,6 +99,73 @@ func TestSetup_WiresTLSConfig(t *testing.T) {
 	}
 }
 
+// TestSetup_StrictBlock covers the `sni_tls { strict }` option line: it must
+// parse alongside ordinary `sni_tls <cert> <key>` lines (in either order),
+// reject unknown option tokens, and reject a bare block with nothing in it
+// the same way a bare `sni_tls` with no args already does.
+func TestSetup_StrictBlock(t *testing.T) {
+	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+
+	tests := []struct {
+		name      string
+		input     string
+		shouldErr bool
+	}{
+		{
+			"strict after cert lines",
+			fmt.Sprintf("sni_tls %s %s\nsni_tls {\n  strict\n}", certPath, keyPath),
+			false,
+		},
+		{
+			"strict before cert lines",
+			fmt.Sprintf("sni_tls {\n  strict\n}\nsni_tls %s %s", certPath, keyPath),
+			false,
+		},
+		{
+			"unknown option",
+			fmt.Sprintf("sni_tls %s %s\nsni_tls {\n  bogus\n}", certPath, keyPath),
+			true,
+		},
+		{
+			"strict takes no args",
+			fmt.Sprintf("sni_tls %s %s\nsni_tls {\n  strict extra\n}", certPath, keyPath),
+			true,
+		},
+	}
+
+	for _, tc := range tests {
+		c := caddy.NewTestController("dns", tc.input)
+		err := setup(c)
+		if tc.shouldErr && err == nil {
+			t.Errorf("%s: expected error, got none", tc.name)
+		}
+		if !tc.shouldErr && err != nil {
+			t.Errorf("%s: expected no error, got %v", tc.name, err)
+		}
+	}
+}
+
+// TestSetup_StrictBlock_RejectsUnmatchedSNI confirms the parsed `strict`
+// option actually reaches the installed TLSConfig's GetCertificate, end to
+// end from Corefile text -- not just that setup() accepts the syntax.
+func TestSetup_StrictBlock_RejectsUnmatchedSNI(t *testing.T) {
+	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	input := fmt.Sprintf("sni_tls %s %s\nsni_tls {\n  strict\n}", certPath, keyPath)
+	c := caddy.NewTestController("dns", input)
+	if err := setup(c); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+
+	tlsConfig := dnsserver.GetConfig(c).TLSConfig
+	if _, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: "unmatched.example.org"}); err == nil {
+		t.Fatal("strict mode: expected unmatched SNI to be rejected, got a cert with no error")
+	}
+	got, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: "dns.example.com"})
+	if err != nil || got == nil {
+		t.Fatalf("strict mode: configured SNI must still resolve: got=%v err=%v", got, err)
+	}
+}
+
 // TestSetup_RejectsDoubleTLSConfig mirrors the stock tls plugin's guard
 // (plugin/tls's parseTLS: "TLS already configured for this server instance")
 // — sni_tls must refuse to silently overwrite an existing TLSConfig set by an

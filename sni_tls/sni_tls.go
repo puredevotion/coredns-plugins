@@ -11,22 +11,22 @@ import (
 
 // certStore holds the loaded cert/key pairs keyed by SAN hostname (lowercased),
 // plus the fallback (first-loaded) cert for unmatched/absent SNI. See
-// ../docs/sni-tls-plugin.md for the verified-DDR caveat on this fallback: it must
-// never be used on the coredns-lan-ddr (.244) instance with more than one cert
-// loaded, since an unmatched-SNI client could get served a cert without the
-// required IP-SAN, silently defeating RFC 9462 §4.2 verified discovery.
+// ../docs/sni-tls-plugin.md for the verified-DDR caveat on this fallback: with
+// more than one cert loaded, an unmatched-SNI client could get served a cert
+// without the required IP-SAN, silently defeating RFC 9462 §4.2 verified
+// discovery. Set strict to refuse the fallback entirely on such an instance —
+// see the `strict` Corefile option in setup.go.
 type certStore struct {
 	byName   map[string]*tls.Certificate
 	fallback *tls.Certificate
+	strict   bool
 }
 
-// Content-only touch 2026-07-27: coredns-radnr's deployed image (built from
-// this package at commit efb186f0a407) was observed live serving a cert for
-// an SNI name that isn't configured in its own Corefile at all -- behavior
-// this file's logic cannot produce given a single configured cert/key pair.
-// Forcing a fresh build (this comment changes the source content hash) to
-// rule out a stale/cached vendored copy in the homelab CI pipeline as the
-// cause before investigating further.
+// errNoMatchingCert is returned by GetCertificate in strict mode when no exact
+// or wildcard SNI match is found. Returning an error here (rather than a cert)
+// makes the Go TLS server abort the handshake instead of completing one with
+// an unintended cert — a closed failure, not a silent one.
+var errNoMatchingCert = errors.New("sni_tls: no certificate configured for this SNI (strict mode, no fallback)")
 
 // GetCertificate implements the tls.Config.GetCertificate callback: look up the
 // client's requested SNI, then its RFC 6125 §6.4.3 single-level wildcard form
@@ -36,7 +36,8 @@ type certStore struct {
 // never matched any real SNI at all (the map key was the literal string
 // "*.sevenwoods.nl", which no real ClientHello ever sends), falling through
 // to the fallback cert on every connection instead. Falls back to the
-// first-loaded cert if neither matches.
+// first-loaded cert if neither matches, unless strict is set, in which case
+// an unmatched or absent SNI fails the handshake instead of guessing.
 func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if hello.ServerName != "" {
 		name := strings.ToLower(hello.ServerName)
@@ -48,6 +49,9 @@ func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 				return cert, nil
 			}
 		}
+	}
+	if s.strict {
+		return nil, errNoMatchingCert
 	}
 	return s.fallback, nil
 }
@@ -99,7 +103,8 @@ func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
 // keyed by every loaded cert's SAN DNS names. The first SUCCESSFULLY LOADED
 // pair's cert becomes the fallback for absent/unmatched SNI, matching the
 // stock tls plugin's SNI-agnostic single-cert behavior for those cases (see
-// design doc step 2).
+// design doc step 2) — unless strict is set, in which case no fallback is
+// installed at all and unmatched/absent SNI hard-fails in GetCertificate.
 //
 // A pair whose cert or key FILE IS ABSENT is skipped, not fatal — this is the
 // "partial cert set is fine, whatever loaded loads" tolerance design doc step
@@ -113,8 +118,8 @@ func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
 // materialize is worth failing loudly on, unlike a genuinely empty
 // configuration (setup() already rejects zero pairs before calling this; an
 // empty slice here is a valid input with no fallback, not an error).
-func buildCertStore(pairs [][2]string) (*certStore, error) {
-	store := &certStore{byName: make(map[string]*tls.Certificate)}
+func buildCertStore(pairs [][2]string, strict bool) (*certStore, error) {
+	store := &certStore{byName: make(map[string]*tls.Certificate), strict: strict}
 	var loadErrs []error
 	for _, p := range pairs {
 		cert, names, err := loadCert(p[0], p[1])

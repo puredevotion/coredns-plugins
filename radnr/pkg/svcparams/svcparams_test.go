@@ -39,7 +39,7 @@ func TestEncode_DohPath(t *testing.T) {
 	}
 	// key=7, len=16, value = "/dns-query{?dns}"
 	v := []byte("/dns-query{?dns}")
-	want := append([]byte{0x00, 0x07, 0x00, byte(len(v))}, v...)
+	want := append([]byte{0x00, 0x07, 0x00, 16}, v...)
 	if !bytes.Equal(got, want) {
 		t.Fatalf("dohpath: got=%x want=%x", got, want)
 	}
@@ -52,7 +52,7 @@ func TestEncode_KeysSortedAscending(t *testing.T) {
 		t.Fatalf("Encode: %v", err)
 	}
 	// keys appear in order 1,3,7
-	if !(got[0] == 0 && got[1] == 1) {
+	if got[0] != 0 || got[1] != 1 {
 		t.Fatalf("first key not 1 (alpn): %x", got[:2])
 	}
 	// find sequence — assert 1 before 3 before 7 by scanning keys

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "customManagers": [
+    {
+      "description": "golangci-lint image pinned as a named const in ci/main.go — not a file Renovate's built-in managers look inside.",
+      "customType": "regex",
+      "fileMatch": ["^ci/main\\.go$"],
+      "matchStrings": [
+        "golangciLintImage = \"(?<depName>golangci/golangci-lint):(?<currentValue>v[^\"]+)\""
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "description": "gitleaks image, same pin dafs's own ci/main.go tracks — kept in lockstep across the ecosystem, so bump both repos together when Renovate opens either PR.",
+      "customType": "regex",
+      "fileMatch": ["^ci/main\\.go$"],
+      "matchStrings": [
+        "gitleaksImage = \"(?<depName>ghcr\\.io/gitleaks/gitleaks):(?<currentValue>v[^\"]+)\""
+      ],
+      "datasourceTemplate": "docker"
+    },
+    {
+      "description": "cyclonedx-gomod version used to generate the SBOM.",
+      "customType": "regex",
+      "fileMatch": ["^ci/main\\.go$"],
+      "matchStrings": [
+        "cyclonedxGomodVersion = \"(?<currentValue>v[^\"]+)\""
+      ],
+      "datasourceTemplate": "go",
+      "depNameTemplate": "github.com/CycloneDX/cyclonedx-gomod"
+    },
+    {
+      "description": "Opengrep release binary + rules ref.",
+      "customType": "regex",
+      "fileMatch": ["^ci/main\\.go$"],
+      "matchStrings": [
+        "opengrepVersion = \"(?<currentValue>v[^\"]+)\""
+      ],
+      "datasourceTemplate": "github-releases",
+      "depNameTemplate": "opengrep/opengrep"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "golang:1.26 in ci/main.go's goBase/buildBase should track this repo's go.mod, not bump ahead of it unattended — leave that one manual.",
+      "matchFileNames": ["ci/main.go"],
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["golang"],
+      "enabled": false
+    }
+  ]
+}

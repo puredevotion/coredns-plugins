@@ -12,7 +12,8 @@ func TestDigestPairs_StableWhenUnchanged(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
 	pairs := [][2]string{{certPath, keyPath}}
 
-	if digestPairs(pairs) != digestPairs(pairs) {
+	a, b := digestPairs(pairs), digestPairs(pairs)
+	if a != b {
 		t.Fatal("digest must be stable across calls when files are unchanged")
 	}
 }
@@ -24,18 +25,19 @@ func TestDigestPairs_ChangesOnRotation(t *testing.T) {
 	before := digestPairs(pairs)
 
 	rotatedCertPath, rotatedKeyPath := writeTestCert(t, "rotated", "dns.example.com")
+	//nolint:gosec // G304/G703: all four paths are t.TempDir() fixtures from writeTestCert, not external input.
 	certBytes, err := os.ReadFile(rotatedCertPath)
 	if err != nil {
 		t.Fatalf("read rotated cert: %v", err)
 	}
-	keyBytes, err := os.ReadFile(rotatedKeyPath)
+	keyBytes, err := os.ReadFile(rotatedKeyPath) //nolint:gosec // G304/G703: see above
 	if err != nil {
 		t.Fatalf("read rotated key: %v", err)
 	}
-	if err := os.WriteFile(certPath, certBytes, 0o600); err != nil {
+	if err := os.WriteFile(certPath, certBytes, 0o600); err != nil { //nolint:gosec // G304/G703: see above
 		t.Fatalf("overwrite cert: %v", err)
 	}
-	if err := os.WriteFile(keyPath, keyBytes, 0o600); err != nil {
+	if err := os.WriteFile(keyPath, keyBytes, 0o600); err != nil { //nolint:gosec // G304/G703: see above
 		t.Fatalf("overwrite key: %v", err)
 	}
 
@@ -46,7 +48,8 @@ func TestDigestPairs_ChangesOnRotation(t *testing.T) {
 
 func TestDigestPairs_MissingFileIsStableSentinel(t *testing.T) {
 	pairs := [][2]string{{"/nonexistent/cert.pem", "/nonexistent/key.pem"}}
-	if digestPairs(pairs) != digestPairs(pairs) {
+	a, b := digestPairs(pairs), digestPairs(pairs)
+	if a != b {
 		t.Fatal("missing-file digest must be stable, not vary per call")
 	}
 }
@@ -59,12 +62,12 @@ func TestDigestPairs_MissingFileIsStableSentinel(t *testing.T) {
 func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
 
-	store, err := buildCertStore([][2]string{{certPath, keyPath}})
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, store, digestPairs(pairs))
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
 	before, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: "dns.example.com"})
 	if err != nil {
@@ -90,12 +93,12 @@ func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 // rebuild/swap — steady-state should be cheap and quiet.
 func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
-	store, err := buildCertStore([][2]string{{certPath, keyPath}})
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, store, digestPairs(pairs))
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
 	before := live.current.Load()
 	live.reloadOnce()
@@ -111,12 +114,12 @@ func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 // listener must keep serving the last-good cert, not lose it.
 func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
-	store, err := buildCertStore([][2]string{{certPath, keyPath}})
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, store, digestPairs(pairs))
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
 	before := live.current.Load()
 
@@ -143,12 +146,12 @@ func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 // produce; must not deadlock, panic, or leak the poll goroutine.
 func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
-	store, err := buildCertStore([][2]string{{certPath, keyPath}})
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, store, digestPairs(pairs))
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
 	if err := live.OnStartup(); err != nil {
 		t.Fatalf("OnStartup: %v", err)
@@ -164,13 +167,16 @@ func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 	}
 }
 
+// overwrite copies srcContentFrom's bytes onto dst. Test-only helper: both
+// paths are always t.TempDir() fixtures from the caller, never external
+// input.
 func overwrite(t *testing.T, dst, srcContentFrom string) {
 	t.Helper()
-	b, err := os.ReadFile(srcContentFrom)
+	b, err := os.ReadFile(srcContentFrom) //nolint:gosec // G304/G703: see doc comment
 	if err != nil {
 		t.Fatalf("read %s: %v", srcContentFrom, err)
 	}
-	if err := os.WriteFile(dst, b, 0o600); err != nil {
+	if err := os.WriteFile(dst, b, 0o600); err != nil { //nolint:gosec // G304/G703: see doc comment
 		t.Fatalf("write %s: %v", dst, err)
 	}
 }

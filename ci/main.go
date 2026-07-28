@@ -6,8 +6,12 @@
 //
 // Usage (local or in CI, same commands, run from ci/):
 //
-//	dagger call test-plugin   --source=.. --plugin-dir=sni_tls
-//	dagger call lint-plugin   --source=.. --plugin-dir=sni_tls
+//	dagger call test-plugin    --source=.. --plugin-dir=sni_tls
+//	dagger call lint-plugin    --source=.. --plugin-dir=sni_tls
+//	dagger call gitleaks-scan  --source=.. --base=main
+//	dagger call yaml-lint      --source=..
+//	dagger call sbom-scan      --source=.. --plugin-dir=sni_tls
+//	dagger call opengrep-scan  --source=..
 //	dagger call build-coredns --source=.. --coredns-version=1.14.6
 //	dagger call containerize  --source=.. --coredns-version=1.14.6 export --path=./coredns.tar
 //
@@ -62,15 +66,31 @@ var pluginCfgPatches = map[string]struct {
 	},
 }
 
-// goBase returns a Go build container with the plugin source mounted and module
-// cache wired to a persistent Dagger cache volume (shared across runs on the
-// engine, same convention as ci/dagger/main.go's goBase).
+// goBase returns a Go build container with the plugin source copied in and
+// module cache wired to a persistent Dagger cache volume (shared across runs
+// on the engine, same convention as ci/dagger/main.go's goBase).
+//
+// WithDirectory (copy), not WithMountedDirectory (bind mount), for `source`:
+// per BuildKit's own documented behavior (see dagger/dagger#6421), a mounted
+// directory only gets content-hash cache validation when it is BOTH a
+// non-root mount AND read-only; a plain writable WithMountedDirectory (what
+// every call site here used before) skips that check entirely and can
+// legally reuse a cached downstream layer even when the mounted content
+// actually changed. WithDirectory copies the content into the container's
+// own filesystem layer instead, which is always content-addressed like any
+// other layer -- no such carve-out. This is the suspected mechanism behind
+// coredns-radnr's 539a57a incident (deployment.yaml's own history note): a
+// pod found live serving a cert for an SNI name absent from its Corefile,
+// root-caused at the time only as far as "stale/cached vendored-source
+// layer." BuildCoredns's vendored-plugin mount (below) is the highest-stakes
+// instance of this same pattern -- it's what actually ends up compiled into
+// the shipped binary.
 func (m *CorednsPluginsCi) goBase(source *dagger.Directory) *dagger.Container {
 	return dag.Container().
 		From("golang:1.26").
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
-		WithMountedDirectory("/src", source).
+		WithDirectory("/src", source).
 		WithWorkdir("/src")
 }
 
@@ -88,12 +108,129 @@ func (m *CorednsPluginsCi) TestPlugin(ctx context.Context, source *dagger.Direct
 		Stdout(ctx)
 }
 
-// LintPlugin runs go vet on the plugin (baseline lint, matches ci/dagger's Lint).
-// See TestPlugin's doc comment for the source-root path convention.
+// golangciLintImage is pinned like every other tool image in this ecosystem —
+// a floating tag would mean a lint pass silently starts catching (or missing)
+// different things between runs. Same linter set (.golangci.yml: govet,
+// staticcheck, errcheck, gosec) as dafs's ci/ module and homelab's
+// ci/dagger + experiments/ra-dnr — one consistent Go lint/SAST bar across
+// every Go repo in this ecosystem, public or not.
+const golangciLintImage = "golangci/golangci-lint:v1.62.2-alpine"
+
+// LintPlugin runs golangci-lint on the plugin. Upgraded from a bare `go vet`
+// (which only ever caught the small, non-security subset go vet's analyzers
+// cover) — golangci-lint's config lives at the repo root and is picked up
+// automatically since golangci-lint walks up from the working directory to
+// find it. See TestPlugin's doc comment for the source-root path convention.
 func (m *CorednsPluginsCi) LintPlugin(ctx context.Context, source *dagger.Directory, pluginDir string) (string, error) {
-	return m.goBase(source).
+	return dag.Container().
+		From(golangciLintImage).
+		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
+		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
+		WithMountedCache("/root/.cache/golangci-lint", dag.CacheVolume("golangci-lint")).
+		WithDirectory("/src", source).
 		WithWorkdir("/src/" + pluginDir).
-		WithExec([]string{"go", "vet", "./..."}).
+		WithExec([]string{"golangci-lint", "run", "--timeout=5m", "./..."}).
+		Stdout(ctx)
+}
+
+// gitleaksImage pinned to the same release dafs's own gitleaks job uses —
+// kept in lockstep across the ecosystem for the same reason every other
+// pinned tool here is: a version drift between repos is a real disagreement
+// worth noticing, not something that should happen silently.
+const gitleaksImage = "ghcr.io/gitleaks/gitleaks:v8.30.1"
+
+// GitleaksScan scans `base..HEAD` for hardcoded secrets. This repo had no
+// secret scanning at all before this — `base` defaults to "main" if empty,
+// matching the convention dafs/homelab both use for the same reason: a local
+// `dagger call` has no PR context to read a base ref from.
+func (m *CorednsPluginsCi) GitleaksScan(ctx context.Context, source *dagger.Directory, base string) (string, error) {
+	if base == "" {
+		base = "main"
+	}
+
+	return dag.Container().
+		From(gitleaksImage).
+		WithDirectory("/src", source).
+		WithWorkdir("/src").
+		WithExec([]string{"gitleaks", "git", "--log-opts=" + base + "..HEAD", "--redact", "--no-banner", "."}).
+		Stdout(ctx)
+}
+
+// YamlLint asserts every workflow file is yamllint-clean, using the repo
+// root's .yamllint.yml (relaxed line-length/document-start — see that file's
+// comments for why).
+func (m *CorednsPluginsCi) YamlLint(ctx context.Context, source *dagger.Directory) (string, error) {
+	return dag.Container().
+		From("alpine:3.21").
+		WithExec([]string{"apk", "add", "--no-cache", "yamllint"}).
+		WithDirectory("/src", source).
+		WithWorkdir("/src").
+		WithExec([]string{"yamllint", "-c", ".yamllint.yml", "-f", "parsable", ".github/workflows"}).
+		Stdout(ctx)
+}
+
+// cyclonedxGomodVersion is pinned for the same reproducibility reason as
+// every other tool version in this file.
+const cyclonedxGomodVersion = "v1.7.0"
+
+// Sbom generates a CycloneDX SBOM for `pluginDir`'s Go module graph.
+//
+// `mod` rather than `app` or `bin`: these plugins are libraries wired into a
+// CoreDNS binary elsewhere (BuildCoredns), not built as standalone binaries
+// in their own right, so there is no `main` package here for cyclonedx-gomod
+// to build against — `mod` reads go.mod/go.sum directly, which is the
+// property this SBOM actually needs to describe (mirrors dafs's Sbom, which
+// is likewise a manifest-graph SBOM via cargo-cyclonedx, not a binary scan).
+func (m *CorednsPluginsCi) Sbom(ctx context.Context, source *dagger.Directory, pluginDir string) *dagger.File {
+	container := m.goBase(source).
+		WithWorkdir("/src/" + pluginDir).
+		WithExec([]string{"go", "install",
+			"github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@" + cyclonedxGomodVersion}).
+		WithExec([]string{"sh", "-c",
+			`$(go env GOPATH)/bin/cyclonedx-gomod mod -json -output /tmp/sbom.cdx.json`})
+	return container.File("/tmp/sbom.cdx.json")
+}
+
+// SbomScan generates the CycloneDX SBOM (Sbom) for `pluginDir` and scans it
+// with grype, matching dafs's SbomScan and the grype version homelab's own
+// deploy-side pipeline already pins.
+func (m *CorednsPluginsCi) SbomScan(ctx context.Context, source *dagger.Directory, pluginDir string) (string, error) {
+	sbom := m.Sbom(ctx, source, pluginDir)
+
+	return dag.Container().
+		From("alpine:3.21").
+		WithExec([]string{"apk", "add", "--no-cache", "curl", "bash", "ca-certificates"}).
+		WithExec([]string{"sh", "-c",
+			"curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh | sh -s -- -b /usr/local/bin v0.116.0"}).
+		WithFile("/sbom.cdx.json", sbom).
+		WithExec([]string{"grype", "sbom:/sbom.cdx.json", "--fail-on", "high"}).
+		Stdout(ctx)
+}
+
+// opengrepVersion pins the same Opengrep release homelab's ci/dagger module
+// already uses — one version across the ecosystem, same reasoning as every
+// other pinned tool here.
+const opengrepVersion = "v1.25.0"
+
+// OpengrepScan runs Opengrep (the OSS fork of Semgrep) against this repo's Go
+// source — broad static-analysis coverage beyond golangci-lint's gosec linter
+// (injection, unsafe deserialization, hardcoded crypto, etc.), same tool and
+// invocation shape as homelab's own OpengrepScan.
+func (m *CorednsPluginsCi) OpengrepScan(ctx context.Context, source *dagger.Directory) (string, error) {
+	bin := dag.HTTP("https://github.com/opengrep/opengrep/releases/download/" + opengrepVersion + "/opengrep_manylinux_x86")
+	rules := dag.Git("https://github.com/opengrep/opengrep-rules.git").Branch("main").Tree()
+	return dag.Container().
+		From("debian:12-slim").
+		// debian-slim ships no locale → Python's read_text() falls back to
+		// ASCII and dies on UTF-8 bytes in the rule files. Force UTF-8 mode
+		// (same fix homelab's OpengrepScan needed for the same reason).
+		WithEnvVariable("PYTHONUTF8", "1").
+		WithEnvVariable("LC_ALL", "C.UTF-8").
+		WithFile("/usr/local/bin/opengrep", bin, dagger.ContainerWithFileOpts{Permissions: 0o755}).
+		WithDirectory("/rules", rules).
+		WithDirectory("/src", source).
+		WithWorkdir("/src").
+		WithExec([]string{"opengrep", "scan", "-f", "/rules/go", "--error", "."}).
 		Stdout(ctx)
 }
 
@@ -150,13 +287,18 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 			"https://github.com/coredns/coredns.git", "/coredns"}).
 		WithWorkdir("/coredns")
 
-	// Mount each known plugin's vendored source into the CoreDNS tree and
-	// patch plugin.cfg + go.mod to pull it in. Order doesn't matter across
-	// plugins (each patch only touches its own line), but every patch must
-	// land before `go generate`.
+	// Copy (not bind-mount) each known plugin's vendored source into the
+	// CoreDNS tree and patch plugin.cfg + go.mod to pull it in -- see
+	// goBase's doc comment for why this must be WithDirectory, not
+	// WithMountedDirectory: this is the exact layer whose content ends up
+	// compiled into the shipped binary, so it's the highest-stakes place in
+	// this file for BuildKit's mount-caching carve-out to silently serve
+	// stale plugin source. Order doesn't matter across plugins (each patch
+	// only touches its own line), but every patch must land before `go
+	// generate`.
 	for pluginDir, p := range pluginCfgPatches {
 		vendoredPath := fmt.Sprintf("/vendored/%s", pluginDir)
-		ctr = ctr.WithMountedDirectory(vendoredPath, source.Directory(pluginDir))
+		ctr = ctr.WithDirectory(vendoredPath, source.Directory(pluginDir))
 
 		switch {
 		case p.replaceStockLine != "":

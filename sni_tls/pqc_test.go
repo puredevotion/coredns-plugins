@@ -44,7 +44,7 @@ func TestSetup_HandshakeNegotiatesMLKEM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tls.Listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	serverDone := make(chan *ctls.ConnectionState, 1)
 	serverErr := make(chan error, 1)
@@ -54,7 +54,7 @@ func TestSetup_HandshakeNegotiatesMLKEM(t *testing.T) {
 			serverErr <- err
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		tlsConn := conn.(*ctls.Conn)
 		if err := tlsConn.Handshake(); err != nil {
 			serverErr <- err
@@ -80,7 +80,7 @@ func TestSetup_HandshakeNegotiatesMLKEM(t *testing.T) {
 		t.Fatalf("dial: %v", err)
 	}
 	clientConn := ctls.Client(rawConn, clientConfig)
-	defer clientConn.Close()
+	defer func() { _ = clientConn.Close() }()
 
 	if err := clientConn.Handshake(); err != nil {
 		t.Fatalf("client handshake: %v", err)
