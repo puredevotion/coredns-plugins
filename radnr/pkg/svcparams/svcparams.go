@@ -64,13 +64,37 @@ func Encode(p Params) ([]byte, error) {
 
 	var out []byte
 	for _, p := range params {
+		valLen, err := checkedUint16(len(p.val), fmt.Sprintf("svcparam key %d value", p.key))
+		if err != nil {
+			return nil, err
+		}
 		hdr := make([]byte, 4)
 		binary.BigEndian.PutUint16(hdr[0:2], p.key)
-		binary.BigEndian.PutUint16(hdr[2:4], uint16(len(p.val)))
+		binary.BigEndian.PutUint16(hdr[2:4], valLen)
 		out = append(out, hdr...)
 		out = append(out, p.val...)
 	}
 	return out, nil
+}
+
+// checkedUint16 converts n to uint16, erroring instead of silently
+// truncating if it doesn't fit — every SvcParam value length prefix (RFC
+// 9460 §2.2) is a 16-bit field.
+func checkedUint16(n int, what string) (uint16, error) {
+	if n < 0 || n > 0xffff {
+		return 0, fmt.Errorf("svcparams: %s length %d exceeds uint16 range", what, n)
+	}
+	return uint16(n), nil
+}
+
+// checkedByte converts n to a byte, erroring instead of silently truncating
+// if it exceeds 255 — RFC 9460 §7.1's ALPN ids are single-octet length
+// prefixed.
+func checkedByte(n int, what string) (byte, error) {
+	if n < 0 || n > 0xff {
+		return 0, fmt.Errorf("svcparams: %s too long (%d octets)", what, n)
+	}
+	return byte(n), nil
 }
 
 // encodeALPN encodes the alpn SvcParamValue: a sequence of length-prefixed
@@ -81,10 +105,11 @@ func encodeALPN(ids []string) ([]byte, error) {
 		if len(id) == 0 {
 			return nil, fmt.Errorf("svcparams: empty alpn id")
 		}
-		if len(id) > 0xff {
-			return nil, fmt.Errorf("svcparams: alpn id %q too long", id)
+		idLen, err := checkedByte(len(id), fmt.Sprintf("alpn id %q", id))
+		if err != nil {
+			return nil, err
 		}
-		out = append(out, byte(len(id)))
+		out = append(out, idLen)
 		out = append(out, id...)
 	}
 	return out, nil

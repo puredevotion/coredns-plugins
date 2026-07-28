@@ -112,7 +112,7 @@ func digestPairs(pairs [][2]string) [32]byte {
 	h := sha256.New()
 	for _, p := range pairs {
 		for _, path := range p {
-			b, err := os.ReadFile(path)
+			b, err := os.ReadFile(path) //nolint:gosec // G304: path is a Corefile-configured cert/key path (operator-trusted at startup), not runtime attacker input — same trust model as coredns's own tls plugin.
 			if err != nil {
 				h.Write([]byte("sni_tls:missing:" + path))
 				continue

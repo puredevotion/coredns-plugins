@@ -145,15 +145,19 @@ jobs:
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
-      - uses: golangci/golangci-lint-action@v6
+      - uses: golangci/golangci-lint-action@v9
         with:
-          # v1.62.2 was built against Go 1.23 -- refuses to load config once
-          # go.mod's toolchain moved to 1.26.5 ("Go language version used to
-          # build golangci-lint is lower than the targeted Go version").
-          # v1.64.8 is the newest v1-schema release; this repo's config is
-          # v1-format (no `version: "2"`), so staying on the 1.x line avoids
-          # a config rewrite for the v2 schema.
-          version: v1.64.8
+          # v1.62.2 (and the newest v1.x, v1.64.8) were both built against a
+          # Go version lower than go.mod's 1.26.5 toolchain ("Go language
+          # version used to build golangci-lint is lower than the targeted
+          # Go version") -- no v1.x release ever will build against it, so
+          # v2 isn't optional here. v2.12.2 is built with go1.26.2.
+          # golangci-lint-action v6/v7 predate proper v2-binary support;
+          # v9 is current. .golangci.yml migrated to the v2 schema
+          # (`golangci-lint migrate`) alongside this bump -- the two must
+          # move together, a v2 binary against a stale v1-format config (or
+          # vice versa) fails to load.
+          version: v2.12.2
           working-directory: ${{ matrix.plugin }}
 
   gitleaks:
@@ -281,14 +285,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Dagger
-        # install.sh drops the binary at ./bin/dagger (relative to cwd, i.e.
-        # the repo root) -- the next step's working-directory is `ci`, so
-        # without this it's just "dagger: command not found". Installing
-        # straight to /usr/local/bin (already on PATH, already writable by
-        # the runner user on GitHub-hosted images) sidesteps that instead of
-        # fixing up PATH for a directory that won't exist from `ci/`.
+        # dagger.io/install.sh currently 404s outright (dead redirect, not a
+        # bad version pin -- v0.21.7 is a real tag). Pulling the release
+        # tarball straight from GitHub instead: no dependency on a
+        # third-party redirect staying up, and it's the same artifact the
+        # install script would have fetched anyway.
         run: |
-          curl -fsSL https://dagger.io/install.sh | BIN_DIR=/usr/local/bin DAGGER_VERSION=0.21.7 sh
+          curl -fsSL -o /tmp/dagger.tar.gz \
+            https://github.com/dagger/dagger/releases/download/v0.21.7/dagger_v0.21.7_linux_amd64.tar.gz
+          tar -xzf /tmp/dagger.tar.gz -C /tmp dagger
+          sudo install -m 0755 /tmp/dagger /usr/local/bin/dagger
           dagger version
       - name: Build + containerize (sni_tls + radnr wired in)
         working-directory: ci

@@ -7,7 +7,7 @@ package advertiser
 import (
 	"context"
 	"log"
-	"math/rand"
+	"math/rand" // nosemgrep: go.lang.security.audit.crypto.math-random-used -- RFC 4861 timing jitter (nextInterval), not a security-sensitive value
 	"net/netip"
 	"time"
 
@@ -109,9 +109,7 @@ func (a *Advertiser) nextInterval() time.Duration {
 	if min >= max {
 		return max
 	}
-	// nosemgrep: go.lang.security.audit.crypto.math-random-used -- RFC 4861
-	// timing jitter, not a security-sensitive value; crypto/rand would be the
-	// wrong tool here, not a safer one.
+	//nolint:gosec // G404: RFC 4861 timing jitter, not a security-sensitive value; crypto/rand is the wrong tool here, not a safer one.
 	return min + time.Duration(rand.Int63n(int64(max-min)))
 }
 

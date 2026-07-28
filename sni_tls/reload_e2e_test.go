@@ -27,14 +27,14 @@ func TestReload_EndToEnd_RealTLSHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tls.Listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	acceptOnce := func() {
 		conn, err := ln.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		_ = conn.(*tls.Conn).Handshake()
 	}
 
@@ -44,12 +44,12 @@ func TestReload_EndToEnd_RealTLSHandshake(t *testing.T) {
 
 		conn, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
 			ServerName:         sni,
-			InsecureSkipVerify: true, // self-signed test certs; only the served leaf identity is asserted
+			InsecureSkipVerify: true, //nolint:gosec // self-signed test certs; only the served leaf identity is asserted
 		})
 		if err != nil {
 			t.Fatalf("tls.Dial: %v", err)
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
 		state := conn.ConnectionState()
 		if len(state.PeerCertificates) == 0 {

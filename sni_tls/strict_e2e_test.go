@@ -30,7 +30,7 @@ func TestStrict_EndToEnd_RealTLSHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tls.Listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	dial := func(sni string) error {
 		t.Helper()
@@ -41,16 +41,16 @@ func TestStrict_EndToEnd_RealTLSHandshake(t *testing.T) {
 				acceptErr <- err
 				return
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			acceptErr <- conn.(*tls.Conn).Handshake()
 		}()
 
 		conn, dialErr := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
 			ServerName:         sni,
-			InsecureSkipVerify: true, // self-signed test certs; only the served identity/success is asserted
+			InsecureSkipVerify: true, //nolint:gosec // self-signed test certs; only the served identity/success is asserted
 		})
 		if dialErr == nil {
-			conn.Close()
+			_ = conn.Close()
 		}
 		<-acceptErr // ensure server-side handshake goroutine finished before the next dial
 		return dialErr
@@ -70,7 +70,7 @@ func TestStrict_EndToEnd_RealTLSHandshake(t *testing.T) {
 				acceptErr <- err
 				return
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			acceptErr <- conn.(*tls.Conn).Handshake()
 		}()
 
@@ -78,9 +78,9 @@ func TestStrict_EndToEnd_RealTLSHandshake(t *testing.T) {
 		if err != nil {
 			t.Fatalf("net.Dial: %v", err)
 		}
-		client := tls.Client(raw, &tls.Config{InsecureSkipVerify: true})
+		client := tls.Client(raw, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // self-signed test certs; only handshake success/failure is asserted
 		dialErr := client.Handshake()
-		client.Close()
+		_ = client.Close()
 		<-acceptErr
 		return dialErr
 	}
@@ -125,7 +125,7 @@ func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tls.Listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	dial := func(sni string) (*tls.Conn, error) {
 		t.Helper()
@@ -136,13 +136,13 @@ func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 				acceptErr <- err
 				return
 			}
-			defer conn.Close()
+			defer func() { _ = conn.Close() }()
 			acceptErr <- conn.(*tls.Conn).Handshake()
 		}()
 
 		conn, dialErr := tls.Dial("tcp", ln.Addr().String(), &tls.Config{
 			ServerName:         sni,
-			InsecureSkipVerify: true, // self-signed test certs; only the served identity/success is asserted
+			InsecureSkipVerify: true, //nolint:gosec // self-signed test certs; only the served identity/success is asserted
 		})
 		<-acceptErr
 		return conn, dialErr
@@ -156,7 +156,7 @@ func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 	if !contains(got.DNSNames, wildcardSAN) {
 		t.Errorf("SNI=%q: served cert SANs = %v, expected the wildcard cert (%s)", concreteHost, got.DNSNames, wildcardSAN)
 	}
-	conn.Close()
+	_ = conn.Close()
 
 	if _, err := dial(bareDomain); err == nil {
 		t.Errorf("SNI=%q: bare domain must NOT match its own wildcard cert, and strict mode must reject it -- handshake unexpectedly succeeded", bareDomain)

@@ -36,7 +36,7 @@ func TestNdpListen_RealRawSocket_RequiresPrivilege(t *testing.T) {
 	}
 	// Only reachable when actually running privileged (e.g. root in CI with
 	// NET_RAW granted): prove the conn this plugin would really use works.
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	if !addr.IsValid() {
 		t.Fatal("ndp.Listen returned an invalid link-local address")
 	}
