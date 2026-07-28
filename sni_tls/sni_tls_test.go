@@ -77,7 +77,7 @@ func TestGetCertificate_Wildcard(t *testing.T) {
 	store := &certStore{
 		byName: map[string]*tls.Certificate{
 			"*.sevenwoods.nl": wildcard,
-			"dns.home.arpa":   perHost,
+			"dns.example.com": perHost,
 		},
 		fallback: other,
 	}
@@ -88,7 +88,7 @@ func TestGetCertificate_Wildcard(t *testing.T) {
 	}{
 		{"dns.sevenwoods.nl", wildcard},    // single-label subdomain: matches
 		{"argocd.sevenwoods.nl", wildcard}, // any single-label subdomain matches
-		{"dns.home.arpa", perHost},         // exact match still wins over any wildcard derivation
+		{"dns.example.com", perHost},       // exact match still wins over any wildcard derivation
 		{"sevenwoods.nl", other},           // bare domain itself: wildcard must NOT match this
 		{"a.b.sevenwoods.nl", other},       // two labels deep: single-level wildcard must NOT match
 		{"DNS.SEVENWOODS.NL", wildcard},    // case-insensitive, same as exact-match SNI comparison
