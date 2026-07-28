@@ -8,7 +8,7 @@ import (
 
 // TestStrict_EndToEnd_RealTLSHandshake proves strict mode's rejection at the
 // actual wire level, not just via direct GetCertificate calls: two real
-// certs loaded (mirroring dns.sevenwoods.nl's IP-SAN cert and dns.home.arpa's
+// certs loaded (mirroring dns.sevenwoods.nl's IP-SAN cert and dns.example.com's
 // hostname-only cert on the same listener), then real tls.Dial handshakes
 // with matching, mismatched, and absent SNI. This is the scenario the
 // verified-DDR caveat in docs/sni-tls-plugin.md is about: an unmatched or
@@ -16,7 +16,7 @@ import (
 // the wrong cert.
 func TestStrict_EndToEnd_RealTLSHandshake(t *testing.T) {
 	const sniA = "dns.sevenwoods.nl"
-	const sniB = "dns.home.arpa"
+	const sniB = "dns.example.com"
 
 	certA, keyA := writeTestCert(t, "sevenwoods", sniA)
 	certB, keyB := writeTestCert(t, "homearpa", sniB)
@@ -111,7 +111,7 @@ func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 	const wildcardSAN = "*.sevenwoods.nl"
 	const bareDomain = "sevenwoods.nl"
 	const concreteHost = "dns.sevenwoods.nl"
-	const otherSNI = "dns.home.arpa"
+	const otherSNI = "dns.example.com"
 
 	wildcardCert, wildcardKey := writeTestCert(t, "wildcard", wildcardSAN)
 	otherCert, otherKey := writeTestCert(t, "homearpa", otherSNI)
