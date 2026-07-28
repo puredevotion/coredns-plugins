@@ -147,7 +147,13 @@ jobs:
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
       - uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.62.2
+          # v1.62.2 was built against Go 1.23 -- refuses to load config once
+          # go.mod's toolchain moved to 1.26.5 ("Go language version used to
+          # build golangci-lint is lower than the targeted Go version").
+          # v1.64.8 is the newest v1-schema release; this repo's config is
+          # v1-format (no `version: "2"`), so staying on the 1.x line avoids
+          # a config rewrite for the v2 schema.
+          version: v1.64.8
           working-directory: ${{ matrix.plugin }}
 
   gitleaks:
@@ -275,7 +281,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Dagger
-        run: curl -fsSL https://dagger.io/install.sh | DAGGER_VERSION=0.21.7 sh
+        # install.sh drops the binary at ./bin/dagger (relative to cwd, i.e.
+        # the repo root) -- the next step's working-directory is `ci`, so
+        # without this it's just "dagger: command not found". Installing
+        # straight to /usr/local/bin (already on PATH, already writable by
+        # the runner user on GitHub-hosted images) sidesteps that instead of
+        # fixing up PATH for a directory that won't exist from `ci/`.
+        run: |
+          curl -fsSL https://dagger.io/install.sh | BIN_DIR=/usr/local/bin DAGGER_VERSION=0.21.7 sh
+          dagger version
       - name: Build + containerize (sni_tls + radnr wired in)
         working-directory: ci
         run: |

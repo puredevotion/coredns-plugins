@@ -109,6 +109,9 @@ func (a *Advertiser) nextInterval() time.Duration {
 	if min >= max {
 		return max
 	}
+	// nosemgrep: go.lang.security.audit.crypto.math-random-used -- RFC 4861
+	// timing jitter, not a security-sensitive value; crypto/rand would be the
+	// wrong tool here, not a safer one.
 	return min + time.Duration(rand.Int63n(int64(max-min)))
 }
 
