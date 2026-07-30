@@ -110,6 +110,17 @@ var pluginCfgPatches = map[string]struct {
 	// coredns v1.12.4, two minors behind ours, so this was a real
 	// question — a clean build + `-plugins` listing rrl confirmed the plugin
 	// API it uses is unchanged across that gap.
+	// The per-visitor DNS measurement zone for the hivre.com lab. An
+	// authoritative backend, so it belongs among the other backends and after
+	// rrl — rate limiting has to see a query before anything answers it.
+	// Slotted next to `file` because that is the closest analogue: both are
+	// authoritative sources of truth for a zone, one from disk and one
+	// synthesized.
+	"probe": {
+		cfgLine:         "probe:github.com/puredevotion/coredns-plugins/probe",
+		insertAfterLine: "file:file",
+		modulePath:      "github.com/puredevotion/coredns-plugins/probe",
+	},
 	"rrl": {
 		cfgLine:         "rrl:github.com/coredns/rrl/plugins/rrl",
 		insertAfterLine: "rewrite:rewrite",
