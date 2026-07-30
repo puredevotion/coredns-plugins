@@ -150,11 +150,6 @@ func parse(c *caddy.Controller) (*Probe, error) {
 					return nil, c.ArgErr()
 				}
 				valkeyCfg.CAFile = c.Val()
-			case "valkey_insecure_tls":
-				if len(c.RemainingArgs()) != 0 {
-					return nil, c.ArgErr()
-				}
-				valkeyCfg.InsecureTLS = true
 			case "valkey_timeout":
 				d, err := parseDurationArg(c)
 				if err != nil {
@@ -220,21 +215,18 @@ func parse(c *caddy.Controller) (*Probe, error) {
 // for anything the separate web tier has to read and for more than one replica.
 func buildStore(c *caddy.Controller, vc ValkeyConfig, ttl time.Duration, maxTokens, maxPerToken int) (Store, error) {
 	if len(vc.Addrs) == 0 {
-		if vc.CAFile != "" || vc.InsecureTLS || vc.Timeout != 0 {
-			return nil, c.Err("valkey_ca / valkey_insecure_tls / valkey_timeout set without any `valkey` address")
+		if vc.CAFile != "" || vc.Timeout != 0 {
+			return nil, c.Err("valkey_ca / valkey_timeout set without any `valkey` address")
 		}
 		return NewMemStore(ttl, maxTokens, maxPerToken), nil
 	}
-	if vc.CAFile != "" && vc.InsecureTLS {
-		return nil, c.Err("valkey_ca and valkey_insecure_tls are mutually exclusive")
-	}
-	if vc.CAFile == "" && !vc.InsecureTLS {
-		// The fleet's Valkey has no authentication at all (the chart cannot do
-		// it), so transport security is the only thing standing between these
-		// observations and anything else on the network. Refusing plaintext
-		// here means that has to be a deliberate, visible choice in the
-		// Corefile rather than the default nobody noticed.
-		return nil, c.Err("valkey needs either valkey_ca (verify the server certificate) or an explicit valkey_insecure_tls")
+	if vc.CAFile == "" {
+		// Verified TLS is mandatory, with no bypass. The fleet's Valkey has no
+		// authentication of its own (the chart cannot do it), so the server
+		// certificate is the only thing distinguishing it from anything else
+		// that answers on that address — and what travels over the link is
+		// observations about other people's networks.
+		return nil, c.Err("valkey requires valkey_ca so the server certificate can be verified")
 	}
 	vc.TTL, vc.MaxPerToken = ttl, maxPerToken
 	return NewValkeyStore(vc)

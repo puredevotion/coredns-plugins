@@ -3,6 +3,7 @@ package probe
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,5 +232,85 @@ func TestCorruptSignatureStaysBase64AndSameLength(t *testing.T) {
 	}
 	if got := corruptSignature(""); got != "" {
 		t.Errorf("corruptSignature(\"\") = %q, want empty", got)
+	}
+}
+
+// TestLoadSignerRefusesSymlinkEscape covers what os.Root buys over a plain
+// os.Open: a key file that is really a symlink pointing outside the key
+// directory does not resolve. Without the rooted open this would happily read
+// whatever the link targets, which on a pod with mounted Secrets is exactly the
+// mistake worth making impossible rather than merely unlikely.
+func TestLoadSignerRefusesSymlinkEscape(t *testing.T) {
+	outside := t.TempDir()
+	keyDir := t.TempDir()
+
+	// A valid keypair, but parked outside the directory LoadSigner will root.
+	real := newTestSigner(t, 0)
+	realBase := keyBasenameFor(t, real)
+
+	base := filepath.Join(keyDir, "Kescape.example.com.+013+00000")
+	if err := os.Symlink(realBase+".key", base+".key"); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+	if err := os.Symlink(realBase+".private", base+".private"); err != nil {
+		t.Skipf("cannot create symlinks here: %v", err)
+	}
+	_ = outside
+
+	if _, err := LoadSigner(base, 0); err == nil {
+		t.Error("LoadSigner followed a symlink out of the key directory")
+	}
+}
+
+func TestLoadSignerRejectsDirectoryBasename(t *testing.T) {
+	// A trailing slash means the operator pointed at a directory; there is no
+	// keypair name to append extensions to, and silently reading "/.key" would
+	// be a confusing way to fail.
+	if _, err := LoadSigner(t.TempDir()+"/", 0); err == nil {
+		t.Error("LoadSigner accepted a basename with no file component")
+	}
+}
+
+// TestRRSIGLabelCount pins the bounded counter that replaced a widening
+// conversion: the value is only ever held in the octet RRSIG has for it.
+func TestRRSIGLabelCount(t *testing.T) {
+	tests := []struct {
+		name string
+		want uint8
+	}{
+		{name: ".", want: 0},
+		{name: "example.com.", want: 2},
+		{name: "a1b2c3d4.check.example.com.", want: 4},
+		{name: "_badsig.a1b2c3d4.check.example.com.", want: 5},
+	}
+	for _, tc := range tests {
+		got, err := rrsigLabelCount(tc.name)
+		if err != nil {
+			t.Errorf("rrsigLabelCount(%q): %v", tc.name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("rrsigLabelCount(%q) = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+
+	// Deeper than RRSIG's single octet can express: rejected, not wrapped.
+	deep := strings.Repeat("a.", 300) + "example.com."
+	if _, err := rrsigLabelCount(deep); err == nil {
+		t.Error("rrsigLabelCount accepted a name with more labels than RRSIG can express")
+	}
+}
+
+// TestRRSIGTimeMatchesLibraryRoundTrip checks that the timestamps handed to
+// RRSIG mean what the library thinks they mean, since the whole reason to
+// delegate to dns.StringToTime is its RFC 1982 serial arithmetic.
+func TestRRSIGTimeMatchesLibraryRoundTrip(t *testing.T) {
+	when := time.Date(2026, 7, 30, 12, 34, 56, 0, time.UTC)
+	got, err := rrsigTime(when)
+	if err != nil {
+		t.Fatalf("rrsigTime: %v", err)
+	}
+	if back := dns.TimeToString(got); back != "20260730123456" {
+		t.Errorf("rrsigTime(%v) = %d, which renders as %q, want 20260730123456", when, got, back)
 	}
 }

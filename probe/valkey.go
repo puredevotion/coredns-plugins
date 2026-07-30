@@ -60,10 +60,6 @@ type ValkeyConfig struct {
 	// this bundle. The fleet's Valkey presents a step-ca-issued certificate, so
 	// this should normally be the step-ca root.
 	CAFile string
-	// InsecureTLS enables TLS without verifying the server certificate. Present
-	// only because it must be an explicit, visible choice in the Corefile
-	// rather than an accident — see setup's validation.
-	InsecureTLS bool
 	// TTL, Timeout and MaxPerToken mirror MemStore's bounds.
 	TTL         time.Duration
 	Timeout     time.Duration
@@ -99,8 +95,16 @@ func NewValkeyStore(cfg ValkeyConfig) (*ValkeyStore, error) {
 		DisableCache: true,
 	}
 
-	switch {
-	case cfg.CAFile != "":
+	// There is deliberately no "skip verification" option. The fleet's Valkey
+	// presents a step-ca-issued certificate, so verification can always be
+	// satisfied by pointing CAFile at the step-ca root — an escape hatch would
+	// only ever be used to paper over a misconfigured CA path, and this store
+	// carries observations about other people's networks across a network that
+	// has no Valkey authentication of its own.
+	//
+	// Plaintext (no CAFile) remains reachable through this constructor for a
+	// local test server; the Corefile path requires TLS, see setup.
+	if cfg.CAFile != "" {
 		pem, err := os.ReadFile(cfg.CAFile)
 		if err != nil {
 			return nil, fmt.Errorf("reading valkey CA %s: %w", cfg.CAFile, err)
@@ -110,8 +114,6 @@ func NewValkeyStore(cfg ValkeyConfig) (*ValkeyStore, error) {
 			return nil, fmt.Errorf("valkey CA %s contains no usable certificate", cfg.CAFile)
 		}
 		opt.TLSConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-	case cfg.InsecureTLS:
-		opt.TLSConfig = &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12} //nolint:gosec // explicit Corefile opt-in, see ValkeyConfig.InsecureTLS
 	}
 
 	client, err := valkey.NewClient(opt)

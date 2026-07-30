@@ -3,7 +3,10 @@ package probe
 import (
 	"crypto"
 	"fmt"
+	"io"
+	"math"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -53,42 +56,73 @@ func LoadSigner(basename string, validity time.Duration) (*Signer, error) {
 		validity = defaultSigValidity
 	}
 
-	pubPath := basename + ".key"
-	privPath := basename + ".private"
-
-	pubData, err := os.ReadFile(pubPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading public key %s: %w", pubPath, err)
+	// Both halves of the keypair are opened relative to a *rooted* directory
+	// rather than by absolute path. os.Root confines every lookup beneath that
+	// directory: a symlink inside it that points elsewhere, or a name that tries
+	// to climb out with "..", fails instead of resolving. The key directory is
+	// operator-supplied and usually a mounted Secret, so this costs nothing and
+	// removes a whole class of "how did it read THAT file" question.
+	dir, base := filepath.Split(basename)
+	if dir == "" {
+		dir = "."
 	}
+	if base == "" {
+		return nil, fmt.Errorf("key basename %q names a directory, not a keypair", basename)
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, fmt.Errorf("opening key directory %s: %w", dir, err)
+	}
+	defer func() {
+		// Closing a directory handle can only fail in ways the caller cannot act
+		// on, and the keys are already loaded by this point.
+		_ = root.Close()
+	}()
+
+	pubName, privName := base+".key", base+".private"
+
+	pubFile, err := root.Open(pubName)
+	if err != nil {
+		return nil, fmt.Errorf("reading public key %s in %s: %w", pubName, dir, err)
+	}
+	pubData, err := io.ReadAll(pubFile)
+	_ = pubFile.Close()
+	if err != nil {
+		return nil, fmt.Errorf("reading public key %s in %s: %w", pubName, dir, err)
+	}
+
 	rr, err := dns.NewRR(string(pubData))
 	if err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", pubPath, err)
+		return nil, fmt.Errorf("parsing %s: %w", pubName, err)
 	}
 	key, ok := rr.(*dns.DNSKEY)
 	if !ok {
-		return nil, fmt.Errorf("%s contains a %T, want a DNSKEY", pubPath, rr)
+		return nil, fmt.Errorf("%s contains a %T, want a DNSKEY", pubName, rr)
 	}
 
-	privFile, err := os.Open(privPath)
+	privFile, err := root.Open(privName)
 	if err != nil {
-		return nil, fmt.Errorf("reading private key %s: %w", privPath, err)
+		return nil, fmt.Errorf("reading private key %s in %s: %w", privName, dir, err)
 	}
-	defer privFile.Close()
+	// Read-only handle: a close error carries no information the caller could
+	// act on, and the key material is already parsed by then.
+	defer func() { _ = privFile.Close() }()
 
-	priv, err := key.ReadPrivateKey(privFile, privPath)
+	priv, err := key.ReadPrivateKey(privFile, privName)
 	if err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", privPath, err)
+		return nil, fmt.Errorf("parsing %s: %w", privName, err)
 	}
 	signer, ok := priv.(crypto.Signer)
 	if !ok {
-		return nil, fmt.Errorf("%s holds a %T, which cannot sign", privPath, priv)
+		return nil, fmt.Errorf("%s holds a %T, which cannot sign", privName, priv)
 	}
 
 	// A zone-signing key with the wrong owner name produces signatures no
 	// validator will accept, and the symptom (everything bogus, no error
 	// anywhere) is miserable to debug. Catch it at load time instead.
 	if key.Hdr.Rrtype != dns.TypeDNSKEY {
-		return nil, fmt.Errorf("%s is not a DNSKEY record", pubPath)
+		return nil, fmt.Errorf("%s is not a DNSKEY record", pubName)
 	}
 
 	return &Signer{key: key, priv: signer, validity: validity}, nil
@@ -152,6 +186,20 @@ func (s *Signer) signRRset(rrs []dns.RR, mods Modifier) (*dns.RRSIG, error) {
 	}
 
 	hdr := rrs[0].Header()
+
+	labels, err := rrsigLabelCount(hdr.Name)
+	if err != nil {
+		return nil, fmt.Errorf("signing %s: %w", hdr.Name, err)
+	}
+	incept, err := rrsigTime(inception)
+	if err != nil {
+		return nil, fmt.Errorf("signing %s: inception: %w", hdr.Name, err)
+	}
+	expire, err := rrsigTime(expiration)
+	if err != nil {
+		return nil, fmt.Errorf("signing %s: expiration: %w", hdr.Name, err)
+	}
+
 	sig := &dns.RRSIG{
 		Hdr: dns.RR_Header{
 			Name:   hdr.Name,
@@ -161,10 +209,10 @@ func (s *Signer) signRRset(rrs []dns.RR, mods Modifier) (*dns.RRSIG, error) {
 		},
 		TypeCovered: hdr.Rrtype,
 		Algorithm:   s.key.Algorithm,
-		Labels:      uint8(dns.CountLabel(hdr.Name)),
+		Labels:      labels,
 		OrigTtl:     hdr.Ttl,
-		Expiration:  uint32(expiration.Unix()),
-		Inception:   uint32(inception.Unix()),
+		Expiration:  expire,
+		Inception:   incept,
 		KeyTag:      s.key.KeyTag(),
 		SignerName:  s.Owner(),
 	}
@@ -177,6 +225,36 @@ func (s *Signer) signRRset(rrs []dns.RR, mods Modifier) (*dns.RRSIG, error) {
 		sig.Signature = corruptSignature(sig.Signature)
 	}
 	return sig, nil
+}
+
+// rrsigLabelCount counts the labels in a name into the single octet RRSIG
+// reserves for it (RFC 4034 §3.1.3).
+//
+// Counted directly into a uint8 rather than converted down from dns.CountLabel's
+// int, so the width RRSIG actually has is the width the value is ever held in —
+// there is no wider intermediate that could quietly wrap on the way in. A name
+// deep enough to overflow is rejected instead.
+func rrsigLabelCount(name string) (uint8, error) {
+	var n uint8
+	for range dns.SplitDomainName(name) {
+		if n == math.MaxUint8 {
+			return 0, fmt.Errorf("more than %d labels, which RRSIG cannot express", math.MaxUint8)
+		}
+		n++
+	}
+	return n, nil
+}
+
+// rrsigTime renders a time as RRSIG's 32-bit inception/expiration value.
+//
+// Delegated to dns.StringToTime rather than converting time.Unix() by hand: it
+// is the library's own helper for exactly this field and it applies RFC 1982
+// serial arithmetic, which is what makes the 32-bit field meaningful past 2106
+// in the first place. Doing it here would mean reimplementing that wrap
+// behaviour — and getting it subtly wrong would produce signatures whose
+// validity window a resolver reads differently than we intended.
+func rrsigTime(t time.Time) (uint32, error) {
+	return dns.StringToTime(t.UTC().Format("20060102150405"))
 }
 
 // corruptSignature invalidates a base64 signature while keeping it the same

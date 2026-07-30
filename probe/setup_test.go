@@ -132,3 +132,54 @@ func TestParseRejectsKeyForWrongZone(t *testing.T) {
 		t.Errorf("parse rejected a correctly matched key: %v", err)
 	}
 }
+
+// TestParseValkeyRequiresVerifiedTLS covers the store's transport policy. The
+// fleet's Valkey has no authentication of its own, so the server certificate is
+// the only thing distinguishing it from anything else answering on that address
+// — and what crosses the link is observations about other people's networks.
+// There is deliberately no bypass flag to test for.
+func TestParseValkeyRequiresVerifiedTLS(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{
+			name:    "valkey without a CA is refused",
+			input:   "probe check.example.com {\n\tvalkey valkey.example.com:6379\n}",
+			wantErr: true,
+		},
+		{
+			name:    "valkey_ca without an address is refused",
+			input:   "probe check.example.com {\n\tvalkey_ca /etc/ssl/ca.pem\n}",
+			wantErr: true,
+		},
+		{
+			name:    "valkey_timeout without an address is refused",
+			input:   "probe check.example.com {\n\tvalkey_timeout 200ms\n}",
+			wantErr: true,
+		},
+		{
+			// No addresses at all is the in-process default, which needs no TLS.
+			name:  "no valkey at all is fine",
+			input: "probe check.example.com",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := parse(caddy.NewTestController("dns", tc.input))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("parse succeeded, want an error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if _, ok := p.Store.(*MemStore); !ok {
+				t.Errorf("Store is %T, want *MemStore when no valkey is configured", p.Store)
+			}
+		})
+	}
+}

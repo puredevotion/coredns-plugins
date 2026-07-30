@@ -27,7 +27,6 @@ probe ZONE {
     big_size      BYTES
     valkey        ADDR [ADDR...]
     valkey_ca     FILE
-    valkey_insecure_tls
     valkey_timeout DURATION
 }
 ```
@@ -39,7 +38,7 @@ probe ZONE {
 * `validity` is how long a correct signature stays valid, default **1h**. Short is preferable — signatures are minted per query, nothing caches them for long, and a narrow window bounds the damage if the key leaks.
 * `store_ttl` bounds how long a token stays readable, default **10m**. This is transient diagnostic state about someone's network, not history to keep.
 * `max_tokens` (default **10000**) and `max_per_token` (default **64**) bound memory. A public zone invites walking the token space purely to grow the store.
-* `valkey` **ADDR...** switches the observation store from in-process to Valkey, which is what the separate web tier reads and what more than one replica requires. Data model: `probe:seen:<token>` is a counter and `probe:obs:<token>` a capped list of JSON observations — separate keys on purpose, so the count stays truthful past the detail cap ("we saw this 200 times" is itself the finding). Setup **refuses plaintext**: pass `valkey_ca` to verify the server certificate, or `valkey_insecure_tls` to opt out explicitly. That is deliberate — the fleet's Valkey has no authentication at all, so transport security is the only thing protecting these observations, and it should not be absent by accident. `valkey_timeout` (default **100ms**) bounds how long a store round-trip may delay a DNS answer; exceeding it degrades the measurement rather than failing the query. Connecting fails at startup rather than silently falling back to the in-process store, because a zone that answers perfectly while recording nothing nobody can read is the worst outcome.
+* `valkey` **ADDR...** switches the observation store from in-process to Valkey, which is what the separate web tier reads and what more than one replica requires. Data model: `probe:seen:<token>` is a counter and `probe:obs:<token>` a capped list of JSON observations — separate keys on purpose, so the count stays truthful past the detail cap ("we saw this 200 times" is itself the finding). `valkey_ca` is **required** and there is deliberately no bypass: the fleet's Valkey has no authentication of its own, so the server certificate is the only thing distinguishing it from anything else answering on that address, and what crosses the link is observations about other people's networks. An escape hatch would only ever be used to paper over a wrong CA path. `valkey_timeout` (default **100ms**) bounds how long a store round-trip may delay a DNS answer; exceeding it degrades the measurement rather than failing the query. Connecting fails at startup rather than silently falling back to the in-process store, because a zone that answers perfectly while recording nothing nobody can read is the worst outcome.
 * `big_size` is the payload the `_big` modifier aims for, default **1400**, capped at 4096. The default is above the DNS-flag-day-2020 EDNS cap of 1232 — so the answer demonstrably exceeds what a resolver should advertise room for — but below the ~1500-byte Ethernet MTU, so it actually arrives. Measured on a 1500-byte-MTU path: ~1419 bytes is delivered over UDP, anything past ~1540 silently vanishes, while the same 3125-byte answer arrives intact over TCP. Larger values are a legitimate experiment (they test path-MTU behaviour and fragment filtering, a real failure mode) but a poor default, because the demonstration then presents as "the server is broken" rather than "look how large this answer is".
 
 ## Query grammar
@@ -119,7 +118,7 @@ This zone answers the public internet, synthesizes signed responses, and has a m
 * **`_nxdomain` is unprovable by design, not by omission.** Denial uses a signed SOA plus an NSEC asserting the queried name, with the "black lies" next-name trick (`\000.<qname>`) — which also makes the zone unwalkable, a requirement rather than a bonus for a zone of unbounded synthetic names. That proves NODATA correctly, but a literal NXDOMAIN needs an NSEC chain a synthesized zone cannot have. `_nxname` is the provable form (RFC 9824); `_nxdomain` is kept as the legacy shape precisely so the two can be compared.
 * **DoT and DoH are not distinguished from TCP.** CoreDNS reports the transport as `udp` or `tcp`, and the encrypted transports are TCP underneath. Recording them separately needs the listener to pass that down.
 * **The default in-process store is single-replica.** A visitor's queries and their report request must reach the same process. Configure `valkey` for anything the separate web tier reads, or for more than one replica.
-* Signing is online, per query. That is the only option for synthesized names, but it means the private key is live in the serving process rather than used offline.
+* Signing is online, per query. That is the only option for synthesized names, but it means the private key is live in the serving process rather than used offline. Key files are opened through `os.Root`, so a symlink in the key directory cannot redirect the read outside it.
 
 ## Independence
 
