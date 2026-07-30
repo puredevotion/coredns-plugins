@@ -178,7 +178,23 @@ func (m *CorednsPluginsCi) TestPlugin(ctx context.Context, source *dagger.Direct
 // staticcheck, errcheck, gosec) as dafs's ci/ module and homelab's
 // ci/dagger + experiments/ra-dnr — one consistent Go lint/SAST bar across
 // every Go repo in this ecosystem, public or not.
-const golangciLintImage = "golangci/golangci-lint:v1.62.2-alpine"
+//
+// v2, and it MUST stay >= the Go version the plugin go.mod files target.
+// golangci-lint refuses to load a config when its own build's Go version is
+// older than the target: "the Go language version (go1.23) used to build
+// golangci-lint is lower than the targeted Go version (1.26.5)". No v1.x
+// release is built against Go 1.26, so v1 stopped being viable the moment
+// those go.mod toolchains moved past 1.24 — and .golangci.yml is on the v2
+// schema now, which a v1 binary could not read either. The two move together.
+//
+// This lagged behind .github/workflows/ci.yml, which was migrated to v2.12.2
+// while this constant stayed on v1.62.2. Nothing caught it because the two
+// lint paths are exercised by different pipelines: the workflow lints on every
+// push here, whereas this Dagger entry point only runs from homelab's
+// ci-coredns-plugins job, which fires on a flake.lock bump. The next such bump
+// failed on sni_tls before it ever reached the new plugin. Keep this in step
+// with that workflow's `version:` pin.
+const golangciLintImage = "golangci/golangci-lint:v2.12.2-alpine"
 
 // LintPlugin runs golangci-lint on the plugin. Upgraded from a bare `go vet`
 // (which only ever caught the small, non-security subset go vet's analyzers
