@@ -74,6 +74,7 @@ func parse(c *caddy.Controller) (*Probe, error) {
 		validity, storeTTL     time.Duration
 		maxTokens, maxPerToken int
 		seenZone               bool
+		valkeyCfg              ValkeyConfig
 	)
 
 	for c.Next() { // "probe"
@@ -136,6 +137,30 @@ func parse(c *caddy.Controller) (*Probe, error) {
 					return nil, err
 				}
 				maxPerToken = v
+			case "valkey":
+				// Repeatable and/or multi-valued, so a Corefile can list every
+				// endpoint without a delimiter convention.
+				vs := c.RemainingArgs()
+				if len(vs) == 0 {
+					return nil, c.ArgErr()
+				}
+				valkeyCfg.Addrs = append(valkeyCfg.Addrs, vs...)
+			case "valkey_ca":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				valkeyCfg.CAFile = c.Val()
+			case "valkey_insecure_tls":
+				if len(c.RemainingArgs()) != 0 {
+					return nil, c.ArgErr()
+				}
+				valkeyCfg.InsecureTLS = true
+			case "valkey_timeout":
+				d, err := parseDurationArg(c)
+				if err != nil {
+					return nil, err
+				}
+				valkeyCfg.Timeout = d
 			case "big_size":
 				v, err := parseIntArg(c)
 				if err != nil {
@@ -182,8 +207,37 @@ func parse(c *caddy.Controller) (*Probe, error) {
 		log.Warningf("zone %s has no signing key: the unsigned/badsig/expiredsig/futuresig modifiers will be no-ops", p.Zone)
 	}
 
-	p.Store = NewMemStore(storeTTL, maxTokens, maxPerToken)
+	store, err := buildStore(c, valkeyCfg, storeTTL, maxTokens, maxPerToken)
+	if err != nil {
+		return nil, err
+	}
+	p.Store = store
 	return p, nil
+}
+
+// buildStore picks the observation store. In-process by default so the plugin
+// works with no external dependency; Valkey when configured, which is required
+// for anything the separate web tier has to read and for more than one replica.
+func buildStore(c *caddy.Controller, vc ValkeyConfig, ttl time.Duration, maxTokens, maxPerToken int) (Store, error) {
+	if len(vc.Addrs) == 0 {
+		if vc.CAFile != "" || vc.InsecureTLS || vc.Timeout != 0 {
+			return nil, c.Err("valkey_ca / valkey_insecure_tls / valkey_timeout set without any `valkey` address")
+		}
+		return NewMemStore(ttl, maxTokens, maxPerToken), nil
+	}
+	if vc.CAFile != "" && vc.InsecureTLS {
+		return nil, c.Err("valkey_ca and valkey_insecure_tls are mutually exclusive")
+	}
+	if vc.CAFile == "" && !vc.InsecureTLS {
+		// The fleet's Valkey has no authentication at all (the chart cannot do
+		// it), so transport security is the only thing standing between these
+		// observations and anything else on the network. Refusing plaintext
+		// here means that has to be a deliberate, visible choice in the
+		// Corefile rather than the default nobody noticed.
+		return nil, c.Err("valkey needs either valkey_ca (verify the server certificate) or an explicit valkey_insecure_tls")
+	}
+	vc.TTL, vc.MaxPerToken = ttl, maxPerToken
+	return NewValkeyStore(vc)
 }
 
 func parseIntArg(c *caddy.Controller) (int, error) {

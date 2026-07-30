@@ -82,6 +82,14 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		raw = r.Question[0].Name
 	}
 
+	// RFC 9824 §3.4: NXNAME is a meta-type that exists only inside an NSEC type
+	// bitmap. A query asking for it directly is malformed, and the RFC requires
+	// FORMERR — not NODATA, which would imply the type is a real thing this zone
+	// simply has none of.
+	if state.QType() == dns.TypeNXNAME {
+		return p.respond(state, w, r, dns.RcodeFormatError, nil, nil, false)
+	}
+
 	sub := strings.TrimSuffix(qname, p.Zone)
 	sub = strings.TrimSuffix(sub, ".")
 
@@ -114,10 +122,17 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return p.respond(state, w, r, dns.RcodeServerFailure, nil, nil, false)
 
 	case q.Mods.Has(ModNXDOMAIN):
-		// See denialOfExistence for why this proof is weaker than a real
-		// signer's.
-		auth := p.denialOfExistence(qname, q.Mods, state.Do())
+		// The legacy shape: a literal NXDOMAIN with only a signed SOA behind it.
+		// Deliberately unprovable (see nodataDenial) — that is the experiment.
+		auth := p.nodataDenial(qname, q.Mods, state.Do())
 		return p.respond(state, w, r, dns.RcodeNameError, nil, auth, false)
+
+	case q.Mods.Has(ModNXNAME):
+		// Compact denial of existence (RFC 9824): NOERROR, empty answer, and an
+		// NSEC carrying the NXNAME meta-type. The provable counterpart to
+		// ModNXDOMAIN above.
+		auth := p.compactDenial(qname, q.Mods, state.Do())
+		return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false)
 
 	case q.Mods.Has(ModTruncate):
 		// TC=1 with an empty answer section. A conforming client retries over
@@ -129,7 +144,7 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	answer := p.synthesize(qname, state.QType(), obs, q.Mods)
 	if len(answer) == 0 {
 		// NODATA: the name exists, this type does not.
-		auth := p.denialOfExistence(qname, q.Mods, state.Do())
+		auth := p.nodataDenial(qname, q.Mods, state.Do())
 		return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false)
 	}
 
@@ -200,7 +215,7 @@ func (p *Probe) serveApex(state request.Request, w dns.ResponseWriter, r *dns.Ms
 
 	if len(answer) == 0 {
 		return p.respond(state, w, r, dns.RcodeSuccess, nil,
-			p.denialOfExistence(p.Zone, 0, state.Do()), false)
+			p.nodataDenial(p.Zone, 0, state.Do()), false)
 	}
 	if state.Do() {
 		// Apex records are never spoiled: a broken DNSKEY or SOA signature
@@ -226,34 +241,57 @@ func (p *Probe) soa() *dns.SOA {
 	}
 }
 
-// denialOfExistence builds the authority section for NODATA and NXDOMAIN.
+// nodataDenial builds the authority section for NODATA: the name exists, the
+// queried type does not.
 //
-// Known v1 limitation, stated plainly: this returns a signed SOA and an NSEC
-// asserting the queried name, which proves NODATA adequately but does NOT
-// constitute a correct proof of non-existence for NXDOMAIN — that needs an NSEC
-// chain this zone cannot have, because its names are synthesized and unbounded.
-// A strict validator may therefore judge the `_nxdomain` variant bogus rather
-// than authentic-denial, which conflates "the server said NXDOMAIN" with "the
-// proof was broken".
+// The NSEC asserts the queried name itself with a bitmap of just RRSIG and
+// NSEC. Per RFC 9824 the NXNAME bit is specifically NOT set here — that bit
+// means "this name does not exist", and setting it for a name that does exist
+// would be a lie a resolver could act on.
 //
-// The correct fix is compact denial of existence with the NXNAME sentinel
-// (RFC 9824), which exists precisely for signers in this position and is
-// already on this lab's roadmap. Until then, read `_nxdomain` results with that
-// caveat in mind.
-func (p *Probe) denialOfExistence(name string, mods Modifier, do bool) []dns.RR {
+// The next-domain name is the "black lies" trick: one byte greater than this
+// name, so the NSEC covers nothing but itself and no real name becomes
+// enumerable. For a zone of unbounded synthesized names that is a requirement
+// rather than a bonus — the alternative is an enumerable chain that cannot
+// exist.
+//
+// Note what this does NOT do: prove non-existence. A literal NXDOMAIN needs an
+// NSEC chain, which this zone cannot have, which is exactly why compactDenial
+// below exists and why ModNXDOMAIN is documented as the deliberately
+// unprovable variant.
+func (p *Probe) nodataDenial(name string, mods Modifier, do bool) []dns.RR {
+	return p.denial(name, mods, do, []uint16{dns.TypeRRSIG, dns.TypeNSEC})
+}
+
+// compactDenial builds the authority section for compact denial of existence
+// (RFC 9824): the name does not exist at all.
+//
+// Identical in shape to nodataDenial except that the type bitmap also carries
+// NXNAME (type 128, a meta-type that never appears as an actual record). That
+// single bit is the whole mechanism: a resolver that understands it synthesizes
+// NXDOMAIN for its own client, while one that does not sees a perfectly valid
+// NODATA. Both outcomes are correct and provable, which is what the legacy
+// NXDOMAIN form cannot manage from a synthesized zone.
+//
+// RFC 9824 §3.1: the bitmap MUST carry only RRSIG, NSEC and NXNAME.
+func (p *Probe) compactDenial(name string, mods Modifier, do bool) []dns.RR {
+	return p.denial(name, mods, do, []uint16{dns.TypeRRSIG, dns.TypeNSEC, dns.TypeNXNAME})
+}
+
+// denial is the shared body of the two above.
+func (p *Probe) denial(name string, mods Modifier, do bool, bitmap []uint16) []dns.RR {
 	auth := []dns.RR{p.soa()}
 	if !do {
+		// Without DO there is nothing to prove to anyone, and shipping an NSEC
+		// to a client that did not ask for DNSSEC is wasted bytes on a zone
+		// where response size is the amplification budget.
 		return auth
 	}
 
 	nsec := &dns.NSEC{
-		Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: p.TTL},
-		// The "black lies" next-name trick: a name one byte greater than this
-		// one, so the NSEC covers nothing but itself and no real name has to be
-		// enumerable. It also means this zone cannot be walked, which for a
-		// zone of unbounded synthetic names is a requirement, not a bonus.
+		Hdr:        dns.RR_Header{Name: name, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: p.TTL},
 		NextDomain: "\\000." + name,
-		TypeBitMap: []uint16{dns.TypeRRSIG, dns.TypeNSEC},
+		TypeBitMap: bitmap,
 	}
 	auth = append(auth, nsec)
 

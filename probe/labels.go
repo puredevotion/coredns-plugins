@@ -55,11 +55,28 @@ const (
 	// ModTruncate sets TC=1 and drops the answer section, forcing a
 	// well-behaved client to retry over TCP.
 	ModTruncate
-	// ModNXDOMAIN answers NXDOMAIN for a name that would otherwise exist.
+	// ModNXDOMAIN answers a literal NXDOMAIN for a name that would otherwise
+	// exist, accompanied only by a signed SOA.
+	//
+	// That proof is deliberately incomplete: proving non-existence the
+	// traditional way needs an NSEC chain, which a zone of unbounded
+	// synthesized names cannot have. A strict validator should therefore judge
+	// this response bogus rather than authenticated-denial, and finding out
+	// which resolvers do is the experiment. Use ModNXNAME for the form that is
+	// actually provable.
 	ModNXDOMAIN
 	// ModServfail answers SERVFAIL, the failure mode most often confused with
 	// a DNSSEC validation failure.
 	ModServfail
+	// ModNXNAME answers with compact denial of existence (RFC 9824): NOERROR
+	// with an empty answer section, plus an NSEC whose type bitmap carries the
+	// NXNAME meta-type to signal that the name genuinely does not exist. A
+	// resolver that understands NXNAME synthesizes NXDOMAIN for its own client
+	// from that; one that does not sees an ordinary NODATA.
+	//
+	// This is the provable counterpart to ModNXDOMAIN, and comparing the two is
+	// the point of having both.
+	ModNXNAME
 	// ModBig returns a deliberately large answer. This is the amplification
 	// demonstration, so it is also the one modifier that is dangerous to leave
 	// reachable without rate limiting in front of it.
@@ -76,6 +93,7 @@ var modifierNames = map[string]Modifier{
 	"futuresig":  ModFutureSig,
 	"truncate":   ModTruncate,
 	"nxdomain":   ModNXDOMAIN,
+	"nxname":     ModNXNAME,
 	"servfail":   ModServfail,
 	"big":        ModBig,
 }
@@ -101,7 +119,7 @@ func (m Modifier) String() string {
 // modifierOrder fixes String()'s output order (map iteration is randomized).
 var modifierOrder = []string{
 	"unsigned", "badsig", "expiredsig", "futuresig",
-	"truncate", "nxdomain", "servfail", "big",
+	"truncate", "nxdomain", "nxname", "servfail", "big",
 }
 
 // conflicts lists modifier pairs that cannot both apply to one answer, so a
@@ -110,7 +128,9 @@ var modifierOrder = []string{
 // one signature to spoil, and rcode variants because there is only one rcode.
 var conflicts = []Modifier{
 	ModUnsigned | ModBadSig | ModExpiredSig | ModFutureSig,
-	ModNXDOMAIN | ModServfail,
+	// One rcode, one answer: asking for two negative outcomes at once is a
+	// client error, not a precedence question.
+	ModNXDOMAIN | ModNXNAME | ModServfail,
 }
 
 // Query is a parsed probe request.

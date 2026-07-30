@@ -488,3 +488,141 @@ func TestUnsignedZoneStillAnswers(t *testing.T) {
 		t.Error("unsigned zone returned no answer")
 	}
 }
+
+// nsecFrom pulls the NSEC out of an authority section, plus whatever RRSIG
+// covers it, so the denial tests can assert on the proof rather than the rcode
+// alone.
+func nsecFrom(t *testing.T, m *dns.Msg) (*dns.NSEC, bool) {
+	t.Helper()
+	for _, rr := range m.Ns {
+		if n, ok := rr.(*dns.NSEC); ok {
+			return n, true
+		}
+	}
+	return nil, false
+}
+
+func bitmapHas(n *dns.NSEC, t uint16) bool {
+	for _, b := range n.TypeBitMap {
+		if b == t {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCompactDenialSetsNXNAME covers the RFC 9824 path. The NXNAME bit is the
+// entire mechanism: it is what lets a resolver turn a provable NODATA into
+// NXDOMAIN for its own client, which is the thing a synthesized zone cannot do
+// with a traditional NSEC chain.
+func TestCompactDenialSetsNXNAME(t *testing.T) {
+	p := newTestProbe(t, true)
+	m := query(t, p, "_nxname.a1b2c3d4."+testZone, dns.TypeTXT, true)
+
+	// NOERROR, not NXDOMAIN — that is what makes it provable.
+	if m.Rcode != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s, want NOERROR for compact denial", dns.RcodeToString[m.Rcode])
+	}
+	if len(m.Answer) != 0 {
+		t.Errorf("compact denial must have an empty answer section, got %v", m.Answer)
+	}
+
+	nsec, ok := nsecFrom(t, m)
+	if !ok {
+		t.Fatal("no NSEC in the authority section")
+	}
+	if !bitmapHas(nsec, dns.TypeNXNAME) {
+		t.Errorf("NSEC bitmap lacks NXNAME: %v", nsec.TypeBitMap)
+	}
+	// RFC 9824 §3.1: only these three bits.
+	for _, b := range nsec.TypeBitMap {
+		switch b {
+		case dns.TypeRRSIG, dns.TypeNSEC, dns.TypeNXNAME:
+		default:
+			t.Errorf("NSEC bitmap carries unexpected type %s", dns.TypeToString[b])
+		}
+	}
+	// Black-lies next name: the immediate lexicographic successor of the qname.
+	if want := "\\000._nxname.a1b2c3d4." + testZone; nsec.NextDomain != want {
+		t.Errorf("NextDomain = %q, want %q", nsec.NextDomain, want)
+	}
+
+	var signed bool
+	for _, rr := range m.Ns {
+		if sig, isSig := rr.(*dns.RRSIG); isSig && sig.TypeCovered == dns.TypeNSEC {
+			signed = true
+			if err := sig.Verify(p.Signer.DNSKEY(), []dns.RR{nsec}); err != nil {
+				t.Errorf("NSEC signature does not verify: %v", err)
+			}
+		}
+	}
+	if !signed {
+		t.Error("the NSEC is unsigned, so the denial proves nothing")
+	}
+}
+
+// TestNodataDenialOmitsNXNAME is the other half of the rule: NXNAME means "this
+// name does not exist", so setting it for a name that DOES exist (and merely
+// lacks the queried type) would be a lie a resolver could act on.
+func TestNodataDenialOmitsNXNAME(t *testing.T) {
+	p := newTestProbe(t, true)
+	// The resolver reached us over IPv4, so AAAA is NODATA on an existing name.
+	m := query(t, p, "a1b2c3d4."+testZone, dns.TypeAAAA, true)
+
+	nsec, ok := nsecFrom(t, m)
+	if !ok {
+		t.Fatal("no NSEC in the authority section")
+	}
+	if bitmapHas(nsec, dns.TypeNXNAME) {
+		t.Error("NODATA for an existing name must NOT set NXNAME")
+	}
+}
+
+func TestLegacyNXDOMAINOmitsNXNAME(t *testing.T) {
+	// _nxdomain is deliberately the legacy, unprovable shape. It must not
+	// smuggle in the NXNAME signal, or the comparison between the two forms —
+	// the reason both exist — would be meaningless.
+	p := newTestProbe(t, true)
+	m := query(t, p, "_nxdomain.a1b2c3d4."+testZone, dns.TypeTXT, true)
+
+	if m.Rcode != dns.RcodeNameError {
+		t.Fatalf("rcode = %s, want NXDOMAIN", dns.RcodeToString[m.Rcode])
+	}
+	if nsec, ok := nsecFrom(t, m); ok && bitmapHas(nsec, dns.TypeNXNAME) {
+		t.Error("_nxdomain must not set NXNAME; that is what _nxname is for")
+	}
+}
+
+// TestNXNAMEQueryIsFormErr covers RFC 9824's explicit requirement. NODATA would
+// be wrong here: it would imply NXNAME is a real type this zone happens to have
+// none of, when in fact it can never exist as a record at all.
+func TestNXNAMEQueryIsFormErr(t *testing.T) {
+	p := newTestProbe(t, true)
+	for _, qname := range []string{
+		"a1b2c3d4." + testZone,
+		testZone,
+		"_nxname.a1b2c3d4." + testZone,
+	} {
+		m := query(t, p, qname, dns.TypeNXNAME, true)
+		if m.Rcode != dns.RcodeFormatError {
+			t.Errorf("QTYPE=NXNAME for %s gave %s, want FORMERR",
+				qname, dns.RcodeToString[m.Rcode])
+		}
+		if len(m.Answer) != 0 {
+			t.Errorf("QTYPE=NXNAME for %s returned answers: %v", qname, m.Answer)
+		}
+	}
+}
+
+func TestNegativeModifiersConflict(t *testing.T) {
+	// One rcode per answer, so any two of these together is a client error.
+	for _, sub := range []string{
+		"_nxdomain._nxname.a1b2c3d4",
+		"_nxname._servfail.a1b2c3d4",
+		"_nxdomain._servfail.a1b2c3d4",
+	} {
+		if _, ok := ParseQuery(sub); ok {
+			t.Errorf("ParseQuery(%q) accepted conflicting negative modifiers", sub)
+		}
+	}
+}
