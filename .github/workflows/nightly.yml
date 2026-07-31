@@ -25,7 +25,7 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
@@ -40,7 +40,7 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
@@ -57,7 +57,7 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
@@ -70,7 +70,7 @@ jobs:
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - run: |
@@ -83,7 +83,7 @@ jobs:
   opengrep:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: |
           curl -sSfL -o /usr/local/bin/opengrep \
             https://github.com/opengrep/opengrep/releases/download/v1.25.0/opengrep_manylinux_x86
@@ -101,7 +101,7 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
@@ -142,7 +142,7 @@ jobs:
     # not just a check that the target still builds and runs.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v5
         with:
           go-version-file: sni_tls/go.mod
@@ -159,7 +159,7 @@ jobs:
   containerize:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Dagger
         run: curl -fsSL https://dagger.io/install.sh | DAGGER_VERSION=0.21.7 sh
       - working-directory: ci
