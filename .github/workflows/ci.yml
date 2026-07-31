@@ -231,7 +231,7 @@ jobs:
         id: date
         run: echo "today=$(date -u +%F)" >> "$GITHUB_OUTPUT"
       - name: Restore grype DB cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/grype/db
           key: grype-db-${{ steps.date.outputs.today }}
