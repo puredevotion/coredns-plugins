@@ -158,7 +158,7 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	switch {
 	case q.Mods.Has(ModServfail):
-		return p.respond(state, w, r, dns.RcodeServerFailure, nil, nil, false)
+		return p.respond(state, w, r, dns.RcodeServerFailure, nil, nil, false, edeFor(q.Mods))
 
 	case q.Mods.Has(ModNXDOMAIN):
 		// The legacy shape: a literal NXDOMAIN with only a signed SOA behind it.
@@ -184,7 +184,7 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	if len(answer) == 0 {
 		// NODATA: the name exists, this type does not.
 		auth := p.nodataDenial(qname, q.Mods, state.Do())
-		return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false)
+		return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false, edeFor(q.Mods))
 	}
 
 	if state.Do() {
@@ -192,7 +192,10 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 			answer = append(answer, sig)
 		}
 	}
-	return p.respond(state, w, r, dns.RcodeSuccess, answer, nil, false)
+	// The signature modifiers land HERE, not in the switch above: a bad, expired
+	// or absent signature still produces an otherwise-normal NOERROR answer. This
+	// is the callsite that labels them.
+	return p.respond(state, w, r, dns.RcodeSuccess, answer, nil, false, edeFor(q.Mods))
 }
 
 // synthesize builds the answer records for one query.
@@ -399,7 +402,7 @@ func (p *Probe) sign(rrs []dns.RR, mods Modifier) dns.RR {
 
 // respond assembles and writes the reply.
 func (p *Probe) respond(state request.Request, w dns.ResponseWriter, r *dns.Msg,
-	rcode int, answer, auth []dns.RR, truncate bool,
+	rcode int, answer, auth []dns.RR, truncate bool, extErr ...*dns.EDNS0_EDE,
 ) (int, error) {
 	// Read the ZONEVERSION request BEFORE SizeAndDo, which is not optional
 	// ordering: SizeAndDo reuses the REQUEST's OPT record as the response's and
@@ -437,6 +440,13 @@ func (p *Probe) respond(state request.Request, w dns.ResponseWriter, r *dns.Msg,
 				opt.Option = append(opt.Option, zv)
 			}
 		}
+	}
+
+	// RFC 8914, after SizeAndDo (which is what puts an OPT on the response) and
+	// before Scrub, so the option counts toward the size the client advertised
+	// rather than pushing the message past it.
+	for _, e := range extErr {
+		attachEDE(m, e)
 	}
 
 	if !truncate {
