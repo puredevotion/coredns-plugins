@@ -104,6 +104,14 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return p.serveApex(state, w, r)
 	}
 
+	// RFC 6763 DNS-SD browse tree, served per-visitor under the token. Handled
+	// before ParseQuery, whose grammar only accepts `_<modifier>` labels and would
+	// answer REFUSED to `_services._dns-sd._udp.<token>` — throwing away the walk
+	// we are trying to observe.
+	if kind, token := parseDNSSD(sub); kind != dnssdNone {
+		return p.serveDNSSD(state, w, r, kind, token)
+	}
+
 	// RFC 8145 §5.2 Key Tag query, e.g. `_ta-0635-7aae.<zone>`. Handled before
 	// ParseQuery, which would otherwise answer REFUSED — and REFUSED to a
 	// resolver reporting its trust anchors is both wrong per the RFC and a
@@ -303,6 +311,69 @@ func (p *Probe) serveApex(state request.Request, w dns.ResponseWriter, r *dns.Ms
 		}
 	}
 	return p.respond(state, w, r, dns.RcodeSuccess, answer, nil, false)
+}
+
+// serveDNSSD answers one level of the per-visitor RFC 6763 browse tree.
+//
+// The query is observed like any other — the token is right there in the name — so
+// the walk shows up in the observation sequence and the web tier can report which
+// levels a client reached. Recorded BEFORE answering, for the same reason the main
+// path does it: a store failure must degrade the measurement, not the answer.
+func (p *Probe) serveDNSSD(state request.Request, w dns.ResponseWriter, r *dns.Msg, kind dnssdKind, token string) (int, error) {
+	transport, tlsInfo := transportFrom(w, state.Proto())
+	obs := Observe(Query{Token: token}, state.Name(), addrOf(state), transport, state.QType(), r)
+	obs.TLS = tlsInfo
+	recordMetrics(obs)
+	if _, err := p.Store.Record(obs); err != nil {
+		log.Warningf("recording DNS-SD observation for token %s: %v", token, err)
+	}
+
+	answer, extra := p.synthesizeDNSSD(kind, token, state.QType())
+	if len(answer) == 0 {
+		// NODATA: the name exists in the browse tree, this type does not belong at
+		// this level. Not NXDOMAIN — a client asking SRV at the enumerate level has
+		// made a type mistake, not visited a name that is absent.
+		auth := p.nodataDenial(state.Name(), 0, state.Do())
+		return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false)
+	}
+
+	if state.Do() {
+		if sig := p.sign(answer, 0); sig != nil {
+			answer = append(answer, sig)
+		}
+	}
+	return p.respondDNSSD(state, w, r, answer, extra)
+}
+
+// respondDNSSD writes a response carrying an ADDITIONAL section.
+//
+// Separate from respond() rather than another variadic parameter: the additional
+// section is only ever used by DNS-SD, and RFC 6763 §12's whole point is that those
+// records are a hint the client MAY use. Threading an unused slice through the
+// twelve other callsites would suggest it were general.
+//
+// Order matters. m.Extra is populated BEFORE SizeAndDo, which appends the response
+// OPT to the same slice — doing it the other way round would put the hint records
+// after the OPT, which some clients treat as the end of the message.
+func (p *Probe) respondDNSSD(state request.Request, w dns.ResponseWriter, r *dns.Msg,
+	answer, extra []dns.RR,
+) (int, error) {
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeSuccess)
+	m.Authoritative = true
+	m.Answer = answer
+	m.Extra = extra
+
+	state.SizeAndDo(m)
+	// Scrubbed like any other answer: if the hint records do not fit the client's
+	// advertised buffer they are dropped rather than forcing truncation, which is
+	// exactly what RFC 6763 §12 intends by calling them optional.
+	m = state.Scrub(m)
+
+	if err := w.WriteMsg(m); err != nil {
+		return dns.RcodeServerFailure, err
+	}
+	return dns.RcodeSuccess, nil
 }
 
 // serveKeyTagQuery answers an RFC 8145 Key Tag query.
