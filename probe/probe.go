@@ -107,6 +107,14 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	}
 
 	obs := Observe(q, raw, addrOf(state), transportOf(state), state.QType(), r)
+
+	// Before Record, and unconditionally: the aggregate must not depend on
+	// whether the per-token store accepted the observation. A store at its
+	// ceiling is exactly when the population question ("who is hammering us,
+	// and with what") matters most, and metrics carry no per-visitor data, so
+	// there is no reason for them to share the store's fate.
+	recordMetrics(obs)
+
 	stored, err := p.Store.Record(obs)
 	if err != nil {
 		// Answer anyway. A full or unreachable store degrades the measurement;
