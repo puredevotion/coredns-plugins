@@ -2,6 +2,7 @@ package probe
 
 import (
 	"encoding/binary"
+	"math"
 
 	"github.com/miekg/dns"
 )
@@ -69,12 +70,18 @@ func buildZoneVersion(zone string, serial uint32) *dns.EDNS0_ZONEVERSION {
 		return nil
 	}
 	labels := dns.CountLabel(z)
-	if labels == 0 || labels > 255 {
+	if labels <= 0 || labels > math.MaxUint8 {
 		// CountLabel cannot exceed DNS's 127-label limit in practice; the bound
 		// is here because LabelCount is a single octet and a silent truncation
 		// would produce a wrong answer rather than no answer.
 		return nil
 	}
+
+	// Bounded immediately above against math.MaxUint8, which is the field's own
+	// width — so this conversion cannot truncate. Expressed as the guard rather
+	// than as a cast annotation, because a silently truncated label count would
+	// point a client at the wrong zone.
+	labelCount := uint8(labels)
 
 	// SOA-SERIAL is a 4-octet unsigned integer in network byte order (RFC 9660
 	// §2.2). Version is a Go string of opaque octets, not text — do NOT format
@@ -84,7 +91,7 @@ func buildZoneVersion(zone string, serial uint32) *dns.EDNS0_ZONEVERSION {
 	binary.BigEndian.PutUint32(v[:], serial)
 
 	return &dns.EDNS0_ZONEVERSION{
-		LabelCount: uint8(labels),
+		LabelCount: labelCount,
 		Type:       zoneVersionTypeSOASerial,
 		Version:    string(v[:]),
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 )
 
 // ECHConfigList construction, for RFC 9848's `ech=` SVCB parameter.
@@ -71,6 +72,28 @@ const (
 // ErrECHPublicKeyLen means the supplied key was not a 32-byte X25519 point.
 var ErrECHPublicKeyLen = errors.New("probe: ECH public key must be 32 bytes")
 
+// u16 and u8 convert a length into its wire width, refusing values the field
+// cannot express.
+//
+// Not defensive padding: every length below is a TLS-style length prefix, and a
+// value that does not fit would be silently truncated by a bare cast, producing a
+// prefix that disagrees with the bytes that follow. That is exactly the corruption
+// ParseECHConfigList exists to detect on the network — emitting it ourselves would
+// be worse than failing.
+func u16(n int, what string) (uint16, error) {
+	if n < 0 || n > math.MaxUint16 {
+		return 0, fmt.Errorf("probe: ECH %s is %d bytes, which does not fit a 16-bit length", what, n)
+	}
+	return uint16(n), nil
+}
+
+func u8(n int, what string) (byte, error) {
+	if n < 0 || n > math.MaxUint8 {
+		return 0, fmt.Errorf("probe: ECH %s is %d bytes, which does not fit an 8-bit length", what, n)
+	}
+	return byte(n), nil
+}
+
 // BuildECHConfigList encodes a single-config ECHConfigList.
 //
 // publicName is the SNI a client would send on the OUTER ClientHello. It must be a
@@ -81,44 +104,65 @@ func BuildECHConfigList(configID byte, publicKey []byte, publicName string) ([]b
 	if len(publicKey) != x25519PubKeyLen {
 		return nil, fmt.Errorf("%w, got %d", ErrECHPublicKeyLen, len(publicKey))
 	}
-	if len(publicName) > 255 {
-		// The length prefix is one byte; a longer name cannot be encoded, and
-		// silently truncating a name would produce a config that points somewhere
-		// else entirely.
-		return nil, fmt.Errorf("probe: ECH public_name %q exceeds 255 bytes", publicName)
+	if len(publicName) > math.MaxUint8 {
+		// Checked here as well as in u8 below, for the better message: a
+		// too-long name is a caller mistake worth naming, not just a width
+		// failure. Silently truncating it would produce a config pointing
+		// somewhere else entirely.
+		return nil, fmt.Errorf("probe: ECH public_name %q exceeds %d bytes", publicName, math.MaxUint8)
 	}
 
 	// HpkeKeyConfig
+	keyLen, err := u16(len(publicKey), "public key")
+	if err != nil {
+		return nil, err
+	}
 	var key []byte
 	key = append(key, configID)
 	key = binary.BigEndian.AppendUint16(key, echKEMX25519)
-	key = binary.BigEndian.AppendUint16(key, uint16(len(publicKey)))
+	key = binary.BigEndian.AppendUint16(key, keyLen)
 	key = append(key, publicKey...)
 
 	// One cipher suite: kdf_id + aead_id, 4 bytes.
 	var suites []byte
 	suites = binary.BigEndian.AppendUint16(suites, echKDFHKDFSHA256)
 	suites = binary.BigEndian.AppendUint16(suites, echAEADAES128GCM)
-	key = binary.BigEndian.AppendUint16(key, uint16(len(suites)))
+	suitesLen, err := u16(len(suites), "cipher suite list")
+	if err != nil {
+		return nil, err
+	}
+	key = binary.BigEndian.AppendUint16(key, suitesLen)
 	key = append(key, suites...)
 
 	// ECHConfig contents
+	nameLen, err := u8(len(publicName), "public_name")
+	if err != nil {
+		return nil, err
+	}
 	contents := key
 	contents = append(contents, echMaxNameLength)
-	contents = append(contents, byte(len(publicName)))
+	contents = append(contents, nameLen)
 	contents = append(contents, publicName...)
 	contents = binary.BigEndian.AppendUint16(contents, 0) // no extensions
 
 	// ECHConfig
+	contentsLen, err := u16(len(contents), "config contents")
+	if err != nil {
+		return nil, err
+	}
 	var cfg []byte
 	cfg = binary.BigEndian.AppendUint16(cfg, echVersion)
-	cfg = binary.BigEndian.AppendUint16(cfg, uint16(len(contents)))
+	cfg = binary.BigEndian.AppendUint16(cfg, contentsLen)
 	cfg = append(cfg, contents...)
 
 	// ECHConfigList: the outer length prefix miekg/dns's SVCBECHConfig expects to
 	// be present ("including the redundant length prefix", per its own comment).
+	cfgLen, err := u16(len(cfg), "config")
+	if err != nil {
+		return nil, err
+	}
 	var list []byte
-	list = binary.BigEndian.AppendUint16(list, uint16(len(cfg)))
+	list = binary.BigEndian.AppendUint16(list, cfgLen)
 	list = append(list, cfg...)
 	return list, nil
 }

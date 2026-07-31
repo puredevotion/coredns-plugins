@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"encoding/binary"
 	"errors"
 	"strings"
 	"testing"
@@ -226,9 +227,13 @@ func TestKnowsZoneKeyRequiresASignal(t *testing.T) {
 		msg.SetQuestion("deadbeef."+testZone, dns.TypeTXT)
 		msg.SetEdns0(1232, false)
 		opt := msg.IsEdns0()
+		// Encoded rather than hand-shifted: option 14 is a list of 16-bit values
+		// in network byte order, and PutUint16 says so without a narrowing cast.
+		var raw [2]byte
+		binary.BigEndian.PutUint16(raw[:], tag)
 		opt.Option = append(opt.Option, &dns.EDNS0_LOCAL{
 			Code: ednsKeyTagOption,
-			Data: []byte{byte(tag >> 8), byte(tag)},
+			Data: raw[:],
 		})
 		return msg
 	}

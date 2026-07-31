@@ -64,8 +64,8 @@ func TestECHConfigListAcceptedByCryptoTLS(t *testing.T) {
 	// passes while validating nothing — worth stating, because that was the first
 	// version of this test.
 	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	defer func() { _ = c1.Close() }()
+	defer func() { _ = c2.Close() }()
 
 	var hello []byte
 	read := make(chan struct{})

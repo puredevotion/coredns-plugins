@@ -254,9 +254,10 @@ func TestZoneVersionResponseIgnoresClientPayload(t *testing.T) {
 	if zv.LabelCount == 99 {
 		t.Error("LabelCount echoed from the client's option")
 	}
-	if zv.LabelCount != uint8(dns.CountLabel(dns.CanonicalName(p.Zone))) {
-		t.Errorf("LabelCount = %d, want %d (derived from the zone)",
-			zv.LabelCount, dns.CountLabel(dns.CanonicalName(p.Zone)))
+	// Compared as int, widening rather than narrowing: casting the count down to
+	// uint8 to compare would hide exactly the overflow this asserts against.
+	if wantLabels := dns.CountLabel(dns.CanonicalName(p.Zone)); int(zv.LabelCount) != wantLabels {
+		t.Errorf("LabelCount = %d, want %d (derived from the zone)", zv.LabelCount, wantLabels)
 	}
 	serial, ok := parseZoneVersionSerial(zv)
 	if !ok {
