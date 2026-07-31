@@ -8,7 +8,7 @@
 
 Every name below the configured zone is synthesized on demand from a random token in the query name. That uniqueness is the mechanism, not a detail: a name nobody has asked for before defeats every cache between a visitor and this server, so the visitor's resolver is forced to query us directly and we get to observe it.
 
-What each query reveals is recorded against its token: the resolver's egress address (which is almost never the visitor's), the address family and transport, whether EDNS and the DO bit are present, the advertised UDP buffer, DNS cookie support, EDNS Client Subnet disclosure, whether the resolver signals understanding of compact denial (`CO`) or extensible delegation (`DE`), whether it asked for the zone version (RFC 9660), and whether it randomizes label case (DNS-0x20). A separate web tier reads those observations back by token and reports "your resolver did X".
+What each query reveals is recorded against its token: the resolver's egress address (which is almost never the visitor's), the address family and transport, whether EDNS and the DO bit are present, the advertised UDP buffer, DNS cookie support, EDNS Client Subnet disclosure, whether the resolver signals understanding of compact denial (`CO`) or extensible delegation (`DE`), whether it asked for the zone version (RFC 9660), which DNSSEC trust anchors it signalled (RFC 8145), and whether it randomizes label case (DNS-0x20). A separate web tier reads those observations back by token and reports "your resolver did X".
 
 The zone can also be asked to answer **deliberately wrongly**, which is how a page establishes whether a resolver genuinely validates DNSSEC rather than merely setting the DO bit and hoping. Each failure mode is produced differently on purpose, because resolvers get different subsets of them right.
 
@@ -39,6 +39,30 @@ RFC 7871 §7.1.2 lets a resolver send the option with `SOURCE PREFIX-LENGTH 0` t
 The middle row must never be presented as a leak. `ecs_prefix` is deliberately left unset there rather than becoming a `/0`, which would render as "leaked everything".
 
 `ecs_prefix` is the most identifying value this plugin stores — a truncated form of the visitor's own address. It exists because showing someone what leaked is the point of the measurement, it is reachable only through the random token the visitor holds, and it expires with the rest of the observation on the store's TTL. Do not add a second index over it.
+
+### Trust anchor knowledge (RFC 8145)
+
+RFC 8145 lets a validating resolver tell a server which DNSSEC keys it would validate that server's answers with — the mechanism that measured the root KSK rollover, and one essentially only root operators have ever run the receiving side of.
+
+It defines two mechanisms, and **they are not equally useful here**:
+
+| Mechanism | Applies to | Expect |
+|---|---|---|
+| **EDNS option 14** (`edns-key-tag`) | any query | real data — this is the useful half |
+| **Key Tag queries** (`_ta-<hex>…`) | the apex of a resolver's *configured* trust anchors | ~nothing |
+
+Key Tag queries are sent only to zones a resolver has been configured to trust directly (RFC 8145 §5.1). This zone chains from root through a DS, so it is nobody's configured anchor. It is handled anyway because the case where one *does* arrive means somebody pinned this zone as a trust anchor — exactly the kind of thing a measurement zone should notice rather than answer `REFUSED` to.
+
+Key tags are **hexadecimal, zero-padded to four digits, sorted smallest to largest**: `_ta-0635-7aae-aa1b`. Decimal is the natural wrong guess and would parse many names into confidently wrong numbers.
+
+Two deliberate refusals to be helpful:
+
+- An **unpadded** tag (`_ta-635`) is rejected rather than read as `0x0635`. Normalising it away would hide a real implementation bug, which is the opposite of the point.
+- Arrival **order is preserved** and sortedness reported separately, rather than sorted on the way in. A sender that violates §5.2's ordering requirement is a finding.
+
+A Key Tag query is answered `NODATA` — NOERROR with the SOA in authority — because RFC 8145 §5.3 makes the response whatever the zone content implies, and this synthesized zone has no `_ta-*` records. Not `NXDOMAIN`, and definitely not `REFUSED`.
+
+`knows_zone_key` is only meaningful alongside a non-empty `key_tags`: a resolver that signalled nothing has **not** told us it lacks our key.
 
 ### Zone version (RFC 9660)
 

@@ -26,6 +26,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"strings"
@@ -97,6 +98,25 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return p.serveApex(state, w, r)
 	}
 
+	// RFC 8145 §5.2 Key Tag query, e.g. `_ta-0635-7aae.<zone>`. Handled before
+	// ParseQuery, which would otherwise answer REFUSED — and REFUSED to a
+	// resolver reporting its trust anchors is both wrong per the RFC and a
+	// measurement thrown away.
+	//
+	// Expect approximately none of these: RFC 8145 §5.1 sends them to the apex of
+	// each CONFIGURED trust anchor, and this zone is nobody's configured anchor —
+	// it chains from root through a DS. Handled anyway because the case where one
+	// DOES arrive means somebody pinned this zone as an anchor, which is exactly
+	// what a measurement zone should notice rather than reject.
+	if tags, err := ParseKeyTagQuery(sub); err == nil {
+		return p.serveKeyTagQuery(state, w, r, tags)
+	} else if errors.Is(err, ErrBadKeyTagQuery) {
+		// Shaped like a Key Tag query but not one. Counted, then REFUSED like any
+		// other name this zone's grammar rejects.
+		probeKeyTagQueries.WithLabelValues("malformed").Inc()
+		return p.respond(state, w, r, dns.RcodeRefused, nil, nil, false)
+	}
+
 	q, ok := ParseQuery(sub)
 	if !ok {
 		// REFUSED, not NXDOMAIN: the name is malformed for this zone's grammar
@@ -107,6 +127,15 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	}
 
 	obs := Observe(q, raw, addrOf(state), transportOf(state), state.QType(), r)
+
+	// RFC 8145: did the resolver signal it holds THIS zone's key? Computed here
+	// rather than in Observe because it needs the signer, and Observe is
+	// deliberately a pure function of one query. False when the resolver sent no
+	// tags means "did not say", not "does not have it" — hence the guard on
+	// len(KeyTags) rather than an unconditional comparison.
+	if len(obs.KeyTags) > 0 && p.Signer != nil {
+		obs.KnowsZoneKey = hasKeyTag(obs.KeyTags, p.Signer.DNSKEY().KeyTag())
+	}
 
 	// Before Record, and unconditionally: the aggregate must not depend on
 	// whether the per-token store accepted the observation. A store at its
@@ -234,6 +263,41 @@ func (p *Probe) serveApex(state request.Request, w dns.ResponseWriter, r *dns.Ms
 		}
 	}
 	return p.respond(state, w, r, dns.RcodeSuccess, answer, nil, false)
+}
+
+// serveKeyTagQuery answers an RFC 8145 Key Tag query.
+//
+// RFC 8145 §5.3: "A server does not need to have built-in logic that determines
+// the response to Key Tag queries: the response code is determined by whether the
+// data is in the zone file or covered by wildcards." This zone is synthesized and
+// has no `_ta-*` records, so the correct answer is NODATA — NOERROR with an empty
+// answer and the SOA in authority — NOT NXDOMAIN and certainly not REFUSED.
+//
+// There is no token in a Key Tag query, so it cannot be correlated to a visitor
+// and nothing is written to the per-token store. It is counted instead, which is
+// the honest place for a population-level signal with no individual attached.
+func (p *Probe) serveKeyTagQuery(state request.Request, w dns.ResponseWriter, r *dns.Msg, tags []uint16) (int, error) {
+	sorted := "unsorted"
+	if KeyTagsSorted(tags) {
+		sorted = "sorted"
+	}
+	probeKeyTagQueries.WithLabelValues(sorted).Inc()
+
+	knowsOurs := "unknown"
+	if p.Signer != nil {
+		if hasKeyTag(tags, p.Signer.DNSKEY().KeyTag()) {
+			knowsOurs = "yes"
+		} else {
+			knowsOurs = "no"
+		}
+	}
+	probeKeyTagKnowledge.WithLabelValues("query", knowsOurs).Inc()
+
+	log.Infof("RFC 8145 key tag query: tags=%s %s knows_zone_key=%s",
+		FormatKeyTagQuery(tags), sorted, knowsOurs)
+
+	auth := p.nodataDenial(state.Name(), 0, state.Do())
+	return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false)
 }
 
 func (p *Probe) soa() *dns.SOA {

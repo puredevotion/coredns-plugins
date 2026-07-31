@@ -69,6 +69,37 @@ var (
 		Help:      "Inbound RFC 9567 DNS error reports, by extended error code and whether they correlated to a token.",
 	}, []string{"ede", "correlated"})
 
+	// probeKeyTagQueries counts inbound RFC 8145 Key Tag queries.
+	//
+	// `state` records whether the sender honoured §5.2's smallest-to-largest sort
+	// requirement, plus "malformed" for names shaped like a Key Tag query that
+	// were not one. Recording conformance rather than silently normalising it is
+	// the point — this zone exists to see what implementations actually do.
+	probeKeyTagQueries = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: plugin.Namespace,
+		Subsystem: "probe",
+		Name:      "key_tag_queries_total",
+		Help:      "Inbound RFC 8145 Key Tag queries, by whether the tag list was correctly sorted.",
+	}, []string{"state"})
+
+	// probeKeyTagKnowledge counts trust-anchor signals by whether this zone's own
+	// key was among the tags.
+	//
+	// `source` separates the two RFC 8145 mechanisms, which are not equally
+	// informative: "edns" (option 14, attached to any query — the half that
+	// actually produces data) and "query" (a `_ta-` Key Tag query, which only
+	// arrives if somebody pinned this zone as a configured trust anchor).
+	//
+	// `knows` is three-valued: "yes", "no", and "unknown" for when this zone has
+	// no signer to compare against. A zone with no key cannot conclude a resolver
+	// lacks its key.
+	probeKeyTagKnowledge = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: plugin.Namespace,
+		Subsystem: "probe",
+		Name:      "key_tag_knowledge_total",
+		Help:      "RFC 8145 trust-anchor signals, by mechanism and whether this zone's key tag was signalled.",
+	}, []string{"source", "knows"})
+
 	// probeReportsRejected counts report names that did not parse. Separate from
 	// probeReports because "someone is sending us garbage" and "a resolver
 	// reported a failure" are different operational facts, and conflating them
@@ -148,5 +179,16 @@ func recordMetrics(o Observation) {
 	// Only disclosures, deliberately — see probeECSPrefixBits.
 	if o.ECS && o.ECSScope > 0 {
 		probeECSPrefixBits.WithLabelValues(ecsFamilyLabel(o.ECSFamily)).Observe(float64(o.ECSScope))
+	}
+
+	// RFC 8145 via EDNS option 14. Only counted when the resolver actually sent
+	// tags: silence is not a statement about which keys it holds, and counting it
+	// as "no" would manufacture a finding out of the common case.
+	if len(o.KeyTags) > 0 {
+		knows := "no"
+		if o.KnowsZoneKey {
+			knows = "yes"
+		}
+		probeKeyTagKnowledge.WithLabelValues("edns", knows).Inc()
 	}
 }

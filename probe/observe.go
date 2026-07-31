@@ -125,6 +125,16 @@ type Observation struct {
 	// See degFlag's comment for why this specific bit, and what would make it
 	// silently wrong.
 	DELEGAware bool `json:"deleg_aware"`
+	// KeyTags are the DNSSEC key tags the resolver signalled it would validate
+	// this response with (RFC 8145 edns-key-tag, EDNS option 14). Empty when the
+	// resolver said nothing, which is the overwhelmingly common case.
+	KeyTags []uint16 `json:"key_tags,omitempty"`
+	// KnowsZoneKey means this zone's own key tag was among KeyTags — i.e. the
+	// resolver is holding the key it would need to validate us. Meaningful only
+	// when KeyTags is non-empty; false otherwise means "did not say", not "does
+	// not have it".
+	KnowsZoneKey bool `json:"knows_zone_key,omitempty"`
+
 	// ZoneVersionAsked means the resolver sent an RFC 9660 ZONEVERSION option,
 	// i.e. asked which version of the zone answered. Vanishingly rare, which is
 	// what makes it worth counting: it is a direct measure of how much
@@ -228,6 +238,15 @@ func Observe(q Query, raw string, addr netip.Addr, transport Transport, qtype ui
 				obs.Cookie = true
 			case *dns.EDNS0_ZONEVERSION:
 				obs.ZoneVersionAsked = true
+			case *dns.EDNS0_LOCAL:
+				// RFC 8145 option 14 has no type in miekg/dns, so it lands here.
+				// Decoded rather than ignored; a malformed payload records
+				// nothing rather than a truncated tag list.
+				if v.Code == ednsKeyTagOption {
+					if tags, ok := parseEDNSKeyTags(v.Data); ok {
+						obs.KeyTags = tags
+					}
+				}
 			case *dns.EDNS0_SUBNET:
 				obs.ECS = true
 				obs.ECSScope = v.SourceNetmask
