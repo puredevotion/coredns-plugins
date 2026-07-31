@@ -1,7 +1,9 @@
 package probe
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/coredns/caddy"
@@ -207,8 +209,32 @@ func parse(c *caddy.Controller) (*Probe, error) {
 		return nil, err
 	}
 	p.Store = store
+
+	// Build the ECH transport canary. Deliberately NOT configurable and NOT
+	// random: the measurement compares bytes that arrive against bytes we serve,
+	// so it has to be stable across restarts and identical on every replica. The
+	// key is derived from the zone name rather than generated, which gives both
+	// properties for free and makes it distinct per zone.
+	//
+	// Nothing holds the private half. See echconfig.go — publishing a USABLE ECH
+	// config from a zone that serves no TLS would invite clients to attempt real
+	// ECH against names that cannot complete it.
+	echKey := sha256.Sum256([]byte("probe-ech-canary/" + p.Zone))
+	echList, err := BuildECHConfigList(echConfigID, echKey[:], strings.TrimSuffix(p.Zone, "."))
+	if err != nil {
+		// Only reachable if the zone name exceeds 255 bytes, which CoreDNS would
+		// have rejected earlier. Surfaced rather than ignored so the zone never
+		// comes up serving HTTPS records with no ech= to measure.
+		return nil, c.Errf("building ECH canary for %s: %v", p.Zone, err)
+	}
+	p.ECHConfigList = echList
+
 	return p, nil
 }
+
+// echConfigID is fixed. RFC 9848 uses it to select among several configs; there is
+// only ever one here, and a stable value keeps the served bytes comparable.
+const echConfigID = 0x01
 
 // buildStore picks the observation store. In-process by default so the plugin
 // works with no external dependency; Valkey when configured, which is required

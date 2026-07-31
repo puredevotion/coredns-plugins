@@ -26,6 +26,7 @@ package probe
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/netip"
 	"strings"
@@ -59,6 +60,12 @@ type Probe struct {
 	Store Store
 	// BigSize is the payload size the `_big` modifier aims for, in bytes.
 	BigSize int
+	// ECHConfigList is the RFC 9848 `ech=` parameter served in HTTPS/SVCB
+	// answers. Built once at setup and never rotated, because the measurement
+	// compares the bytes that arrive against the bytes we serve — see
+	// echconfig.go for why this is a transport canary and NOT a usable ECH
+	// deployment.
+	ECHConfigList []byte
 
 	Next plugin.Handler
 }
@@ -97,6 +104,25 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return p.serveApex(state, w, r)
 	}
 
+	// RFC 8145 §5.2 Key Tag query, e.g. `_ta-0635-7aae.<zone>`. Handled before
+	// ParseQuery, which would otherwise answer REFUSED — and REFUSED to a
+	// resolver reporting its trust anchors is both wrong per the RFC and a
+	// measurement thrown away.
+	//
+	// Expect approximately none of these: RFC 8145 §5.1 sends them to the apex of
+	// each CONFIGURED trust anchor, and this zone is nobody's configured anchor —
+	// it chains from root through a DS. Handled anyway because the case where one
+	// DOES arrive means somebody pinned this zone as an anchor, which is exactly
+	// what a measurement zone should notice rather than reject.
+	if tags, err := ParseKeyTagQuery(sub); err == nil {
+		return p.serveKeyTagQuery(state, w, r, tags)
+	} else if errors.Is(err, ErrBadKeyTagQuery) {
+		// Shaped like a Key Tag query but not one. Counted, then REFUSED like any
+		// other name this zone's grammar rejects.
+		probeKeyTagQueries.WithLabelValues("malformed").Inc()
+		return p.respond(state, w, r, dns.RcodeRefused, nil, nil, false)
+	}
+
 	q, ok := ParseQuery(sub)
 	if !ok {
 		// REFUSED, not NXDOMAIN: the name is malformed for this zone's grammar
@@ -106,7 +132,26 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return p.respond(state, w, r, dns.RcodeRefused, nil, nil, false)
 	}
 
-	obs := Observe(q, raw, addrOf(state), transportOf(state), state.QType(), r)
+	transport, tlsInfo := transportFrom(w, state.Proto())
+	obs := Observe(q, raw, addrOf(state), transport, state.QType(), r)
+	obs.TLS = tlsInfo
+
+	// RFC 8145: did the resolver signal it holds THIS zone's key? Computed here
+	// rather than in Observe because it needs the signer, and Observe is
+	// deliberately a pure function of one query. False when the resolver sent no
+	// tags means "did not say", not "does not have it" — hence the guard on
+	// len(KeyTags) rather than an unconditional comparison.
+	if len(obs.KeyTags) > 0 && p.Signer != nil {
+		obs.KnowsZoneKey = hasKeyTag(obs.KeyTags, p.Signer.DNSKEY().KeyTag())
+	}
+
+	// Before Record, and unconditionally: the aggregate must not depend on
+	// whether the per-token store accepted the observation. A store at its
+	// ceiling is exactly when the population question ("who is hammering us,
+	// and with what") matters most, and metrics carry no per-visitor data, so
+	// there is no reason for them to share the store's fate.
+	recordMetrics(obs)
+
 	stored, err := p.Store.Record(obs)
 	if err != nil {
 		// Answer anyway. A full or unreachable store degrades the measurement;
@@ -119,7 +164,7 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	switch {
 	case q.Mods.Has(ModServfail):
-		return p.respond(state, w, r, dns.RcodeServerFailure, nil, nil, false)
+		return p.respond(state, w, r, dns.RcodeServerFailure, nil, nil, false, edeFor(q.Mods))
 
 	case q.Mods.Has(ModNXDOMAIN):
 		// The legacy shape: a literal NXDOMAIN with only a signed SOA behind it.
@@ -145,7 +190,7 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	if len(answer) == 0 {
 		// NODATA: the name exists, this type does not.
 		auth := p.nodataDenial(qname, q.Mods, state.Do())
-		return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false)
+		return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false, edeFor(q.Mods))
 	}
 
 	if state.Do() {
@@ -153,7 +198,10 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 			answer = append(answer, sig)
 		}
 	}
-	return p.respond(state, w, r, dns.RcodeSuccess, answer, nil, false)
+	// The signature modifiers land HERE, not in the switch above: a bad, expired
+	// or absent signature still produces an otherwise-normal NOERROR answer. This
+	// is the callsite that labels them.
+	return p.respond(state, w, r, dns.RcodeSuccess, answer, nil, false, edeFor(q.Mods))
 }
 
 // synthesize builds the answer records for one query.
@@ -180,6 +228,35 @@ func (p *Probe) synthesize(qname string, qtype uint16, obs Observation, mods Mod
 		h := hdr
 		h.Rrtype = dns.TypeAAAA
 		return []dns.RR{&dns.AAAA{Hdr: h, AAAA: net.IP(obs.ResolverAddr.AsSlice())}}
+
+	case dns.TypeHTTPS, dns.TypeSVCB:
+		// RFC 9460 service binding, carrying RFC 9848's ech= parameter.
+		//
+		// The measurement is transport integrity: SVCB/HTTPS is uncommon enough
+		// that resolvers and middleboxes are known to strip, truncate or refuse
+		// parameters they do not understand, and `ech=` is the one most likely to
+		// be interfered with deliberately — stripping it is exactly how an
+		// operator forces SNI back into the clear. Serving a known, deterministic
+		// value is what lets a mismatch be attributed to the path.
+		if len(p.ECHConfigList) == 0 {
+			return nil // NODATA rather than an HTTPS record with no ech= to measure
+		}
+		h := hdr
+		h.Rrtype = qtype
+		params := []dns.SVCBKeyValue{
+			// ALPN first: RFC 9460 §7 requires SvcParams in strictly ascending
+			// key order on the wire, and alpn(1) precedes ech(5).
+			&dns.SVCBAlpn{Alpn: []string{"h2"}},
+			&dns.SVCBECHConfig{ECH: p.ECHConfigList},
+		}
+		if qtype == dns.TypeHTTPS {
+			return []dns.RR{&dns.HTTPS{SVCB: dns.SVCB{
+				Hdr: h, Priority: 1, Target: ".", Value: params,
+			}}}
+		}
+		return []dns.RR{&dns.SVCB{
+			Hdr: h, Priority: 1, Target: ".", Value: params,
+		}}
 
 	case dns.TypeTXT:
 		h := hdr
@@ -226,6 +303,41 @@ func (p *Probe) serveApex(state request.Request, w dns.ResponseWriter, r *dns.Ms
 		}
 	}
 	return p.respond(state, w, r, dns.RcodeSuccess, answer, nil, false)
+}
+
+// serveKeyTagQuery answers an RFC 8145 Key Tag query.
+//
+// RFC 8145 §5.3: "A server does not need to have built-in logic that determines
+// the response to Key Tag queries: the response code is determined by whether the
+// data is in the zone file or covered by wildcards." This zone is synthesized and
+// has no `_ta-*` records, so the correct answer is NODATA — NOERROR with an empty
+// answer and the SOA in authority — NOT NXDOMAIN and certainly not REFUSED.
+//
+// There is no token in a Key Tag query, so it cannot be correlated to a visitor
+// and nothing is written to the per-token store. It is counted instead, which is
+// the honest place for a population-level signal with no individual attached.
+func (p *Probe) serveKeyTagQuery(state request.Request, w dns.ResponseWriter, r *dns.Msg, tags []uint16) (int, error) {
+	sorted := "unsorted"
+	if KeyTagsSorted(tags) {
+		sorted = "sorted"
+	}
+	probeKeyTagQueries.WithLabelValues(sorted).Inc()
+
+	knowsOurs := "unknown"
+	if p.Signer != nil {
+		if hasKeyTag(tags, p.Signer.DNSKEY().KeyTag()) {
+			knowsOurs = "yes"
+		} else {
+			knowsOurs = "no"
+		}
+	}
+	probeKeyTagKnowledge.WithLabelValues("query", knowsOurs).Inc()
+
+	log.Infof("RFC 8145 key tag query: tags=%s %s knows_zone_key=%s",
+		FormatKeyTagQuery(tags), sorted, knowsOurs)
+
+	auth := p.nodataDenial(state.Name(), 0, state.Do())
+	return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false)
 }
 
 func (p *Probe) soa() *dns.SOA {
@@ -325,8 +437,22 @@ func (p *Probe) sign(rrs []dns.RR, mods Modifier) dns.RR {
 
 // respond assembles and writes the reply.
 func (p *Probe) respond(state request.Request, w dns.ResponseWriter, r *dns.Msg,
-	rcode int, answer, auth []dns.RR, truncate bool,
+	rcode int, answer, auth []dns.RR, truncate bool, extErr ...*dns.EDNS0_EDE,
 ) (int, error) {
+	// Read the ZONEVERSION request BEFORE SizeAndDo, which is not optional
+	// ordering: SizeAndDo reuses the REQUEST's OPT record as the response's and
+	// runs CoreDNS's supportedOptions filter over it IN PLACE. That filter keeps
+	// only NSID/EXPIRE/COOKIE/TCPKEEPALIVE/PADDING plus anything registered via
+	// edns.SetSupportedOption, so it deletes the client's ZONEVERSION option
+	// from r on the way past. Checking afterwards silently never fires — which
+	// is exactly what happened, and only an end-to-end test through ServeDNS
+	// caught it.
+	//
+	// Registering ZONEVERSION as a "supported" option would be the wrong fix: it
+	// would make CoreDNS echo the client's own option back, so we would either
+	// return their payload as our zone version or emit two ZONEVERSION options.
+	wantZoneVersion := requestsZoneVersion(r)
+
 	m := new(dns.Msg)
 	m.SetRcode(r, rcode)
 	m.Authoritative = true
@@ -338,6 +464,26 @@ func (p *Probe) respond(state request.Request, w dns.ResponseWriter, r *dns.Msg,
 	// truncating. Without this the `_big` variant would be dropped by the
 	// stack rather than delivered and observed.
 	state.SizeAndDo(m)
+
+	// RFC 9660: answer ZONEVERSION only when asked. Attached after SizeAndDo,
+	// which is what puts an OPT record on the response, and before Scrub, so the
+	// option is inside the size the client advertised rather than pushing the
+	// message past it.
+	if wantZoneVersion {
+		if zv := buildZoneVersion(p.Zone, p.soa().Serial); zv != nil {
+			if opt := m.IsEdns0(); opt != nil {
+				opt.Option = append(opt.Option, zv)
+			}
+		}
+	}
+
+	// RFC 8914, after SizeAndDo (which is what puts an OPT on the response) and
+	// before Scrub, so the option counts toward the size the client advertised
+	// rather than pushing the message past it.
+	for _, e := range extErr {
+		attachEDE(m, e)
+	}
+
 	if !truncate {
 		m = state.Scrub(m)
 	}
@@ -362,15 +508,6 @@ func addrOf(state request.Request) netip.Addr {
 // and DoH — which are TCP underneath — are not distinguished here. Recording
 // them separately needs the listener to pass that down, which is a change
 // outside this plugin.
-func transportOf(state request.Request) Transport {
-	switch state.Proto() {
-	case "tcp":
-		return TransportTCP
-	default:
-		return TransportUDP
-	}
-}
-
 // chunk splits a payload into the 255-byte strings a TXT record is made of.
 func chunk(s string) []string {
 	const max = 255

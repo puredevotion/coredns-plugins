@@ -53,6 +53,10 @@ type Observation struct {
 	ResolverPrefix netip.Prefix `json:"resolver_prefix"`
 
 	Transport Transport `json:"transport"`
+	// TLS is the handshake detail for queries that arrived encrypted, nil
+	// otherwise. See RFC 9539 in encrypted.go for why this is worth more than a
+	// boolean.
+	TLS *TLSInfo `json:"tls,omitempty"`
 	// IPv6 records which protocol carried the query. A resolver reaching us
 	// over IPv6 for a visitor on IPv4 (and the reverse) is common and worth
 	// showing.
@@ -80,9 +84,73 @@ type Observation struct {
 	Cookie bool `json:"cookie"`
 	// ECS means the resolver forwarded a client-subnet prefix — a privacy leak
 	// the visitor probably did not opt into, and worth surfacing as such.
+	//
+	// Read ECS together with ECSScope, never alone. There are THREE states, and
+	// collapsing them to two gets the interesting one backwards:
+	//
+	//	ECS=false                 no option sent — resolver says nothing
+	//	ECS=true, ECSScope=0      option sent with SOURCE PREFIX-LENGTH 0, i.e.
+	//	                          the resolver deliberately DECLINED to disclose
+	//	ECS=true, ECSScope>0      resolver disclosed ECSScope bits of the client
+	//
+	// The middle case is the *best* outcome (RFC 7871 §7.1.2's explicit opt-out)
+	// and must never render as "leaked".
 	ECS bool `json:"ecs"`
-	// ECSScope is the prefix length the resolver disclosed, 0 when absent.
+	// ECSScope is SOURCE PREFIX-LENGTH from the query — how many bits of the
+	// client address the resolver disclosed. 0 when absent OR when explicitly
+	// declined; see ECS.
+	//
+	// Named "Scope" for the field's history, not for accuracy: RFC 7871 calls
+	// the response-side field SCOPE PREFIX-LENGTH, and this is the query-side
+	// SOURCE PREFIX-LENGTH. Kept as-is because the web tier's
+	// internal/probereport mirrors this JSON tag and renaming would break the
+	// seam for no measurement benefit.
 	ECSScope uint8 `json:"ecs_scope"`
+	// ECSFamily is the RFC 7871 address family of the disclosed prefix (1=IPv4,
+	// 2=IPv6), 0 when absent. Worth its own field because a resolver disclosing
+	// an IPv6 prefix for an IPv4 client (or the reverse) is itself a finding.
+	ECSFamily uint16 `json:"ecs_family"`
+	// ECSPrefix is the prefix the resolver actually disclosed, zero when absent
+	// or declined.
+	//
+	// This is the most identifying thing this plugin stores — it is a truncated
+	// form of the visitor's own address, which nothing else here records. It is
+	// kept only because showing someone what leaked is the entire point of the
+	// measurement, it is reachable only via the random token the visitor holds,
+	// and it expires with the rest of the observation on the store's TTL. Do not
+	// add a second index over it.
+	ECSPrefix netip.Prefix `json:"ecs_prefix"`
+
+	// DELEGAware means the resolver set the EDNS DE bit, signalling that it
+	// understands extensible delegation (draft-ietf-deleg). DELEG-unaware
+	// servers ignore the bit, so a resolver setting it is opting in to being
+	// measured for it — which is why this costs nothing and risks nothing.
+	//
+	// See degFlag's comment for why this specific bit, and what would make it
+	// silently wrong.
+	DELEGAware bool `json:"deleg_aware"`
+	// KeyTags are the DNSSEC key tags the resolver signalled it would validate
+	// this response with (RFC 8145 edns-key-tag, EDNS option 14). Empty when the
+	// resolver said nothing, which is the overwhelmingly common case.
+	KeyTags []uint16 `json:"key_tags,omitempty"`
+	// KnowsZoneKey means this zone's own key tag was among KeyTags — i.e. the
+	// resolver is holding the key it would need to validate us. Meaningful only
+	// when KeyTags is non-empty; false otherwise means "did not say", not "does
+	// not have it".
+	KnowsZoneKey bool `json:"knows_zone_key,omitempty"`
+
+	// ZoneVersionAsked means the resolver sent an RFC 9660 ZONEVERSION option,
+	// i.e. asked which version of the zone answered. Vanishingly rare, which is
+	// what makes it worth counting: it is a direct measure of how much
+	// diagnostic protocol a resolver actually implements.
+	ZoneVersionAsked bool `json:"zoneversion_asked"`
+
+	// CompactAware means the resolver set the EDNS CO bit (RFC 9824),
+	// signalling it understands compact denial of existence. This zone already
+	// SERVES compact denial via the `_nxname` variant, so pairing the two tells
+	// us something neither does alone: whether the resolvers that receive our
+	// compact denials actually asked for them.
+	CompactAware bool `json:"compact_aware"`
 
 	// CaseRandomized means the query arrived with mixed-case labels, i.e. the
 	// resolver implements DNS-0x20 (draft-vixie-dnsext-dns0x20) as an
@@ -99,6 +167,31 @@ type Observation struct {
 const (
 	v4PrefixBits = 24
 	v6PrefixBits = 56
+)
+
+// EDNS header flag bits, as they sit in the OPT record's 16-bit flags field
+// (the low half of OPT.Hdr.Ttl). miekg/dns exposes only DO, via Do()/SetDo, so
+// the other two are masked by hand.
+//
+// Bit numbering is MSB-first per RFC 6891, hence bit 0 == 1<<15:
+//
+//	bit 0  DO  DNSSEC OK                (RFC 4035)     -> 1<<15  0x8000
+//	bit 1  CO  Compact denial understood (RFC 9824)     -> 1<<14  0x4000
+//	bit 2  DE  DELEG enabled             (draft-ietf-deleg) -> 1<<13  0x2000
+//
+// CAVEAT, and the reason both constants are declared here with this comment
+// rather than inlined: DE is **not yet permanently assigned**.
+// draft-ietf-deleg-08 says the bit is "expected to be assigned by IANA as Bit 2
+// in the EDNS Header Flags registry" and separately gives 2 as a *temporary
+// testing* assignment, with the permanent request written as "Bit TBA2". If IANA
+// lands it elsewhere, this code keeps compiling and keeps returning a plausible
+// answer that is simply wrong — the worst failure mode for a measurement. Re-check
+// the registry against the current draft before trusting DELEGAware, and treat a
+// sudden collapse to all-false (or all-true) as suspicion of a moved bit rather
+// than a finding about resolvers.
+const (
+	coFlag = 1 << 14 // RFC 9824, assigned
+	deFlag = 1 << 13 // draft-ietf-deleg, PROVISIONAL — see above
 )
 
 // Observe builds an Observation from a query. `raw` is the qname exactly as it
@@ -136,13 +229,48 @@ func Observe(q Query, raw string, addr netip.Addr, transport Transport, qtype ui
 		obs.EDNS = true
 		obs.DO = opt.Do()
 		obs.UDPSize = opt.UDPSize()
+
+		// Flags miekg/dns has no accessor for. Masked off the same 16-bit field
+		// Do() reads; see coFlag/deFlag for the bit numbering and the caveat on
+		// DE not being permanently assigned.
+		obs.CompactAware = opt.Hdr.Ttl&coFlag != 0
+		obs.DELEGAware = opt.Hdr.Ttl&deFlag != 0
+
 		for _, o := range opt.Option {
 			switch v := o.(type) {
 			case *dns.EDNS0_COOKIE:
 				obs.Cookie = true
+			case *dns.EDNS0_ZONEVERSION:
+				obs.ZoneVersionAsked = true
+			case *dns.EDNS0_LOCAL:
+				// RFC 8145 option 14 has no type in miekg/dns, so it lands here.
+				// Decoded rather than ignored; a malformed payload records
+				// nothing rather than a truncated tag list.
+				if v.Code == ednsKeyTagOption {
+					if tags, ok := parseEDNSKeyTags(v.Data); ok {
+						obs.KeyTags = tags
+					}
+				}
 			case *dns.EDNS0_SUBNET:
 				obs.ECS = true
 				obs.ECSScope = v.SourceNetmask
+				obs.ECSFamily = v.Family
+				// SourceNetmask 0 is a deliberate "I am telling you nothing"
+				// (RFC 7871 §7.1.2), not a missing value, so it must not become
+				// a 0-bit prefix over 0.0.0.0 — that would render as a leak of
+				// everything. Leave ECSPrefix zero and let ECS+ECSScope carry
+				// the distinction.
+				if v.SourceNetmask > 0 {
+					if a, ok := netip.AddrFromSlice(v.Address); ok {
+						if p, err := a.Unmap().Prefix(int(v.SourceNetmask)); err == nil {
+							obs.ECSPrefix = p
+						}
+						// A SourceNetmask wider than the address family allows is
+						// malformed input from the resolver. Dropped silently on
+						// purpose: ECS/ECSScope still record that it happened, and
+						// a malformed option must not cost the visitor their answer.
+					}
+				}
 			}
 		}
 	}
@@ -195,6 +323,38 @@ func (o Observation) Summary() string {
 	b.WriteString(boolStr(o.Cookie))
 	b.WriteString(" ecs=")
 	b.WriteString(boolStr(o.ECS))
+	// ecs_src is what separates "declined" from "leaked", and a bare ecs= flag
+	// cannot: `ecs=1 ecs_src=0` is a resolver explicitly refusing to disclose,
+	// which is the opposite finding from `ecs=1 ecs_src=24`. Emitted always, so
+	// the terminal readout carries all three states the JSON does.
+	b.WriteString(" ecs_src=")
+	b.WriteString(strconv.Itoa(int(o.ECSScope)))
+	if o.ECSPrefix.IsValid() {
+		b.WriteString(" ecs_prefix=")
+		b.WriteString(o.ECSPrefix.String())
+	}
+	b.WriteString(" co=")
+	b.WriteString(boolStr(o.CompactAware))
+	b.WriteString(" deleg=")
+	b.WriteString(boolStr(o.DELEGAware))
+	b.WriteString(" zoneversion=")
+	b.WriteString(boolStr(o.ZoneVersionAsked))
+	// RFC 9539: encrypted= is redundant with proto= above, and deliberately so.
+	// proto= is the transport; encrypted= is the question a reader actually has,
+	// and making them work it out from a list of transport names is how a
+	// terminal readout gets misread.
+	b.WriteString(" encrypted=")
+	b.WriteString(boolStr(o.Encrypted()))
+	if o.TLS != nil {
+		b.WriteString(" tls=")
+		b.WriteString(strings.ReplaceAll(o.TLS.Version, " ", ""))
+		if o.TLS.NamedGroup != "" {
+			b.WriteString(" group=")
+			b.WriteString(o.TLS.NamedGroup)
+		}
+		b.WriteString(" resumed=")
+		b.WriteString(boolStr(o.TLS.DidResume))
+	}
 	b.WriteString(" case0x20=")
 	b.WriteString(boolStr(o.CaseRandomized))
 	b.WriteString(" seen=")
