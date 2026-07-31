@@ -8,9 +8,37 @@
 
 Every name below the configured zone is synthesized on demand from a random token in the query name. That uniqueness is the mechanism, not a detail: a name nobody has asked for before defeats every cache between a visitor and this server, so the visitor's resolver is forced to query us directly and we get to observe it.
 
-What each query reveals is recorded against its token: the resolver's egress address (which is almost never the visitor's), the address family and transport, whether EDNS and the DO bit are present, the advertised UDP buffer, DNS cookie and ECS support, and whether the resolver randomizes label case (DNS-0x20). A separate web tier reads those observations back by token and reports "your resolver did X".
+What each query reveals is recorded against its token: the resolver's egress address (which is almost never the visitor's), the address family and transport, whether EDNS and the DO bit are present, the advertised UDP buffer, DNS cookie support, EDNS Client Subnet disclosure, whether the resolver signals understanding of compact denial (`CO`) or extensible delegation (`DE`), and whether it randomizes label case (DNS-0x20). A separate web tier reads those observations back by token and reports "your resolver did X".
 
 The zone can also be asked to answer **deliberately wrongly**, which is how a page establishes whether a resolver genuinely validates DNSSEC rather than merely setting the DO bit and hoping. Each failure mode is produced differently on purpose, because resolvers get different subsets of them right.
+
+### EDNS header flags
+
+Three bits in the OPT flags field are read. `miekg/dns` has an accessor only for `DO`, so `CO` and `DE` are masked by hand off the same field:
+
+| Bit | Flag | Meaning | Status |
+|---|---|---|---|
+| 0 (`1<<15`) | `DO` | DNSSEC OK (RFC 4035) | assigned |
+| 1 (`1<<14`) | `CO` | resolver understands compact denial (RFC 9824) | assigned |
+| 2 (`1<<13`) | `DE` | resolver is DELEG-aware (`draft-ietf-deleg`) | **provisional** |
+
+`CO` is worth pairing with the `_nxname` modifier below: this zone *serves* compact denial, so recording who *asked* for it says something neither half does alone.
+
+`DE` is a temporary testing assignment. `draft-ietf-deleg-08` expects bit 2 but writes the permanent request as "Bit TBA2". If IANA lands it elsewhere this code keeps compiling and returns a plausible but wrong answer, so re-check the registry before trusting `deleg_aware`, and read a sudden collapse to all-false as a moved bit rather than a finding about resolvers.
+
+### EDNS Client Subnet has three states, not two
+
+RFC 7871 §7.1.2 lets a resolver send the option with `SOURCE PREFIX-LENGTH 0` to mean "deliberately disclosing nothing". That is the *opposite* finding from disclosing a prefix, and one boolean cannot express it:
+
+| `ecs` | `ecs_src` | `ecs_prefix` | Meaning |
+|---|---|---|---|
+| `0` | `0` | absent | no option — the resolver said nothing |
+| `1` | `0` | absent | option sent, disclosure **declined** — the good outcome |
+| `1` | `>0` | present | resolver disclosed this many bits of the client |
+
+The middle row must never be presented as a leak. `ecs_prefix` is deliberately left unset there rather than becoming a `/0`, which would render as "leaked everything".
+
+`ecs_prefix` is the most identifying value this plugin stores — a truncated form of the visitor's own address. It exists because showing someone what leaked is the point of the measurement, it is reachable only through the random token the visitor holds, and it expires with the rest of the observation on the store's TTL. Do not add a second index over it.
 
 ## Syntax
 
@@ -100,7 +128,7 @@ check.example.com {
 
 ```console
 $ dig +short TXT a1b2c3d4.check.example.com
-"resolver=192.0.2.53 prefix=192.0.2.0/24 proto=udp ipv6=0 edns=1 do=1 bufsize=1232 cookie=1 ecs=0 case0x20=1 seen=1"
+"resolver=192.0.2.53 prefix=192.0.2.0/24 proto=udp ipv6=0 edns=1 do=1 bufsize=1232 cookie=1 ecs=0 ecs_src=0 co=1 deleg=0 case0x20=1 seen=1"
 
 $ dig +dnssec TXT _badsig.a1b2c3d4.check.example.com   # a validating resolver should SERVFAIL
 ```
