@@ -53,6 +53,10 @@ type Observation struct {
 	ResolverPrefix netip.Prefix `json:"resolver_prefix"`
 
 	Transport Transport `json:"transport"`
+	// TLS is the handshake detail for queries that arrived encrypted, nil
+	// otherwise. See RFC 9539 in encrypted.go for why this is worth more than a
+	// boolean.
+	TLS *TLSInfo `json:"tls,omitempty"`
 	// IPv6 records which protocol carried the query. A resolver reaching us
 	// over IPv6 for a visitor on IPv4 (and the reverse) is common and worth
 	// showing.
@@ -335,6 +339,22 @@ func (o Observation) Summary() string {
 	b.WriteString(boolStr(o.DELEGAware))
 	b.WriteString(" zoneversion=")
 	b.WriteString(boolStr(o.ZoneVersionAsked))
+	// RFC 9539: encrypted= is redundant with proto= above, and deliberately so.
+	// proto= is the transport; encrypted= is the question a reader actually has,
+	// and making them work it out from a list of transport names is how a
+	// terminal readout gets misread.
+	b.WriteString(" encrypted=")
+	b.WriteString(boolStr(o.Encrypted()))
+	if o.TLS != nil {
+		b.WriteString(" tls=")
+		b.WriteString(strings.ReplaceAll(o.TLS.Version, " ", ""))
+		if o.TLS.NamedGroup != "" {
+			b.WriteString(" group=")
+			b.WriteString(o.TLS.NamedGroup)
+		}
+		b.WriteString(" resumed=")
+		b.WriteString(boolStr(o.TLS.DidResume))
+	}
 	b.WriteString(" case0x20=")
 	b.WriteString(boolStr(o.CaseRandomized))
 	b.WriteString(" seen=")

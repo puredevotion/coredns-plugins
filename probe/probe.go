@@ -126,7 +126,9 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return p.respond(state, w, r, dns.RcodeRefused, nil, nil, false)
 	}
 
-	obs := Observe(q, raw, addrOf(state), transportOf(state), state.QType(), r)
+	transport, tlsInfo := transportFrom(w, state.Proto())
+	obs := Observe(q, raw, addrOf(state), transport, state.QType(), r)
+	obs.TLS = tlsInfo
 
 	// RFC 8145: did the resolver signal it holds THIS zone's key? Computed here
 	// rather than in Observe because it needs the signer, and Observe is
@@ -461,15 +463,6 @@ func addrOf(state request.Request) netip.Addr {
 // and DoH — which are TCP underneath — are not distinguished here. Recording
 // them separately needs the listener to pass that down, which is a change
 // outside this plugin.
-func transportOf(state request.Request) Transport {
-	switch state.Proto() {
-	case "tcp":
-		return TransportTCP
-	default:
-		return TransportUDP
-	}
-}
-
 // chunk splits a payload into the 255-byte strings a TXT record is made of.
 func chunk(s string) []string {
 	const max = 255

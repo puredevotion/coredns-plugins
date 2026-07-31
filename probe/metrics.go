@@ -69,6 +69,24 @@ var (
 		Help:      "Inbound RFC 9567 DNS error reports, by extended error code and whether they correlated to a token.",
 	}, []string{"ede", "correlated"})
 
+	// probeEncrypted counts queries by whether they arrived over an encrypted
+	// transport, and how (RFC 9539).
+	//
+	// This is the series RFC 9539 adoption is invisible without: resolvers probe
+	// opportunistically with no signalling, so the authoritative being probed is
+	// the only party that can see an attempt at all.
+	//
+	// `version` and `group` are bounded enums produced by Go's own TLS stack
+	// (tls.VersionName, CurveID.String()), not attacker-chosen strings — a
+	// resolver cannot mint a series by offering a garbage cipher, because an
+	// unsupported one fails the handshake before a query exists.
+	probeEncrypted = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: plugin.Namespace,
+		Subsystem: "probe",
+		Name:      "encrypted_queries_total",
+		Help:      "Queries by transport encryption, for measuring RFC 9539 opportunistic adoption.",
+	}, []string{"proto", "encrypted", "version", "group", "resumed"})
+
 	// probeKeyTagQueries counts inbound RFC 8145 Key Tag queries.
 	//
 	// `state` records whether the sender honoured §5.2's smallest-to-largest sort
@@ -180,6 +198,17 @@ func recordMetrics(o Observation) {
 	if o.ECS && o.ECSScope > 0 {
 		probeECSPrefixBits.WithLabelValues(ecsFamilyLabel(o.ECSFamily)).Observe(float64(o.ECSScope))
 	}
+
+	// RFC 9539. version/group/resumed are empty for cleartext rather than a
+	// placeholder, so a cleartext series cannot be mistaken for a TLS one whose
+	// details we failed to read.
+	var version, group, resumed string
+	if o.TLS != nil {
+		version, group, resumed = o.TLS.Version, o.TLS.NamedGroup, boolStr(o.TLS.DidResume)
+	}
+	probeEncrypted.WithLabelValues(
+		string(o.Transport), boolStr(o.Encrypted()), version, group, resumed,
+	).Inc()
 
 	// RFC 8145 via EDNS option 14. Only counted when the resolver actually sent
 	// tags: silence is not a statement about which keys it holds, and counting it

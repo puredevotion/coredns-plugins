@@ -8,7 +8,7 @@
 
 Every name below the configured zone is synthesized on demand from a random token in the query name. That uniqueness is the mechanism, not a detail: a name nobody has asked for before defeats every cache between a visitor and this server, so the visitor's resolver is forced to query us directly and we get to observe it.
 
-What each query reveals is recorded against its token: the resolver's egress address (which is almost never the visitor's), the address family and transport, whether EDNS and the DO bit are present, the advertised UDP buffer, DNS cookie support, EDNS Client Subnet disclosure, whether the resolver signals understanding of compact denial (`CO`) or extensible delegation (`DE`), whether it asked for the zone version (RFC 9660), which DNSSEC trust anchors it signalled (RFC 8145), and whether it randomizes label case (DNS-0x20). A separate web tier reads those observations back by token and reports "your resolver did X".
+What each query reveals is recorded against its token: the resolver's egress address (which is almost never the visitor's), the address family and transport (including whether it arrived encrypted, RFC 9539), whether EDNS and the DO bit are present, the advertised UDP buffer, DNS cookie support, EDNS Client Subnet disclosure, whether the resolver signals understanding of compact denial (`CO`) or extensible delegation (`DE`), whether it asked for the zone version (RFC 9660), which DNSSEC trust anchors it signalled (RFC 8145), and whether it randomizes label case (DNS-0x20). A separate web tier reads those observations back by token and reports "your resolver did X".
 
 The zone can also be asked to answer **deliberately wrongly**, which is how a page establishes whether a resolver genuinely validates DNSSEC rather than merely setting the DO bit and hoping. Each failure mode is produced differently on purpose, because resolvers get different subsets of them right.
 
@@ -39,6 +39,23 @@ RFC 7871 §7.1.2 lets a resolver send the option with `SOURCE PREFIX-LENGTH 0` t
 The middle row must never be presented as a leak. `ecs_prefix` is deliberately left unset there rather than becoming a `/0`, which would render as "leaked everything".
 
 `ecs_prefix` is the most identifying value this plugin stores — a truncated form of the visitor's own address. It exists because showing someone what leaked is the point of the measurement, it is reachable only through the random token the visitor holds, and it expires with the rest of the observation on the store's TTL. Do not add a second index over it.
+
+### Opportunistic encryption from resolvers (RFC 9539)
+
+RFC 9539 has recursive resolvers simply **try** encrypted transport to authoritative servers — no signalling, no negotiation, no coordination with the zone operator. A resolver opens DoT on port 853; if it works the query is private from a passive observer, and if not it falls back to cleartext.
+
+That design makes adoption almost unmeasured, because the only party who can see an attempt is the authoritative being probed — and few authoritatives both accept encrypted transport and publish what reaches them.
+
+`encrypted` and the `tls` block record it. Note two fields whose **emptiness is meaningful**, not a defect:
+
+- **No SNI** is the expected case (RFC 9539 §4.2). An opportunistic prober has no name to authenticate. A resolver that *does* send SNI is doing something more deliberate.
+- **`did_resume`** means the resolver kept session state from a previous encrypted conversation — under an opportunistic model, that is the signal it is persisting success rather than re-probing each time.
+
+The negotiated key-exchange group is recorded because a DoT handshake is where oversized post-quantum certificates hurt first.
+
+**This fixed a real gap rather than adding a feature.** Transport used to be derived from CoreDNS's `request.Proto()`, which distinguishes only UDP from TCP by inspecting the remote address type and cannot see TLS at all. So `tls` and `quic` existed as transport values and were never once produced, while `Transport`'s own documentation claimed a DoT-to-Do53 fallback would be visible in the change. It would not have been — every encrypted query was recorded as plain TCP. Detection now goes through `dns.ConnectionStater`, walking CoreDNS's writer wrappers, since the TLS state is not on the outermost one.
+
+Serving DoT is a deployment matter, not a plugin one: the zone needs a `tls://` server block and a certificate. Until then this records that every query arrived in cleartext, which is true.
 
 ### Trust anchor knowledge (RFC 8145)
 
@@ -163,7 +180,7 @@ check.example.com {
 
 ```console
 $ dig +short TXT a1b2c3d4.check.example.com
-"resolver=192.0.2.53 prefix=192.0.2.0/24 proto=udp ipv6=0 edns=1 do=1 bufsize=1232 cookie=1 ecs=0 ecs_src=0 co=1 deleg=0 zoneversion=0 case0x20=1 seen=1"
+"resolver=192.0.2.53 prefix=192.0.2.0/24 proto=udp ipv6=0 edns=1 do=1 bufsize=1232 cookie=1 ecs=0 ecs_src=0 co=1 deleg=0 zoneversion=0 encrypted=0 case0x20=1 seen=1"
 
 $ dig +dnssec TXT _badsig.a1b2c3d4.check.example.com   # a validating resolver should SERVFAIL
 ```

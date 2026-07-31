@@ -7,8 +7,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/miekg/dns"
 )
 
 // RFC 8145 — Signaling Trust Anchor Knowledge in DNSSEC.
@@ -153,22 +151,6 @@ func parseEDNSKeyTags(data []byte) ([]uint16, bool) {
 		tags = append(tags, binary.BigEndian.Uint16(data[i:i+2]))
 	}
 	return tags, true
-}
-
-// keyTagsFromEDNS pulls the edns-key-tag option out of a query, if present.
-func keyTagsFromEDNS(msg *dns.Msg) ([]uint16, bool) {
-	opt := msg.IsEdns0()
-	if opt == nil {
-		return nil, false
-	}
-	for _, o := range opt.Option {
-		local, ok := o.(*dns.EDNS0_LOCAL)
-		if !ok || local.Code != ednsKeyTagOption {
-			continue
-		}
-		return parseEDNSKeyTags(local.Data)
-	}
-	return nil, false
 }
 
 // hasKeyTag reports whether want appears in tags.
