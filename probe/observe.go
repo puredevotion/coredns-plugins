@@ -125,6 +125,12 @@ type Observation struct {
 	// See degFlag's comment for why this specific bit, and what would make it
 	// silently wrong.
 	DELEGAware bool `json:"deleg_aware"`
+	// ZoneVersionAsked means the resolver sent an RFC 9660 ZONEVERSION option,
+	// i.e. asked which version of the zone answered. Vanishingly rare, which is
+	// what makes it worth counting: it is a direct measure of how much
+	// diagnostic protocol a resolver actually implements.
+	ZoneVersionAsked bool `json:"zoneversion_asked"`
+
 	// CompactAware means the resolver set the EDNS CO bit (RFC 9824),
 	// signalling it understands compact denial of existence. This zone already
 	// SERVES compact denial via the `_nxname` variant, so pairing the two tells
@@ -220,6 +226,8 @@ func Observe(q Query, raw string, addr netip.Addr, transport Transport, qtype ui
 			switch v := o.(type) {
 			case *dns.EDNS0_COOKIE:
 				obs.Cookie = true
+			case *dns.EDNS0_ZONEVERSION:
+				obs.ZoneVersionAsked = true
 			case *dns.EDNS0_SUBNET:
 				obs.ECS = true
 				obs.ECSScope = v.SourceNetmask
@@ -306,6 +314,8 @@ func (o Observation) Summary() string {
 	b.WriteString(boolStr(o.CompactAware))
 	b.WriteString(" deleg=")
 	b.WriteString(boolStr(o.DELEGAware))
+	b.WriteString(" zoneversion=")
+	b.WriteString(boolStr(o.ZoneVersionAsked))
 	b.WriteString(" case0x20=")
 	b.WriteString(boolStr(o.CaseRandomized))
 	b.WriteString(" seen=")

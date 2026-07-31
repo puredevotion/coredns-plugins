@@ -335,6 +335,20 @@ func (p *Probe) sign(rrs []dns.RR, mods Modifier) dns.RR {
 func (p *Probe) respond(state request.Request, w dns.ResponseWriter, r *dns.Msg,
 	rcode int, answer, auth []dns.RR, truncate bool,
 ) (int, error) {
+	// Read the ZONEVERSION request BEFORE SizeAndDo, which is not optional
+	// ordering: SizeAndDo reuses the REQUEST's OPT record as the response's and
+	// runs CoreDNS's supportedOptions filter over it IN PLACE. That filter keeps
+	// only NSID/EXPIRE/COOKIE/TCPKEEPALIVE/PADDING plus anything registered via
+	// edns.SetSupportedOption, so it deletes the client's ZONEVERSION option
+	// from r on the way past. Checking afterwards silently never fires — which
+	// is exactly what happened, and only an end-to-end test through ServeDNS
+	// caught it.
+	//
+	// Registering ZONEVERSION as a "supported" option would be the wrong fix: it
+	// would make CoreDNS echo the client's own option back, so we would either
+	// return their payload as our zone version or emit two ZONEVERSION options.
+	wantZoneVersion := requestsZoneVersion(r)
+
 	m := new(dns.Msg)
 	m.SetRcode(r, rcode)
 	m.Authoritative = true
@@ -346,6 +360,19 @@ func (p *Probe) respond(state request.Request, w dns.ResponseWriter, r *dns.Msg,
 	// truncating. Without this the `_big` variant would be dropped by the
 	// stack rather than delivered and observed.
 	state.SizeAndDo(m)
+
+	// RFC 9660: answer ZONEVERSION only when asked. Attached after SizeAndDo,
+	// which is what puts an OPT record on the response, and before Scrub, so the
+	// option is inside the size the client advertised rather than pushing the
+	// message past it.
+	if wantZoneVersion {
+		if zv := buildZoneVersion(p.Zone, p.soa().Serial); zv != nil {
+			if opt := m.IsEdns0(); opt != nil {
+				opt.Option = append(opt.Option, zv)
+			}
+		}
+	}
+
 	if !truncate {
 		m = state.Scrub(m)
 	}

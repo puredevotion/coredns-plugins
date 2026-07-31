@@ -34,7 +34,7 @@ var (
 		Subsystem: "probe",
 		Name:      "observations_total",
 		Help:      "Observed probe queries, by resolver protocol state.",
-	}, []string{"proto", "family", "do", "co", "deleg", "ecs"})
+	}, []string{"proto", "family", "do", "co", "deleg", "ecs", "zoneversion"})
 
 	// probeECSPrefixBits is the distribution of disclosed prefix lengths.
 	//
@@ -142,6 +142,7 @@ func recordMetrics(o Observation) {
 		boolStr(o.CompactAware),
 		delegLabel(o),
 		ecsLabel(o),
+		boolStr(o.ZoneVersionAsked),
 	).Inc()
 
 	// Only disclosures, deliberately — see probeECSPrefixBits.
