@@ -5,10 +5,10 @@ go 1.26.0
 toolchain go1.26.5
 
 require (
-	github.com/coredns/caddy v1.1.4-0.20250930002214-15135a999495
+	github.com/coredns/caddy v1.1.4
 	github.com/coredns/coredns v1.14.6
 	github.com/mdlayher/ndp v1.1.0
-	golang.org/x/net v0.56.0
+	golang.org/x/net v0.57.0
 )
 
 require (

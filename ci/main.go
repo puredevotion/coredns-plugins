@@ -27,6 +27,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"dagger/coredns-plugins-ci/internal/dagger"
@@ -35,14 +36,16 @@ import (
 // CorednsPluginsCi is the CI module root.
 type CorednsPluginsCi struct{}
 
-// plugins lists every plugin directory this module knows how to wire into a
-// CoreDNS build, and where each replaces/inserts into plugin.cfg.
+// plugins lists every plugin this module knows how to wire into a CoreDNS
+// build, and where each replaces/inserts into plugin.cfg.
 //
 //   - sni_tls REPLACES the stock tls:tls line (same slot: it configures the
 //     listener's TLS before any query-handling plugin runs, same as stock tls).
 //   - radnr is listener-only (no ServeDNS, like health/metrics) so its slot in
 //     the chain doesn't matter for query handling; placed next to health/ready
 //     for locality with the other listener-only plugins.
+//   - rrl is NOT ours (see externalVersion) — it's upstream's own external
+//     plugin, wired in by module path instead of vendored source.
 var pluginCfgPatches = map[string]struct {
 	// cfgLine is the plugin.cfg line to insert (or use as replacement value).
 	cfgLine string
@@ -53,6 +56,29 @@ var pluginCfgPatches = map[string]struct {
 	// stock plugin.cfg line this plugin's line is inserted immediately after.
 	insertAfterLine string
 	modulePath      string // Go import path used in plugin.cfg + go.mod replace
+	// externalModule, if non-empty, marks this as a THIRD-PARTY plugin that
+	// does not live in this repo: there is no directory at the repo root to
+	// vendor in and no go.mod replace directive, so BuildCoredns resolves it
+	// with `go get externalModule@externalVersion` instead.
+	//
+	// This is the MODULE root path, which is not always modulePath: modulePath
+	// is the package import path plugin.cfg needs (…/rrl/plugins/rrl) while
+	// `go get` takes the module (…/rrl). Kept as two explicit fields rather
+	// than derived, because there is no general rule for where a module path
+	// ends and a package path begins.
+	externalModule string
+	// externalVersion is the exact version for externalModule — never
+	// "latest". A floating external dependency would mean the shipped binary's
+	// behavior could change between two builds of the same commit, which is
+	// the one thing every other pin in this file exists to prevent. Renovate
+	// tracks it like any other Go dependency.
+	//
+	// Consequence for the rest of this file: such plugins have no local source
+	// to test, lint, or SBOM-scan as a plugin directory (the consuming CI's
+	// per-plugin loop enumerates our own dirs only) — but they ARE part of the
+	// built binary, so the binary-level SBOM/vuln scan and Containerize's
+	// `-plugins` smoke test still cover them.
+	externalVersion string
 }{
 	"sni_tls": {
 		cfgLine:          "sni_tls:github.com/puredevotion/coredns-plugins/sni_tls",
@@ -63,6 +89,44 @@ var pluginCfgPatches = map[string]struct {
 		cfgLine:         "radnr:github.com/puredevotion/coredns-plugins/radnr",
 		insertAfterLine: "health:health",
 		modulePath:      "github.com/puredevotion/coredns-plugins/radnr",
+	},
+	// Response Rate Limiting — the amplification-abuse mitigation that gates
+	// any public exposure of an authoritative zone we serve (homelab
+	// docs/plans/authoritative-dns-hivre.md Phase 2). That plan assumed this
+	// had to be written from scratch, having only checked CoreDNS's in-tree
+	// plugin.cfg; it exists as an external plugin under the coredns org
+	// itself, Apache-2.0, and already implements exactly what the plan
+	// specified (per-client-prefix tracking, TC=1 slip, exported counters).
+	// Adopted rather than reimplemented: this is the one safety-critical
+	// piece, so the widely-reviewed implementation wins over ours.
+	//
+	// Slot per upstream's own plugin.cfg.yaml (landmark "acl", after: false)
+	// => immediately BEFORE acl:acl, which in v1.14.6's plugin.cfg is
+	// immediately after rewrite:rewrite. Rate limiting must sit ahead of the
+	// plugins that actually answer, so a limited response is never generated
+	// in the first place.
+	//
+	// Verified 2026-07-30 against v1.14.6: upstream rrl's own go.mod pins
+	// coredns v1.12.4, two minors behind ours, so this was a real
+	// question — a clean build + `-plugins` listing rrl confirmed the plugin
+	// API it uses is unchanged across that gap.
+	// The per-visitor DNS measurement zone for the hivre.com lab. An
+	// authoritative backend, so it belongs among the other backends and after
+	// rrl — rate limiting has to see a query before anything answers it.
+	// Slotted next to `file` because that is the closest analogue: both are
+	// authoritative sources of truth for a zone, one from disk and one
+	// synthesized.
+	"probe": {
+		cfgLine:         "probe:github.com/puredevotion/coredns-plugins/probe",
+		insertAfterLine: "file:file",
+		modulePath:      "github.com/puredevotion/coredns-plugins/probe",
+	},
+	"rrl": {
+		cfgLine:         "rrl:github.com/coredns/rrl/plugins/rrl",
+		insertAfterLine: "rewrite:rewrite",
+		modulePath:      "github.com/coredns/rrl/plugins/rrl",
+		externalModule:  "github.com/coredns/rrl",
+		externalVersion: "v0.0.0-20250915113509-ac1135e077ba",
 	},
 }
 
@@ -114,7 +178,23 @@ func (m *CorednsPluginsCi) TestPlugin(ctx context.Context, source *dagger.Direct
 // staticcheck, errcheck, gosec) as dafs's ci/ module and homelab's
 // ci/dagger + experiments/ra-dnr — one consistent Go lint/SAST bar across
 // every Go repo in this ecosystem, public or not.
-const golangciLintImage = "golangci/golangci-lint:v1.62.2-alpine"
+//
+// v2, and it MUST stay >= the Go version the plugin go.mod files target.
+// golangci-lint refuses to load a config when its own build's Go version is
+// older than the target: "the Go language version (go1.23) used to build
+// golangci-lint is lower than the targeted Go version (1.26.5)". No v1.x
+// release is built against Go 1.26, so v1 stopped being viable the moment
+// those go.mod toolchains moved past 1.24 — and .golangci.yml is on the v2
+// schema now, which a v1 binary could not read either. The two move together.
+//
+// This lagged behind .github/workflows/ci.yml, which was migrated to v2.12.2
+// while this constant stayed on v1.62.2. Nothing caught it because the two
+// lint paths are exercised by different pipelines: the workflow lints on every
+// push here, whereas this Dagger entry point only runs from homelab's
+// ci-coredns-plugins job, which fires on a flake.lock bump. The next such bump
+// failed on sni_tls before it ever reached the new plugin. Keep this in step
+// with that workflow's `version:` pin.
+const golangciLintImage = "golangci/golangci-lint:v2.12.2-alpine"
 
 // LintPlugin runs golangci-lint on the plugin. Upgraded from a bare `go vet`
 // (which only ever caught the small, non-security subset go vet's analyzers
@@ -171,7 +251,7 @@ func (m *CorednsPluginsCi) YamlLint(ctx context.Context, source *dagger.Director
 
 // cyclonedxGomodVersion is pinned for the same reproducibility reason as
 // every other tool version in this file.
-const cyclonedxGomodVersion = "v1.7.0"
+const cyclonedxGomodVersion = "v1.10.0"
 
 // Sbom generates a CycloneDX SBOM for `pluginDir`'s Go module graph.
 //
@@ -210,7 +290,7 @@ func (m *CorednsPluginsCi) SbomScan(ctx context.Context, source *dagger.Director
 // opengrepVersion pins the same Opengrep release homelab's ci/dagger module
 // already uses — one version across the ecosystem, same reasoning as every
 // other pinned tool here.
-const opengrepVersion = "v1.25.0"
+const opengrepVersion = "v1.26.0"
 
 // OpengrepScan runs Opengrep (the OSS fork of Semgrep) against this repo's Go
 // source — broad static-analysis coverage beyond golangci-lint's gosec linter
@@ -273,10 +353,10 @@ func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 }
 
 // BuildCoredns clones the pinned upstream CoreDNS tag, patches plugin.cfg to
-// wire in every plugin in this repo that the module knows about (see
-// pluginCfgPatches), adds a go.mod replace directive per
-// plugin pointing at its vendored source (mounted from `source`), runs `go
-// generate` (regenerates zplugin.go/zdirectives.go per coredns.go's
+// wire in every plugin the module knows about (see pluginCfgPatches), resolves
+// each one — a go.mod replace directive pointing at vendored source from
+// `source` for our own plugins, a pinned `go get` for third-party ones — runs
+// `go generate` (regenerates zplugin.go/zdirectives.go per coredns.go's
 // //go:generate directives), and builds the coredns binary. Returns the
 // built binary as a File so Containerize can wrap it into a runtime image.
 func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Directory, corednsVersion string) (*dagger.File, error) {
@@ -296,10 +376,14 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 	// stale plugin source. Order doesn't matter across plugins (each patch
 	// only touches its own line), but every patch must land before `go
 	// generate`.
-	for pluginDir, p := range pluginCfgPatches {
-		vendoredPath := fmt.Sprintf("/vendored/%s", pluginDir)
-		ctr = ctr.WithDirectory(vendoredPath, source.Directory(pluginDir))
+	//
+	// External (third-party) plugins have no vendored source and no replace
+	// directive: they are resolved with `go get`, which must run AFTER go
+	// generate (see the ordering note below it), so they are collected here
+	// and executed there.
+	var externalGets []string
 
+	for pluginDir, p := range pluginCfgPatches {
 		switch {
 		case p.replaceStockLine != "":
 			ctr = ctr.WithExec([]string{"sed", "-i",
@@ -313,8 +397,20 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 			return nil, fmt.Errorf("BuildCoredns: plugin %q has neither replaceStockLine nor insertAfterLine", pluginDir)
 		}
 
-		ctr = ctr.WithExec([]string{"go", "mod", "edit",
-			"-replace", fmt.Sprintf("%s=%s", p.modulePath, vendoredPath)})
+		if p.externalModule != "" {
+			if p.externalVersion == "" {
+				return nil, fmt.Errorf("BuildCoredns: external plugin %q has externalModule %q but no externalVersion — refusing to build against a floating dependency", pluginDir, p.externalModule)
+			}
+			externalGets = append(externalGets,
+				fmt.Sprintf("%s@%s", p.externalModule, p.externalVersion))
+			continue
+		}
+
+		vendoredPath := fmt.Sprintf("/vendored/%s", pluginDir)
+		ctr = ctr.
+			WithDirectory(vendoredPath, source.Directory(pluginDir)).
+			WithExec([]string{"go", "mod", "edit",
+				"-replace", fmt.Sprintf("%s=%s", p.modulePath, vendoredPath)})
 	}
 
 	// go generate MUST run before go mod tidy: it regenerates zplugin.go,
@@ -325,8 +421,21 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 	// ("provides package ... and is replaced but not required") — this was a
 	// real bug, caught by the first live CI run once ARC could finally
 	// schedule one.
+	ctr = ctr.WithExec([]string{"go", "generate"})
+
+	// Third-party plugins are fetched here, after go generate, for the same
+	// reason the replace directives above have to survive it: until zplugin.go
+	// imports the package, `go mod tidy` would drop the requirement as unused.
+	// Sorted so the layer sequence is identical across runs — map iteration
+	// order is randomized, and an unstable command order would needlessly
+	// invalidate the build cache (and make two builds of one commit differ in
+	// shape, which this file goes to some lengths to avoid elsewhere).
+	sort.Strings(externalGets)
+	for _, spec := range externalGets {
+		ctr = ctr.WithExec([]string{"go", "get", spec})
+	}
+
 	ctr = ctr.
-		WithExec([]string{"go", "generate"}).
 		// Force these past their CoreDNS-1.14.6-pinned versions explicitly:
 		// grype found real High CVEs in the built binary (GO-2026-5970 /
 		// x/text, GHSA-hrxh-6v49-42gf / grpc) even though the radnr/sni_tls

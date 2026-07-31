@@ -5,12 +5,18 @@ plus a Dagger pipeline that builds a CoreDNS binary with them compiled in.
 
 | Plugin | What it does | Status |
 |---|---|---|
-| [`sni_tls`](sni_tls/) | Replaces the stock `tls` directive with SNI-based certificate selection, so one listener can serve several hostnames whose certs come from different issuers | Implemented, tested, not yet run in production |
-| [`radnr`](radnr/) | Advertises an encrypted DNS resolver on the LAN via the RFC 9463 DNR option in IPv6 Router Advertisements, plus optional RFC 8106 RDNSS | Wire/protocol layer complete and RFC-conformant; not yet run in production |
+| [`sni_tls`](sni_tls/) | Replaces the stock `tls` directive with SNI-based certificate selection, so one listener can serve several hostnames whose certs come from different issuers | Implemented, tested, **running in production** |
+| [`radnr`](radnr/) | Advertises an encrypted DNS resolver on the LAN via the RFC 9463 DNR option in IPv6 Router Advertisements, plus optional RFC 8106 RDNSS | Wire/protocol layer complete and RFC-conformant; **running in production** |
 
-Neither plugin has been through a production deployment yet. The test suites are
-thorough (see below) but "passes its tests" is not "battle-tested" — treat both
-as working code awaiting real-world mileage.
+Both plugins run in production in the author's homelab (as `coredns-radnr`,
+serving real LAN DNS over DoT/DoH/DoQ). They have real-world mileage now, but
+only in one deployment and one topology — treat "works here" accordingly.
+
+The Dagger pipeline can also compile in **third-party** plugins that don't live
+in this repo, pinned by module version. Currently: upstream's
+[`coredns/rrl`](https://github.com/coredns/rrl) for response rate limiting —
+adopted rather than reimplemented, with the verification results and three
+operational traps written up in [`docs/rrl-plugin.md`](docs/rrl-plugin.md).
 
 ## Why these exist
 

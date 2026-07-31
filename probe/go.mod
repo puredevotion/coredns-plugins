@@ -1,4 +1,4 @@
-module github.com/puredevotion/coredns-plugins/sni_tls
+module github.com/puredevotion/coredns-plugins/probe
 
 go 1.26.0
 
@@ -7,6 +7,10 @@ toolchain go1.26.5
 require (
 	github.com/coredns/caddy v1.1.4
 	github.com/coredns/coredns v1.14.6
+	github.com/miekg/dns v1.1.72
+	github.com/prometheus/client_golang v1.23.2
+	github.com/prometheus/common v0.69.0
+	github.com/valkey-io/valkey-go v1.0.76
 )
 
 require (
@@ -16,13 +20,11 @@ require (
 	github.com/flynn/go-shlex v0.0.0-20150515145356-3f9db97f8568 // indirect
 	github.com/grpc-ecosystem/grpc-opentracing v0.0.0-20180507213350-8e809c8a8645 // indirect
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
-	github.com/miekg/dns v1.1.72 // indirect
+	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/pires/go-proxyproto v0.13.0 // indirect
-	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
-	github.com/prometheus/common v0.69.0 // indirect
 	github.com/prometheus/procfs v0.19.2 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/quic-go/quic-go v0.60.0 // indirect

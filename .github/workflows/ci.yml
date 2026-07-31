@@ -21,9 +21,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls]
+        plugin: [radnr, sni_tls, probe]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-go@v7
         with:
@@ -60,7 +60,7 @@ jobs:
   fuzz:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: sni_tls/go.mod
@@ -82,9 +82,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls]
+        plugin: [radnr, sni_tls, probe]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
@@ -102,7 +102,7 @@ jobs:
     # real gate — this is the cheap fast check.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Scan for private references
         run: |
           set -uo pipefail
@@ -118,7 +118,7 @@ jobs:
   gofmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: sni_tls/go.mod
@@ -138,9 +138,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls]
+        plugin: [radnr, sni_tls, probe]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
@@ -167,7 +167,7 @@ jobs:
     # range needs real history, not the default shallow clone.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -193,7 +193,7 @@ jobs:
     # line-length/document-start, both of which flag normal GH Actions YAML.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install yamllint
         run: pip install --no-cache-dir yamllint==1.35.1
       - name: yamllint
@@ -208,9 +208,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls]
+        plugin: [radnr, sni_tls, probe]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
@@ -231,7 +231,7 @@ jobs:
         id: date
         run: echo "today=$(date -u +%F)" >> "$GITHUB_OUTPUT"
       - name: Restore grype DB cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/grype/db
           key: grype-db-${{ steps.date.outputs.today }}
@@ -254,7 +254,7 @@ jobs:
     # rule source across the ecosystem.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install opengrep
         run: |
           curl -sSfL -o /usr/local/bin/opengrep \
@@ -283,7 +283,7 @@ jobs:
     # exactly what having it in Dagger is meant to avoid.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install Dagger
         # dagger.io/install.sh currently 404s outright (dead redirect, not a
         # bad version pin -- v0.21.7 is a real tag). Pulling the release
