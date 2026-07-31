@@ -57,6 +57,20 @@ The negotiated key-exchange group is recorded because a DoT handshake is where o
 
 Serving DoT is a deployment matter, not a plugin one: the zone needs a `tls://` server block and a certificate. Until then this records that every query arrived in cleartext, which is true.
 
+### Service binding and ECH (RFC 9460 + RFC 9848)
+
+`HTTPS` (TYPE65) and `SVCB` (TYPE64) are answered at probe names, carrying an `ech=` parameter.
+
+The measurement is **transport integrity**, not encryption. SVCB/HTTPS is uncommon enough that resolvers and middleboxes are known to strip, truncate or refuse parameters they do not understand — and `ech=` is the one most likely to be interfered with *deliberately*, because stripping it is exactly how an operator forces SNI back into the clear. Comparing the bytes that arrive against the bytes served attributes any difference to the path.
+
+**The published config is a canary, not a capability.** Nothing holds the private half of the key, on purpose: publishing a usable ECH config from a zone that serves no TLS would invite clients to attempt real ECH against names that cannot complete it. Do not read "this zone publishes an ECH config" as an ECH deployment.
+
+It is derived from the zone name via SHA-256 rather than generated or configured, which makes it stable across restarts and identical on every replica — both required, since the whole measurement is a byte comparison. It is distinct per zone as a side effect.
+
+The `ECHConfigList` encoding is hand-built (Go consumes these but exposes no encoder), so every length prefix is load-bearing. It is validated by feeding it to `crypto/tls` — the real consumer — and asserting a ClientHello is actually constructed and written, which is the step that parses the list and encrypts with it. A test that merely fails the handshake proves nothing, because the write can fail before ECH is touched.
+
+With no canary configured the zone answers NODATA rather than an `HTTPS` record with no `ech=` in it: a record the measurement cannot use is worse than no record.
+
 ### Trust anchor knowledge (RFC 8145)
 
 RFC 8145 lets a validating resolver tell a server which DNSSEC keys it would validate that server's answers with — the mechanism that measured the root KSK rollover, and one essentially only root operators have ever run the receiving side of.
@@ -156,6 +170,7 @@ A query with `QTYPE=NXNAME` is answered **FORMERR**, per RFC 9824 §3.4 — NXNA
 | `A` | the resolver's own IPv4 address, or NODATA if it reached us over IPv6 |
 | `AAAA` | the resolver's own IPv6 address, or NODATA if it reached us over IPv4 |
 | `TXT` | the observation as a flat `key=value` readout, so a bare `dig` gets the same result as the web page with no correlation store involved |
+| `HTTPS`, `SVCB` | a service binding carrying the `ech=` transport canary (RFC 9460/9848) |
 | `SOA`, `NS`, `DNSKEY` | at the apex only |
 
 Apex signatures are **never** spoiled, whatever a query asks for: a broken SOA or DNSKEY signature would make the whole zone bogus and every per-query variant beneath it unmeasurable.

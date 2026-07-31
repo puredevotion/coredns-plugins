@@ -60,6 +60,12 @@ type Probe struct {
 	Store Store
 	// BigSize is the payload size the `_big` modifier aims for, in bytes.
 	BigSize int
+	// ECHConfigList is the RFC 9848 `ech=` parameter served in HTTPS/SVCB
+	// answers. Built once at setup and never rotated, because the measurement
+	// compares the bytes that arrive against the bytes we serve — see
+	// echconfig.go for why this is a transport canary and NOT a usable ECH
+	// deployment.
+	ECHConfigList []byte
 
 	Next plugin.Handler
 }
@@ -222,6 +228,35 @@ func (p *Probe) synthesize(qname string, qtype uint16, obs Observation, mods Mod
 		h := hdr
 		h.Rrtype = dns.TypeAAAA
 		return []dns.RR{&dns.AAAA{Hdr: h, AAAA: net.IP(obs.ResolverAddr.AsSlice())}}
+
+	case dns.TypeHTTPS, dns.TypeSVCB:
+		// RFC 9460 service binding, carrying RFC 9848's ech= parameter.
+		//
+		// The measurement is transport integrity: SVCB/HTTPS is uncommon enough
+		// that resolvers and middleboxes are known to strip, truncate or refuse
+		// parameters they do not understand, and `ech=` is the one most likely to
+		// be interfered with deliberately — stripping it is exactly how an
+		// operator forces SNI back into the clear. Serving a known, deterministic
+		// value is what lets a mismatch be attributed to the path.
+		if len(p.ECHConfigList) == 0 {
+			return nil // NODATA rather than an HTTPS record with no ech= to measure
+		}
+		h := hdr
+		h.Rrtype = qtype
+		params := []dns.SVCBKeyValue{
+			// ALPN first: RFC 9460 §7 requires SvcParams in strictly ascending
+			// key order on the wire, and alpn(1) precedes ech(5).
+			&dns.SVCBAlpn{Alpn: []string{"h2"}},
+			&dns.SVCBECHConfig{ECH: p.ECHConfigList},
+		}
+		if qtype == dns.TypeHTTPS {
+			return []dns.RR{&dns.HTTPS{SVCB: dns.SVCB{
+				Hdr: h, Priority: 1, Target: ".", Value: params,
+			}}}
+		}
+		return []dns.RR{&dns.SVCB{
+			Hdr: h, Priority: 1, Target: ".", Value: params,
+		}}
 
 	case dns.TypeTXT:
 		h := hdr
