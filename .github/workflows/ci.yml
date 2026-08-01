@@ -15,6 +15,29 @@ on:
 permissions:
   contents: read
 
+# Single source of truth for pinned tooling. Bump deliberately; every checksum
+# here must move with the version above it.
+#
+# The gap this closes (issue #29): the pipeline pinned tool *versions*
+# meticulously and then trusted mutable action tags and unverified downloads —
+# generating SBOMs while executing binaries nobody had checked. A tag can be
+# moved; that is the door the tj-actions/changed-files compromise walked
+# through. Actions below are pinned by commit SHA with the tag in a trailing
+# comment, which is the only form GitHub resolves immutably.
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  GRYPE_VERSION: "0.116.0"
+  GRYPE_SHA256: "40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5"
+  OPENGREP_VERSION: "1.25.0"
+  OPENGREP_SHA256: "9ac4aebb47ba3f7b0d8fc641ac8749cb6c2f253f616131a67d9631e00d4bea33"
+  # The rule set publishes no release tags at all, so a commit is the only
+  # stable ref — a tag pin there would be a guess dressed as a pin.
+  OPENGREP_RULES_SHA: "f1d2b562b414783763fd02a6ed2736eaed622efa"
+  DAGGER_VERSION: "0.21.7"
+  DAGGER_SHA256: "44430afc6f9c390fc47c4f352b15de9309a5e97ebd1ae563839617d6df8e8cc5"
+  GOVULNCHECK_VERSION: "v1.1.4"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -23,9 +46,9 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls, probe]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
-      - uses: actions/setup-go@v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
@@ -49,7 +72,12 @@ jobs:
       - name: Test offline (hermetic gate)
         working-directory: ${{ matrix.plugin }}
         env:
-          GOPROXY: off
+          # QUOTED. Bare `off` is a YAML 1.1 boolean, so this reached Go as
+          # GOPROXY=false — a value Go treats as a proxy URL, not as "never
+          # fetch". The job still passed, which is the problem: the one gate
+          # that proves the tree is hermetic was not testing hermeticity.
+          # yamllint had been flagging it as a truthy warning all along.
+          GOPROXY: "off"
           GOFLAGS: -mod=mod
         run: go test ./...
 
@@ -60,8 +88,8 @@ jobs:
   fuzz:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: sni_tls/go.mod
           cache-dependency-path: sni_tls/go.sum
@@ -72,7 +100,7 @@ jobs:
         run: go test -run=NONE -fuzz=FuzzGetCertificate -fuzztime=60s ./...
       - name: Upload crashers
         if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: fuzz-crashers
           path: sni_tls/testdata/fuzz/
@@ -84,15 +112,19 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls, probe]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
       - name: govulncheck
         working-directory: ${{ matrix.plugin }}
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          set -euo pipefail
+          # Pinned, not @latest. A security tool that changes under you makes a
+          # newly-passing run ambiguous: a fixed CVE and a dropped check look
+          # identical from here.
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
           govulncheck ./...
 
   no-private-references:
@@ -102,7 +134,7 @@ jobs:
     # real gate — this is the cheap fast check.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Scan for private references
         run: |
           set -uo pipefail
@@ -118,8 +150,8 @@ jobs:
   gofmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: sni_tls/go.mod
       - name: gofmt
@@ -140,12 +172,12 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls, probe]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9
         with:
           # v1.62.2 (and the newest v1.x, v1.64.8) were both built against a
           # Go version lower than go.mod's 1.26.5 toolchain ("Go language
@@ -167,14 +199,16 @@ jobs:
     # range needs real history, not the default shallow clone.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           fetch-depth: 0
 
       - name: Install gitleaks
         run: |
-          curl -sSfL -o /tmp/gitleaks.tar.gz \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o /tmp/gitleaks.tar.gz "$url"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
           gitleaks version
@@ -193,7 +227,7 @@ jobs:
     # line-length/document-start, both of which flag normal GH Actions YAML.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Install yamllint
         run: pip install --no-cache-dir yamllint==1.35.1
       - name: yamllint
@@ -210,8 +244,8 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls, probe]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
@@ -231,7 +265,7 @@ jobs:
         id: date
         run: echo "today=$(date -u +%F)" >> "$GITHUB_OUTPUT"
       - name: Restore grype DB cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
         with:
           path: ~/.cache/grype/db
           key: grype-db-${{ steps.date.outputs.today }}
@@ -239,9 +273,17 @@ jobs:
             grype-db-
 
       - name: Install grype
+        # Release tarball with a checksum, not `curl | sh` of an install script
+        # fetched from a branch. Piping an unverified script into a shell to
+        # install the tool that scans for vulnerabilities inverts the point of
+        # the job.
         run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin v0.116.0
+          set -euo pipefail
+          url="https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o /tmp/grype.tar.gz "$url"
+          echo "${GRYPE_SHA256}  /tmp/grype.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/grype.tar.gz -C /tmp grype
+          sudo install -m 0755 /tmp/grype /usr/local/bin/grype
           grype version
 
       - name: Scan the generated SBOM for known vulnerabilities
@@ -254,14 +296,28 @@ jobs:
     # rule source across the ecosystem.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Install opengrep
         run: |
-          curl -sSfL -o /usr/local/bin/opengrep \
-            https://github.com/opengrep/opengrep/releases/download/v1.25.0/opengrep_manylinux_x86
-          chmod +x /usr/local/bin/opengrep
+          set -euo pipefail
+          curl -sSfL -o /tmp/opengrep \
+            "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          echo "${OPENGREP_SHA256}  /tmp/opengrep" | sha256sum -c -
+          sudo install -m 0755 /tmp/opengrep /usr/local/bin/opengrep
       - name: Clone opengrep-rules
-        run: git clone --depth 1 https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+        # Pinned to a COMMIT, not a branch. `--depth 1` on main clones whatever
+        # HEAD happens to be, so the same repo commit can pass today and fail
+        # tomorrow with nothing here changed.
+        #
+        # Do NOT rewrite this as `git clone --branch <tag> … || <fallback>`:
+        # the rule set publishes no tags, and under `set -e` the failing clone
+        # aborts the step before the fallback runs. A fallback placed after a
+        # failing command under `set -e` is not a fallback.
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+          git -C /tmp/opengrep-rules checkout --quiet "${OPENGREP_RULES_SHA}"
       - name: Static analysis (Opengrep)
         env:
           PYTHONUTF8: "1"
@@ -283,7 +339,7 @@ jobs:
     # exactly what having it in Dagger is meant to avoid.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Install Dagger
         # dagger.io/install.sh currently 404s outright (dead redirect, not a
         # bad version pin -- v0.21.7 is a real tag). Pulling the release
@@ -291,8 +347,10 @@ jobs:
         # third-party redirect staying up, and it's the same artifact the
         # install script would have fetched anyway.
         run: |
-          curl -fsSL -o /tmp/dagger.tar.gz \
-            https://github.com/dagger/dagger/releases/download/v0.21.7/dagger_v0.21.7_linux_amd64.tar.gz
+          set -euo pipefail
+          url="https://github.com/dagger/dagger/releases/download/v${DAGGER_VERSION}/dagger_v${DAGGER_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o /tmp/dagger.tar.gz "$url"
+          echo "${DAGGER_SHA256}  /tmp/dagger.tar.gz" | sha256sum -c -
           tar -xzf /tmp/dagger.tar.gz -C /tmp dagger
           sudo install -m 0755 /tmp/dagger /usr/local/bin/dagger
           dagger version

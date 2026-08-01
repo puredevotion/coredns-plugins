@@ -17,6 +17,22 @@ on:
 permissions:
   contents: read
 
+# Mirrors ci.yml's pinning block deliberately — this workflow runs the same
+# scanners, so leaving it on mutable tags and unverified downloads would keep
+# the gap issue #29 describes open on the path that runs unattended every
+# night. Keep the two blocks in step when bumping.
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  GRYPE_VERSION: "0.116.0"
+  GRYPE_SHA256: "40aff724297312f91ea390d003bed8d8651c74cc7f5b26732db80b3a408d2fc5"
+  OPENGREP_VERSION: "1.25.0"
+  OPENGREP_SHA256: "9ac4aebb47ba3f7b0d8fc641ac8749cb6c2f253f616131a67d9631e00d4bea33"
+  OPENGREP_RULES_SHA: "f1d2b562b414783763fd02a6ed2736eaed622efa"
+  DAGGER_VERSION: "0.21.7"
+  DAGGER_SHA256: "44430afc6f9c390fc47c4f352b15de9309a5e97ebd1ae563839617d6df8e8cc5"
+  GOVULNCHECK_VERSION: "v1.1.4"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -25,8 +41,8 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
@@ -40,12 +56,12 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
-      - uses: golangci/golangci-lint-action@v9
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9
         with:
           version: v1.62.2
           working-directory: ${{ matrix.plugin }}
@@ -57,25 +73,28 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
       - run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          set -euo pipefail
+          go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
           govulncheck ./...
         working-directory: ${{ matrix.plugin }}
 
   gitleaks:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           fetch-depth: 0
       - run: |
-          curl -sSfL -o /tmp/gitleaks.tar.gz \
-            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o /tmp/gitleaks.tar.gz "$url"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
       - run: gitleaks git --log-opts="--all" --redact --no-banner .
@@ -83,12 +102,18 @@ jobs:
   opengrep:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - run: |
-          curl -sSfL -o /usr/local/bin/opengrep \
-            https://github.com/opengrep/opengrep/releases/download/v1.25.0/opengrep_manylinux_x86
-          chmod +x /usr/local/bin/opengrep
-          git clone --depth 1 https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+          set -euo pipefail
+          curl -sSfL -o /tmp/opengrep \
+            "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          echo "${OPENGREP_SHA256}  /tmp/opengrep" | sha256sum -c -
+          sudo install -m 0755 /tmp/opengrep /usr/local/bin/opengrep
+          # Pinned by COMMIT: the rule set publishes no tags, and a --depth 1
+          # clone of main makes a green nightly unreproducible.
+          git clone --filter=blob:none --no-checkout \
+            https://github.com/opengrep/opengrep-rules.git /tmp/opengrep-rules
+          git -C /tmp/opengrep-rules checkout --quiet "${OPENGREP_RULES_SHA}"
       - env:
           PYTHONUTF8: "1"
           LC_ALL: "C.UTF-8"
@@ -101,8 +126,8 @@ jobs:
       matrix:
         plugin: [radnr, sni_tls]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
@@ -116,7 +141,7 @@ jobs:
         run: echo "today=$(date -u +%F)" >> "$GITHUB_OUTPUT"
 
       - name: Restore/refresh grype DB cache
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
         with:
           path: ~/.cache/grype/db
           key: grype-db-${{ steps.date.outputs.today }}
@@ -131,8 +156,12 @@ jobs:
 
       - name: Install grype
         run: |
-          curl -sSfL https://raw.githubusercontent.com/anchore/grype/main/install.sh \
-            | sh -s -- -b /usr/local/bin v0.116.0
+          set -euo pipefail
+          url="https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o /tmp/grype.tar.gz "$url"
+          echo "${GRYPE_SHA256}  /tmp/grype.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/grype.tar.gz -C /tmp grype
+          sudo install -m 0755 /tmp/grype /usr/local/bin/grype
           grype db update
 
       - run: grype "sbom:${{ matrix.plugin }}/sbom.cdx.json" --fail-on high
@@ -142,8 +171,8 @@ jobs:
     # not just a check that the target still builds and runs.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
           go-version-file: sni_tls/go.mod
           cache-dependency-path: sni_tls/go.sum
@@ -151,7 +180,7 @@ jobs:
         working-directory: sni_tls
         run: go test -run=NONE -fuzz=FuzzGetCertificate -fuzztime=900s ./...
       - if: failure()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
         with:
           name: nightly-fuzz-crashers
           path: sni_tls/testdata/fuzz/
@@ -159,9 +188,19 @@ jobs:
   containerize:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Install Dagger
-        run: curl -fsSL https://dagger.io/install.sh | DAGGER_VERSION=0.21.7 sh
+        # Same release-tarball path ci.yml uses: dagger.io/install.sh 404s,
+        # and piping an unverified script into a shell is the pattern this
+        # hardening exists to remove.
+        run: |
+          set -euo pipefail
+          url="https://github.com/dagger/dagger/releases/download/v${DAGGER_VERSION}/dagger_v${DAGGER_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o /tmp/dagger.tar.gz "$url"
+          echo "${DAGGER_SHA256}  /tmp/dagger.tar.gz" | sha256sum -c -
+          tar -xzf /tmp/dagger.tar.gz -C /tmp dagger
+          sudo install -m 0755 /tmp/dagger /usr/local/bin/dagger
+          dagger version
       - working-directory: ci
         run: |
           set -euo pipefail
