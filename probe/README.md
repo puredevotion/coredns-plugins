@@ -57,6 +57,24 @@ The negotiated key-exchange group is recorded because a DoT handshake is where o
 
 Serving DoT is a deployment matter, not a plugin one: the zone needs a `tls://` server block and a certificate. Until then this records that every query arrived in cleartext, which is true.
 
+### Per-visitor service discovery (RFC 6763)
+
+A DNS-SD browse tree is served **under the token**, not at the usual fixed names:
+
+```
+_services._dns-sd._udp.<token>.<zone>   browse: which service types exist
+_probe._tcp.<token>.<zone>              enumerate instances of that type
+probe._probe._tcp.<token>.<zone>        the instance: SRV + TXT
+```
+
+That placement is the whole reason it is measurable. DNS-SD normally lives at `_services._dns-sd._udp.<zone>` — a **fixed, cacheable** name, so the first visitor's query would populate every cache between here and the internet and no later visitor would ever be observed. It would look implemented and measure nothing.
+
+What it measures is whether a client actually follows the chain, and how. The three levels arrive as separate queries for distinguishable names, so the observation sequence shows which levels were reached. The enumerate step returns SRV and TXT in the **additional** section (RFC 6763 §12), so a conforming client finishes in two round trips and one that ignores additional records asks again — and that difference is visible.
+
+Underscore service labels are RFC 8552 attrleaf names, so this doubles as a check that a resolver transports them intact — the same mangling the ECH canary looks for, one layer up.
+
+Wrong type at a valid level is **NODATA**, not NXDOMAIN: a client asking `SRV` at the enumerate level made a type mistake, it did not visit a name that is absent. Nothing listens on the advertised SRV port — worth stating, because an SRV record is a promise a naive client will try to keep.
+
 ### Service binding and ECH (RFC 9460 + RFC 9848)
 
 `HTTPS` (TYPE65) and `SVCB` (TYPE64) are answered at probe names, carrying an `ech=` parameter.
@@ -170,6 +188,7 @@ A query with `QTYPE=NXNAME` is answered **FORMERR**, per RFC 9824 §3.4 — NXNA
 | `A` | the resolver's own IPv4 address, or NODATA if it reached us over IPv6 |
 | `AAAA` | the resolver's own IPv6 address, or NODATA if it reached us over IPv4 |
 | `TXT` | the observation as a flat `key=value` readout, so a bare `dig` gets the same result as the web page with no correlation store involved |
+| `PTR`, `SRV`, `TXT` | inside the per-visitor DNS-SD browse tree (RFC 6763) |
 | `HTTPS`, `SVCB` | a service binding carrying the `ech=` transport canary (RFC 9460/9848) |
 | `SOA`, `NS`, `DNSKEY` | at the apex only |
 
