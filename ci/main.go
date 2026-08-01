@@ -90,6 +90,20 @@ var pluginCfgPatches = map[string]struct {
 		insertAfterLine: "health:health",
 		modulePath:      "github.com/puredevotion/coredns-plugins/radnr",
 	},
+	// RFC 2136 dynamic update. Slot: immediately BEFORE file:file, which puts
+	// it after dnssec:dnssec and after transfer:transfer in v1.14.6's
+	// plugin.cfg. Both of those matter:
+	//
+	//   - after dnssec  => records added by an UPDATE are signed on the way
+	//     out like any other answer, rather than being served bare from a
+	//     signed zone and read as bogus by a validating resolver.
+	//   - before file   => a zone this plugin owns is answered here; anything
+	//     else falls through to the static zones untouched.
+	"dynupdate": {
+		cfgLine:         "dynupdate:github.com/puredevotion/coredns-plugins/dynupdate",
+		insertAfterLine: "hosts:hosts",
+		modulePath:      "github.com/puredevotion/coredns-plugins/dynupdate",
+	},
 	// Response Rate Limiting — the amplification-abuse mitigation that gates
 	// any public exposure of an authoritative zone we serve (homelab
 	// docs/plans/authoritative-dns-hivre.md Phase 2). That plan assumed this

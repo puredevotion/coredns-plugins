@@ -155,7 +155,8 @@ func (d *DynUpdate) prescan(updates []dns.RR) int {
 		}
 		// Meta-types are queries, not records; none of them can appear in an
 		// update section in any class.
-		if isMetaType(h.Rrtype) && !(h.Class == dns.ClassANY && h.Rrtype == dns.TypeANY) {
+		deleteEverythingAtName := h.Class == dns.ClassANY && h.Rrtype == dns.TypeANY
+		if isMetaType(h.Rrtype) && !deleteEverythingAtName {
 			return dns.RcodeFormatError
 		}
 

@@ -141,13 +141,13 @@ func readZone(path, origin string) ([]dns.RR, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening zone directory %s: %w", dir, err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 
 	f, err := root.Open(name)
 	if err != nil {
 		return nil, fmt.Errorf("opening zone file %s: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	// Parsing through file.Parse rather than a bare zone parser keeps $INCLUDE
 	// handling, $ORIGIN and the generate directive identical to what the
@@ -164,7 +164,7 @@ func readZone(path, origin string) ([]dns.RR, error) {
 	rrs = append(rrs, z.NS...)
 	rrs = append(rrs, z.SIGSOA...)
 	rrs = append(rrs, z.SIGNS...)
-	for _, e := range z.Tree.All() {
+	for _, e := range z.All() {
 		rrs = append(rrs, e.All()...)
 	}
 	return rrs, nil
