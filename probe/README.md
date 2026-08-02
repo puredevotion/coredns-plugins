@@ -247,6 +247,10 @@ check.example.com er.example.com {
         responses-per-second 20
         slip-ratio 2
     }
+    # Not optional alongside rrl: this is what lets rrl account every
+    # synthesized name against the zone apex instead of giving each random
+    # token its own bucket. Without it the limits above never trigger.
+    metadata
     prometheus
     errors
 }
@@ -276,6 +280,7 @@ $ dig TXT _er.16.\_badsig.a1b2c3d4.check.example.com.6._er.er.example.com
 This zone answers the public internet, synthesizes signed responses, and has a modifier whose entire purpose is to emit a large answer.
 
 * It **must** sit behind response rate limiting — see [`docs/rrl-plugin.md`](../docs/rrl-plugin.md). Note that `rrl` occupies an earlier chain slot than this plugin, so it does cover these answers.
+* **`metadata` must be enabled in the same server block, or the rate limiting above is decorative.** `rrl` buckets a response by the full QNAME unless a provider publishes `zone/wildcard`; every name here is synthesized from a caller-supplied random token, so without it each query gets a bucket to itself and no limit is ever reached. This plugin implements the provider (`metadata.go`) and publishes the wildcard parent for whichever of its two zones matched — but a provider nothing collects is inert, so the `metadata` directive has to be present too. This is `rrl`'s documented wildcard-flooding evasion, except that here an attacker does not need to discover a wildcard: varying the token is the zone's normal grammar.
 * It must **never** share a server block with a forwarder or a cache. An open resolver is a categorically worse reflector than an authoritative server, and `cache` sits *ahead* of the rate-limiting slot, so cached answers would bypass it.
 * Observations are transient by construction: bounded count, bounded per token, expiry keyed on first-seen so a token cannot be kept alive by continuing to query it.
 * The agent domain is the one surface here that parses a name a stranger composed, so it is the one with real security surface. Bounds are in `ParseReport` (label count, numeric-label length) and in the store (per-token cap, separate ceiling on the unattributed list). Report queries are also *queries*: put the agent domain inside the `rrl` zone list, and when moving `rrl` from `report-only` to enforcing, check the report path against the observed baseline separately — reports arrive at a fraction of a probe zone's rate, so an allowance tuned on probe traffic can be wrong for them in either direction.
