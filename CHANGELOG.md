@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/puredevotion/coredns-plugins/compare/v0.3.0...v0.4.0) (2026-08-02)
+
+
+### Features
+
+* **probe:** publish zone/wildcard so rrl can actually rate-limit this zone ([#37](https://github.com/puredevotion/coredns-plugins/issues/37)) ([87265bf](https://github.com/puredevotion/coredns-plugins/commit/87265bf90dd623e5a289784e3e5f37f18c2ee742))
+
 ## [0.3.0](https://github.com/puredevotion/coredns-plugins/compare/v0.2.0...v0.3.0) (2026-08-02)
 
 
