@@ -191,6 +191,127 @@ func TestValkeyLookupUnknownTokenIsEmptyNotError(t *testing.T) {
 	}
 }
 
+// TestValkeyReportRoundTrip is the RFC 9567 half of the seam. Same reason the
+// observation round-trip is here: the thing most likely to be wrong is the JSON
+// surviving the store, and the web tier decodes these bytes with no shared code.
+func TestValkeyReportRoundTrip(t *testing.T) {
+	s := valkeyStoreForTest(t, 8)
+	token := uniqueToken(t)
+
+	want := ReportRecord{
+		At:             time.Now().UTC().Truncate(time.Second),
+		Token:          token,
+		Qtype:          1,
+		QtypeName:      "A",
+		Qname:          "_expiredsig." + token + ".check.example.com.",
+		EDE:            7,
+		EDEText:        "Signature Expired",
+		ReporterAddr:   netip.MustParseAddr("192.0.2.53"),
+		ReporterPrefix: netip.MustParsePrefix("192.0.2.0/24"),
+		Transport:      TransportUDP,
+	}
+	if err := s.RecordReport(want); err != nil {
+		t.Fatalf("RecordReport: %v", err)
+	}
+
+	back, err := s.LookupReports(token)
+	if err != nil {
+		t.Fatalf("LookupReports: %v", err)
+	}
+	if len(back) != 1 {
+		t.Fatalf("got %d reports, want 1", len(back))
+	}
+	got := back[0]
+	if got.Qname != want.Qname || got.EDE != want.EDE || got.Qtype != want.Qtype {
+		t.Errorf("report round-tripped as %+v, want %+v", got, want)
+	}
+	if got.ReporterAddr != want.ReporterAddr || got.ReporterPrefix != want.ReporterPrefix {
+		t.Errorf("reporter round-tripped as %s/%s, want %s/%s",
+			got.ReporterAddr, got.ReporterPrefix, want.ReporterAddr, want.ReporterPrefix)
+	}
+	if !got.At.Equal(want.At) {
+		t.Errorf("At = %s, want %s", got.At, want.At)
+	}
+}
+
+// TestValkeyReportCapKeepsNewest. LTRIM keeps the tail, which is deliberate: a
+// report arriving now is about a failure happening now, and the entries a flood
+// contributes are the ones worth losing first.
+func TestValkeyReportCapKeepsNewest(t *testing.T) {
+	const limit = 3
+	s := valkeyStoreForTest(t, limit)
+	token := uniqueToken(t)
+
+	const total = limit + 4
+	for i := uint16(0); i < total; i++ {
+		if err := s.RecordReport(ReportRecord{Token: token, EDE: i}); err != nil {
+			t.Fatalf("RecordReport %d: %v", i, err)
+		}
+	}
+	back, err := s.LookupReports(token)
+	if err != nil {
+		t.Fatalf("LookupReports: %v", err)
+	}
+	if len(back) != limit {
+		t.Fatalf("retained %d reports, want the cap of %d", len(back), limit)
+	}
+	// EDE was set to the loop index, so the survivors identify which end was
+	// trimmed without needing timestamps.
+	if back[0].EDE != total-limit || back[len(back)-1].EDE != total-1 {
+		t.Errorf("retained EDEs %d..%d, want the newest %d entries",
+			back[0].EDE, back[len(back)-1].EDE, limit)
+	}
+}
+
+// TestValkeyUnattributedReportsAreSeparate. The unattributed list must not land
+// in a token's key space — a visitor reading their own report would otherwise
+// see every stranger's.
+func TestValkeyUnattributedReportsAreSeparate(t *testing.T) {
+	s := valkeyStoreForTest(t, 8)
+	token := uniqueToken(t)
+
+	if err := s.RecordReport(ReportRecord{Token: token, EDE: 6}); err != nil {
+		t.Fatalf("RecordReport attributed: %v", err)
+	}
+	if err := s.RecordReport(ReportRecord{EDE: 10}); err != nil {
+		t.Fatalf("RecordReport unattributed: %v", err)
+	}
+
+	mine, err := s.LookupReports(token)
+	if err != nil {
+		t.Fatalf("LookupReports: %v", err)
+	}
+	if len(mine) != 1 || mine[0].EDE != 6 {
+		t.Errorf("token list = %+v, want exactly the attributed report", mine)
+	}
+}
+
+// TestReportKeyNamespacing needs no server: the unattributed list shares a key
+// prefix with every token, so the only thing keeping them apart is that a token
+// is lowercase hex and "unattributed" is not.
+func TestReportKeyNamespacing(t *testing.T) {
+	if reportKey("") == reportKey("deadbeef") {
+		t.Fatal("the unattributed key collides with a real token's key")
+	}
+	for _, token := range []string{"deadbeef", "0123456789abcdef"} {
+		if !parseTokenOK(token) {
+			t.Fatalf("test setup: %q is not a valid token", token)
+		}
+		if reportKey(token) == reportKey("") {
+			t.Errorf("token %q maps onto the unattributed key", token)
+		}
+	}
+	// The literal must stay unreachable through the token grammar.
+	if parseTokenOK("unattributed") {
+		t.Error("\"unattributed\" parses as a token, so a visitor could be issued the shared key")
+	}
+}
+
+func parseTokenOK(s string) bool {
+	_, ok := parseToken(s)
+	return ok
+}
+
 // TestValkeyStoreSatisfiesStore keeps the plugin wiring honest: ServeDNS only
 // ever talks to the interface, so this is what guarantees the Valkey
 // implementation is substitutable for MemStore.

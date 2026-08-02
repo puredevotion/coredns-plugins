@@ -123,6 +123,30 @@ The option is **only** sent in response to a request. Sending it unsolicited wou
 
 One implementation note, because it is a trap rather than a detail: the response is built from *our* zone, never echoed from the client's option. A querier may send a populated `ZONEVERSION`; echoing it would let them choose what we appear to assert about our own zone version, which any downstream diagnosis would then believe.
 
+### DNS Error Reporting (RFC 9567) — both halves
+
+RFC 9567 lets an authoritative server invite resolvers to report resolution failures back to it. The authoritative side advertises an **agent domain** in an unsolicited EDNS0 Report-Channel option (code 18); a validating resolver that then hits a reportable failure encodes it into a QNAME and sends a TXT query to that agent domain:
+
+```
+_er.<QTYPE>.<failing name>.<EDE code>._er.<agent domain>
+```
+
+Almost nobody runs the receiving side. Unbound is the resolver that generates these; BIND and Knot have the authoritative advertisement. `agent_domain` turns this plugin into both — advertiser and monitoring agent — in one process, and that is not an economy but the point:
+
+**This zone manufactures, on purpose, exactly the failures RFC 9567 exists to report.** `_badsig`, `_expiredsig`, `_futuresig` and `_unsigned` each provoke a specific validation failure, and each is labelled with the extended error code we know to be true (see the EDE section above). When a report comes back, the code the resolver *concluded* can be compared against the code we *caused*. Agreement means it diagnosed correctly; disagreement is the finding, and silence is a third reading.
+
+And because the failing name contains the visitor's token, a report is attributable to the page that provoked it — `_badsig.a1b2c3d4.check.example.com` recovers `a1b2c3d4`. A public agent domain normally receives anonymous reports about names it knows nothing about.
+
+Four constraints, all of them load-bearing:
+
+- **The agent domain must not be inside the zone it reports on.** RFC 9567 §6.3 requires this, and the reason is a deadlock: if resolving the agent domain first requires resolving the zone that is failing, the report can never be delivered — and the failures here are manufactured, so the deadlock would be guaranteed rather than hypothetical. Setup refuses the configuration. It also refuses the reverse nesting, on this plugin's own account: with the probe zone underneath the agent domain, a probe name and a report name would be indistinguishable and the more permissive parser would win silently.
+- **The agent zone is never signed**, even when the probe zone has a signer. RFC 9567 §7 recommends against signing an agent domain because it costs the reporting resolver a validation; here it is sharper than that. This zone exists to receive reports about broken signatures. Signing it with the same key means a resolver that cannot validate our signatures also cannot deliver the report saying so — the failure would silence its own report.
+- **NXDOMAIN is never returned** from the agent domain. RFC 9567 §6.2 forbids it for monitored domains, because the negative cache entry suppresses subsequent reports. Every name under the agent domain answers NOERROR: a TXT for a well-formed report, NODATA for anything else.
+- **A report QNAME is attacker-chosen input**, unlike everything else this plugin parses. The label count and the two numeric labels are bounded before any per-label work; the reported name is stored as a string and never resolved, never re-queried, never used to build a name we look up.
+
+Reports land in the store beside observations, under `probe:reports:<token>`, or `probe:reports:unattributed` when the reported name carried no token of ours. Unattributed reports are kept rather than dropped — a report about the zone apex is legitimate and interesting — and that list has its own, larger ceiling, because it is a single list shared with every reporter on the internet and is precisely what a flood would target.
+
+Reports are **asynchronous and lossy**. A resolver reports after it gives up, and caches the report query for a TTL before repeating it. A report can therefore arrive long after the visitor closed the page, which is why reports are stored independently of observations and survive a token whose observations have already expired. The corollary matters more: *absence of a report is not evidence that nothing failed*, and must never be rendered as one.
 
 ## Syntax
 
@@ -140,6 +164,8 @@ probe ZONE {
     valkey        ADDR [ADDR...]
     valkey_ca     FILE
     valkey_timeout DURATION
+    agent_domain  NAME
+    agent_ttl     SECONDS
 }
 ```
 
@@ -151,6 +177,8 @@ probe ZONE {
 * `store_ttl` bounds how long a token stays readable, default **10m**. This is transient diagnostic state about someone's network, not history to keep.
 * `max_tokens` (default **10000**) and `max_per_token` (default **64**) bound memory. A public zone invites walking the token space purely to grow the store.
 * `valkey` **ADDR...** switches the observation store from in-process to Valkey, which is what the separate web tier reads and what more than one replica requires. Data model: `probe:seen:<token>` is a counter and `probe:obs:<token>` a capped list of JSON observations — separate keys on purpose, so the count stays truthful past the detail cap ("we saw this 200 times" is itself the finding). `valkey_ca` is **required** and there is deliberately no bypass: the fleet's Valkey has no authentication of its own, so the server certificate is the only thing distinguishing it from anything else answering on that address, and what crosses the link is observations about other people's networks. An escape hatch would only ever be used to paper over a wrong CA path. `valkey_timeout` (default **100ms**) bounds how long a store round-trip may delay a DNS answer; exceeding it degrades the measurement rather than failing the query. Connecting fails at startup rather than silently falling back to the in-process store, because a zone that answers perfectly while recording nothing nobody can read is the worst outcome.
+* `agent_domain` **NAME** enables RFC 9567 DNS Error Reporting: the Report-Channel option is advertised on every response from **ZONE**, and **NAME** becomes a second zone this plugin serves as the monitoring agent. Unset by default, and unset means *both* halves are off — advertising a channel nobody answers is worse than advertising none, because it sends every reporting resolver into a lookup that cannot succeed. **NAME** must share no ancestry with **ZONE** in either direction; setup refuses otherwise, for the reasons above. The server block has to list both zones (`check.example.com er.example.com { … }`) or CoreDNS never routes the report queries here.
+* `agent_ttl` is the TTL on agent-zone answers, default **300**, and through the SOA MINIMUM it also governs negative caching there. Deliberately not `ttl`: that one is tiny because a probe answer describes one moment, whereas this one is a rate limit on *inbound* reports. RFC 9567 §6.2 calls that caching essential — it is what holds a reporting resolver to one report query per TTL for the same problem — so a short value converts one persistently broken resolver into a stream of reports about the same failure. Zero is rejected rather than treated as "no caching".
 * `big_size` is the payload the `_big` modifier aims for, default **1400**, capped at 4096. The default is above the DNS-flag-day-2020 EDNS cap of 1232 — so the answer demonstrably exceeds what a resolver should advertise room for — but below the ~1500-byte Ethernet MTU, so it actually arrives. Measured on a 1500-byte-MTU path: ~1419 bytes is delivered over UDP, anything past ~1540 silently vanishes, while the same 3125-byte answer arrives intact over TCP. Larger values are a legitimate experiment (they test path-MTU behaviour and fragment filtering, a real failure mode) but a poor default, because the demonstration then presents as "the server is broken" rather than "look how large this answer is".
 
 ## Query grammar
@@ -194,16 +222,28 @@ A query with `QTYPE=NXNAME` is answered **FORMERR**, per RFC 9824 §3.4 — NXNA
 
 Apex signatures are **never** spoiled, whatever a query asks for: a broken SOA or DNSKEY signature would make the whole zone bogus and every per-query variant beneath it unmeasurable.
 
+Under `agent_domain`, when configured, the table is much shorter and nothing is signed:
+
+| Type | Answer |
+|---|---|
+| `TXT` on a well-formed report name | `"report received"`, and the report is recorded |
+| anything else | NODATA with the agent zone's SOA — never NXDOMAIN, per RFC 9567 §6.2 |
+| `SOA`, `NS` | at the agent apex only. No TXT there, so a resolver that truncated a report name down to the apex gets a visible NODATA instead of a success hiding the truncation |
+
 ## Examples
 
 ```
-check.example.com {
+check.example.com er.example.com {
     probe check.example.com {
         key /etc/coredns/keys/Kcheck.example.com.+013+12345
         ttl 10
         ns  ns.example.com
+
+        # RFC 9567. Both zones are listed on the server block above, or the
+        # report queries never reach this plugin.
+        agent_domain er.example.com
     }
-    rrl check.example.com {
+    rrl check.example.com er.example.com {
         responses-per-second 20
         slip-ratio 2
     }
@@ -219,6 +259,18 @@ $ dig +short TXT a1b2c3d4.check.example.com
 $ dig +dnssec TXT _badsig.a1b2c3d4.check.example.com   # a validating resolver should SERVFAIL
 ```
 
+End-to-end for the reporting channel, with Unbound as the reference implementation of the half we do not write:
+
+```console
+$ dig +dnssec TXT a1b2c3d4.check.example.com | grep -i report
+; REPORT-CHANNEL: er.example.com.
+
+$ # what a reporting resolver sends after _badsig fails validation (EDE 6):
+$ dig TXT _er.16.\_badsig.a1b2c3d4.check.example.com.6._er.er.example.com
+;; ANSWER SECTION:
+… IN TXT "report received"
+```
+
 ## Safety
 
 This zone answers the public internet, synthesizes signed responses, and has a modifier whose entire purpose is to emit a large answer.
@@ -226,6 +278,7 @@ This zone answers the public internet, synthesizes signed responses, and has a m
 * It **must** sit behind response rate limiting — see [`docs/rrl-plugin.md`](../docs/rrl-plugin.md). Note that `rrl` occupies an earlier chain slot than this plugin, so it does cover these answers.
 * It must **never** share a server block with a forwarder or a cache. An open resolver is a categorically worse reflector than an authoritative server, and `cache` sits *ahead* of the rate-limiting slot, so cached answers would bypass it.
 * Observations are transient by construction: bounded count, bounded per token, expiry keyed on first-seen so a token cannot be kept alive by continuing to query it.
+* The agent domain is the one surface here that parses a name a stranger composed, so it is the one with real security surface. Bounds are in `ParseReport` (label count, numeric-label length) and in the store (per-token cap, separate ceiling on the unattributed list). Report queries are also *queries*: put the agent domain inside the `rrl` zone list, and when moving `rrl` from `report-only` to enforcing, check the report path against the observed baseline separately — reports arrive at a fraction of a probe zone's rate, so an allowance tuned on probe traffic can be wrong for them in either direction.
 
 ## Known limitations
 

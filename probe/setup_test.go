@@ -111,6 +111,113 @@ func TestParseCorefile(t *testing.T) {
 	}
 }
 
+// TestParseAgentDomain covers the RFC 9567 configuration, including the two
+// nesting rules. Both are load-bearing rather than tidiness:
+//
+//   - RFC 9567 §6.3 forbids an agent domain inside the domain it reports on,
+//     because a resolver that cannot resolve the failing zone cannot resolve
+//     the agent domain either — the report deadlocks on the failure it is about.
+//   - The reverse nesting is this plugin's own constraint: with the probe zone
+//     under the agent domain, ServeDNS could not tell a probe name from a report
+//     name and the more permissive parser would win silently.
+func TestParseAgentDomain(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+		check   func(*testing.T, *Probe)
+	}{
+		{
+			name:  "sibling agent domain, default ttl",
+			input: "probe check.example.com {\n\tagent_domain er.example.com\n}",
+			check: func(t *testing.T, p *Probe) {
+				if p.AgentDomain != "er.example.com." {
+					t.Errorf("AgentDomain = %q, want fully qualified", p.AgentDomain)
+				}
+				if p.AgentTTL != defaultAgentTTL {
+					t.Errorf("AgentTTL = %d, want the default %d", p.AgentTTL, defaultAgentTTL)
+				}
+			},
+		},
+		{
+			name:  "explicit agent_ttl",
+			input: "probe check.example.com {\n\tagent_domain er.example.com\n\tagent_ttl 60\n}",
+			check: func(t *testing.T, p *Probe) {
+				if p.AgentTTL != 60 {
+					t.Errorf("AgentTTL = %d, want 60", p.AgentTTL)
+				}
+			},
+		},
+		{
+			name:  "unconfigured leaves reporting off",
+			input: "probe check.example.com",
+			check: func(t *testing.T, p *Probe) {
+				if p.AgentDomain != "" {
+					t.Errorf("AgentDomain = %q, want empty", p.AgentDomain)
+				}
+				if p.AgentTTL != 0 {
+					t.Errorf("AgentTTL = %d, want 0 when reporting is off", p.AgentTTL)
+				}
+			},
+		},
+		{
+			name:    "agent domain inside the reported zone",
+			input:   "probe check.example.com {\n\tagent_domain er.check.example.com\n}",
+			wantErr: true,
+		},
+		{
+			name:    "agent domain equal to the reported zone",
+			input:   "probe check.example.com {\n\tagent_domain check.example.com\n}",
+			wantErr: true,
+		},
+		{
+			name:    "reported zone inside the agent domain",
+			input:   "probe check.example.com {\n\tagent_domain example.com\n}",
+			wantErr: true,
+		},
+		{
+			name:    "root as agent domain",
+			input:   "probe check.example.com {\n\tagent_domain .\n}",
+			wantErr: true,
+		},
+		{
+			// Zero TTL would defeat the caching RFC 9567 §6.2 calls essential,
+			// turning one persistent failure into an unbounded report stream.
+			name:    "agent_ttl zero",
+			input:   "probe check.example.com {\n\tagent_domain er.example.com\n\tagent_ttl 0\n}",
+			wantErr: true,
+		},
+		{
+			name:    "agent_ttl without agent_domain",
+			input:   "probe check.example.com {\n\tagent_ttl 60\n}",
+			wantErr: true,
+		},
+		{
+			name:    "agent_domain with no argument",
+			input:   "probe check.example.com {\n\tagent_domain\n}",
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p, err := parse(caddy.NewTestController("dns", tc.input))
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("parse(%q) succeeded, want an error", tc.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parse(%q): %v", tc.input, err)
+			}
+			if tc.check != nil {
+				tc.check(t, p)
+			}
+		})
+	}
+}
+
 // TestParseRejectsKeyForWrongZone guards the failure mode LoadSigner's caller
 // exists to catch: a key whose owner name is not this zone produces signatures
 // every validator rejects, and the symptom is "the entire zone is bogus" with

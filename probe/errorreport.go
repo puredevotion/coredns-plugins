@@ -2,8 +2,10 @@ package probe
 
 import (
 	"errors"
+	"net/netip"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -43,6 +45,68 @@ type Report struct {
 	// one of ours, empty otherwise. This is what correlates a report back to a
 	// visitor's session.
 	Token string
+}
+
+// ReportRecord is a Report as stored: the decoded report plus who sent it and
+// when. Separate from Report because Report is a pure function of one name,
+// while this carries connection facts that only the handler has.
+//
+// The JSON tags are a contract with the web tier, which decodes these out of
+// Valkey with no shared code. Renaming one silently empties a field on a page
+// rather than failing anywhere.
+type ReportRecord struct {
+	// At is when the report reached us, NOT when the failure happened. A
+	// resolver reports after it gives up, and may cache the report query for a
+	// TTL before repeating it, so this can lag the failure by minutes.
+	At time.Time `json:"at"`
+	// Token correlates the report to a visitor, empty when the reported name was
+	// not one of ours. Empty is common and expected: a resolver can report about
+	// any name in the zone, including the apex.
+	Token string `json:"token,omitempty"`
+
+	Qtype     uint16 `json:"qtype"`
+	QtypeName string `json:"qtype_name"`
+	Qname     string `json:"qname"`
+	EDE       uint16 `json:"ede"`
+	EDEText   string `json:"ede_text,omitempty"`
+
+	// ReporterAddr is the egress address of the RESOLVER that sent the report.
+	// It need not equal the address that made the failing query — a resolver
+	// pool can report from a different member than the one that failed, and that
+	// mismatch is itself worth being able to see.
+	ReporterAddr netip.Addr `json:"reporter_addr"`
+	// ReporterPrefix groups a resolver pool's addresses, same widths as
+	// Observation.ResolverPrefix and for the same reason.
+	ReporterPrefix netip.Prefix `json:"reporter_prefix"`
+	// Transport is how the report query itself arrived.
+	Transport Transport `json:"transport"`
+}
+
+// NewReportRecord stamps a parsed report with its arrival facts.
+func NewReportRecord(r Report, addr netip.Addr, transport Transport) ReportRecord {
+	addr = addr.Unmap()
+	bits := v4PrefixBits
+	if addr.Is6() {
+		bits = v6PrefixBits
+	}
+	prefix, err := addr.Prefix(bits)
+	if err != nil {
+		// Only reachable if bits exceeds the address width, which the branch
+		// above prevents. A host route beats dropping the record.
+		prefix = netip.PrefixFrom(addr, addr.BitLen())
+	}
+	return ReportRecord{
+		At:             time.Now().UTC(),
+		Token:          r.Token,
+		Qtype:          r.Qtype,
+		QtypeName:      r.QtypeName,
+		Qname:          r.Qname,
+		EDE:            r.EDE,
+		EDEText:        r.EDEText,
+		ReporterAddr:   addr,
+		ReporterPrefix: prefix,
+		Transport:      transport,
+	}
 }
 
 var (
@@ -195,4 +259,48 @@ func ReportChannelOption(agentDomain string) *dns.EDNS0_REPORTING {
 		return nil
 	}
 	return &dns.EDNS0_REPORTING{AgentDomain: d}
+}
+
+// attachReportChannel adds the Report-Channel option to a response's OPT record.
+//
+// Mirrors attachEDE, including the requirement that an OPT already be present: a
+// querier that sent no EDNS gets no OPT in its response, and manufacturing one
+// to advertise a feature it cannot parse is how middleboxes learn to drop our
+// answers.
+//
+// The duplicate guard is not defensive clutter — RFC 9567 §6.1 says the server
+// MUST NOT include more than one Report-Channel option in a response, and this
+// response's OPT is the CLIENT's OPT reused in place by SizeAndDo. CoreDNS's
+// supportedOptions filter happens to strip an unknown option code 18 on the way
+// past today, so a client cannot currently smuggle one in; that filter's
+// contents are not this plugin's to depend on.
+func attachReportChannel(m *dns.Msg, agentDomain string) {
+	o := ReportChannelOption(agentDomain)
+	if o == nil {
+		return
+	}
+	opt := m.IsEdns0()
+	if opt == nil {
+		return
+	}
+	for _, existing := range opt.Option {
+		if _, ok := existing.(*dns.EDNS0_REPORTING); ok {
+			return
+		}
+	}
+	opt.Option = append(opt.Option, o)
+}
+
+// edeLabel renders an extended error code for use as a Prometheus label.
+//
+// Unregistered codes collapse to "other" rather than minting a series per value.
+// The sender of a report picks this number, so without the collapse anyone could
+// grow probeReports without bound by walking 0..65535 — the same cardinality
+// argument metrics.go makes about addresses and tokens, except here the input is
+// chosen by a stranger rather than merely varied.
+func edeLabel(code uint16) string {
+	if _, known := dns.ExtendedErrorCodeToString[code]; !known {
+		return "other"
+	}
+	return strconv.Itoa(int(code))
 }
