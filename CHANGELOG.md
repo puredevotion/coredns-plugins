@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/puredevotion/coredns-plugins/compare/v0.2.0...v0.3.0) (2026-08-02)
+
+
+### Features
+
+* **dynupdate:** RFC 2136 dynamic update plugin, TSIG-gated ([#33](https://github.com/puredevotion/coredns-plugins/issues/33)) ([8c3a364](https://github.com/puredevotion/coredns-plugins/commit/8c3a364c58ea22d67e19e137653c0f4777b0a9b5))
+* **probe:** run the RFC 9567 receiver, not just the parser ([#35](https://github.com/puredevotion/coredns-plugins/issues/35)) ([bb1676a](https://github.com/puredevotion/coredns-plugins/commit/bb1676af7b2ca2e149754a8f501370b98c32e556))
+
 ## [0.2.0](https://github.com/puredevotion/coredns-plugins/compare/v0.1.0...v0.2.0) (2026-08-01)
 
 
