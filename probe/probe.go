@@ -58,6 +58,18 @@ type Probe struct {
 	Signer *Signer
 	// Store records observations. Never nil after setup.
 	Store Store
+	// AgentDomain is the RFC 9567 monitoring agent this zone advertises, and
+	// simultaneously the second zone this plugin serves. Empty disables error
+	// reporting entirely — both the advertisement and the receiver, because half
+	// of RFC 9567 is worse than none: advertising a channel nobody answers sends
+	// every reporting resolver into a failed lookup.
+	//
+	// setup enforces that it shares no ancestry with Zone. See agent.go.
+	AgentDomain string
+	// AgentTTL applies to agent-zone answers. Deliberately NOT TTL: that one is
+	// tiny because a probe answer describes one moment, whereas this one is a
+	// rate limit on inbound reports (RFC 9567 §6.2) and wants to be large.
+	AgentTTL uint32
 	// BigSize is the payload size the `_big` modifier aims for, in bytes.
 	BigSize int
 	// ECHConfigList is the RFC 9848 `ech=` parameter served in HTTPS/SVCB
@@ -78,6 +90,16 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	state := request.Request{W: w, Req: r}
 
 	qname := state.Name() // normalised, lowercase
+
+	// The RFC 9567 agent domain is a second, entirely separate zone served by the
+	// same plugin instance — that is what lets a report be correlated to the
+	// token that provoked it without a second process or a shared database.
+	// Tested first only for readability; setup guarantees the two zones cannot
+	// overlap, so the order carries no meaning.
+	if p.AgentDomain != "" && plugin.Name(p.AgentDomain).Matches(qname) {
+		return p.serveReport(state, w, r)
+	}
+
 	if !plugin.Name(p.Zone).Matches(qname) {
 		return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
 	}
@@ -365,6 +387,9 @@ func (p *Probe) respondDNSSD(state request.Request, w dns.ResponseWriter, r *dns
 	m.Extra = extra
 
 	state.SizeAndDo(m)
+	// Same zone, same advertisement — see respond(). A resolver walking the
+	// browse tree is exactly the sort that will later have something to report.
+	attachReportChannel(m, p.AgentDomain)
 	// Scrubbed like any other answer: if the hint records do not fit the client's
 	// advertised buffer they are dropped rather than forcing truncation, which is
 	// exactly what RFC 6763 §12 intends by calling them optional.
@@ -554,6 +579,17 @@ func (p *Probe) respond(state request.Request, w dns.ResponseWriter, r *dns.Msg,
 	for _, e := range extErr {
 		attachEDE(m, e)
 	}
+
+	// RFC 9567: advertise where to report failures. Unsolicited and on EVERY
+	// response from this zone, not just the failing ones — a resolver caches the
+	// zone-to-agent association from whatever response it happens to see first,
+	// and the responses it sees before something breaks are the successful ones.
+	//
+	// Costs a fixed ~4 + len(agent domain) bytes on every answer, which does move
+	// the `_big` amplification measurement's baseline. That is a real effect and
+	// the right trade: the baseline is a property of the zone's configuration,
+	// and a configured error-reporting channel is part of that configuration.
+	attachReportChannel(m, p.AgentDomain)
 
 	if !truncate {
 		m = state.Scrub(m)

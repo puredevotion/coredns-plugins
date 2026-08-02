@@ -26,13 +26,19 @@ import (
 //
 // Data model, one token per visit:
 //
-//	probe:seen:<token>  counter, INCR per query   — authoritative query count
-//	probe:obs:<token>   list of JSON observations — detail, capped
+//	probe:seen:<token>     counter, INCR per query   — authoritative query count
+//	probe:obs:<token>      list of JSON observations — detail, capped
+//	probe:reports:<token>  list of JSON RFC 9567 error reports — capped
+//	probe:reports:unattributed  the reports that carried no token of ours
 //
 // The count is a separate key from the list on purpose: the list is capped so a
 // resolver hammering one name cannot grow it without limit, but the count must
 // stay truthful past that cap, because "we saw this 200 times" is itself the
 // interesting finding.
+//
+// `unattributed` is safe as a literal in that key space because a token is 8-32
+// lowercase HEX characters (see parseToken), and "unattributed" contains letters
+// that are not hex digits. Nothing a visitor can be issued collides with it.
 
 // ValkeyStore is a Store backed by Valkey.
 type ValkeyStore struct {
@@ -135,6 +141,15 @@ func (s *ValkeyStore) Close() { s.client.Close() }
 func seenKey(token string) string { return "probe:seen:" + token }
 func obsKey(token string) string  { return "probe:obs:" + token }
 
+// reportKey names the list an RFC 9567 report belongs in. See the package
+// comment above for why the empty token cannot collide with a real one.
+func reportKey(token string) string {
+	if token == "" {
+		return "probe:reports:unattributed"
+	}
+	return "probe:reports:" + token
+}
+
 // Record implements Store.
 //
 // The counter is incremented first and its value becomes Seen, so the count is
@@ -212,6 +227,76 @@ func (s *ValkeyStore) Lookup(token string) ([]Observation, error) {
 			continue
 		}
 		out = append(out, obs)
+	}
+	return out, nil
+}
+
+// RecordReport implements Store.
+//
+// RPUSH then LTRIM rather than a length check first: the check-then-write would
+// be a race across replicas, and LTRIM is idempotent, so the cap holds even when
+// several pods take reports for the same token at once. The cost is that the
+// list can momentarily hold one entry past the cap, which is the right way round
+// — the alternative loses a report.
+func (s *ValkeyStore) RecordReport(rec ReportRecord) error {
+	if rec.At.IsZero() {
+		rec.At = time.Now().UTC()
+	}
+
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("marshalling report: %w", err)
+	}
+
+	limit := s.maxPerToken
+	if rec.Token == "" {
+		limit = maxUnattributedReports
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+
+	c := s.client
+	key := reportKey(rec.Token)
+	cmds := []valkey.Completed{
+		c.B().Rpush().Key(key).Element(string(payload)).Build(),
+		// Keep the newest `limit` entries. Newest rather than oldest because a
+		// report arriving now is about a failure happening now; the tail of an
+		// overflowing list is the part a flood contributed.
+		c.B().Ltrim().Key(key).Start(int64(-limit)).Stop(-1).Build(),
+		c.B().Expire().Key(key).Seconds(int64(s.ttl.Seconds())).Build(),
+	}
+	for _, res := range c.DoMulti(ctx, cmds...) {
+		if err := res.Error(); err != nil {
+			return fmt.Errorf("valkey report write: %w", err)
+		}
+	}
+	return nil
+}
+
+// LookupReports implements Store. Same reason as Lookup for living here: the
+// plugin's own tests then exercise the encoding the web tier decodes.
+func (s *ValkeyStore) LookupReports(token string) ([]ReportRecord, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), s.timeout)
+	defer cancel()
+
+	c := s.client
+	vals, err := c.Do(ctx, c.B().Lrange().Key(reportKey(token)).Start(0).Stop(-1).Build()).AsStrSlice()
+	if err != nil {
+		if valkey.IsValkeyNil(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("valkey LRANGE: %w", err)
+	}
+
+	out := make([]ReportRecord, 0, len(vals))
+	for _, v := range vals {
+		var rec ReportRecord
+		if err := json.Unmarshal([]byte(v), &rec); err != nil {
+			log.Warningf("skipping unparseable error report for token %q: %v", token, err)
+			continue
+		}
+		out = append(out, rec)
 	}
 	return out, nil
 }

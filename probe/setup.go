@@ -26,6 +26,8 @@ func init() { plugin.Register("probe", setup) }
 //	    max_tokens N
 //	    max_per_token N
 //	    big_size BYTES
+//	    agent_domain NAME
+//	    agent_ttl SECONDS
 //	}
 //
 // Only ZONE is required. Without `key` the zone is unsigned, which is a valid
@@ -158,6 +160,25 @@ func parse(c *caddy.Controller) (*Probe, error) {
 					return nil, err
 				}
 				valkeyCfg.Timeout = d
+			case "agent_domain":
+				if !c.NextArg() {
+					return nil, c.ArgErr()
+				}
+				p.AgentDomain = dns.CanonicalName(c.Val())
+			case "agent_ttl":
+				v, err := parseUint32Arg(c)
+				if err != nil {
+					return nil, err
+				}
+				if v == 0 {
+					// Zero would mean "never cache a report answer", which RFC
+					// 9567 §6.2 specifically warns against: caching is what limits
+					// a reporting resolver to one report per TTL for the same
+					// problem, so disabling it turns every persistent failure into
+					// an unbounded stream of report queries at us.
+					return nil, c.Err("agent_ttl must be greater than zero")
+				}
+				p.AgentTTL = v
 			case "big_size":
 				v, err := parseIntArg(c)
 				if err != nil {
@@ -185,6 +206,10 @@ func parse(c *caddy.Controller) (*Probe, error) {
 	}
 	if p.Mbox == "" {
 		p.Mbox = "hostmaster." + p.Zone
+	}
+
+	if err := p.validateAgentDomain(c); err != nil {
+		return nil, err
 	}
 
 	if keyBase != "" {
@@ -230,6 +255,55 @@ func parse(c *caddy.Controller) (*Probe, error) {
 	p.ECHConfigList = echList
 
 	return p, nil
+}
+
+// defaultAgentTTL governs agent-zone answers, and through the SOA MINIMUM the
+// negative caching of everything else under the agent domain.
+//
+// Five minutes, against the probe zone's ten seconds, because the two TTLs are
+// answering opposite questions. A probe answer describes one visitor at one
+// moment and must not be reused. A report answer exists to be reused: RFC 9567
+// §6.2 leans on this cache to hold a reporting resolver to one report query per
+// TTL for the same problem, so a short value here converts a persistently broken
+// resolver into a flood of reports about the same failure. Long enough to dampen
+// that, short enough that a repeat inside a ten-minute store TTL still lands.
+const defaultAgentTTL = 300
+
+// validateAgentDomain checks the RFC 9567 configuration and applies defaults.
+//
+// The subdomain checks are normative, not tidiness. RFC 9567 §6.3: "The agent
+// domain MUST NOT be a subdomain of the domain it is reporting on." The reason
+// is a deadlock — if resolving the agent domain requires first resolving the
+// zone that is failing, the report can never be delivered, and the failure
+// modes this lab manufactures on purpose are exactly the ones that would trip
+// it. The reverse nesting is rejected too, on this plugin's own account: with
+// the probe zone under the agent domain, ServeDNS could not tell a probe name
+// from a report name, and the more permissive parser would win silently.
+func (p *Probe) validateAgentDomain(c *caddy.Controller) error {
+	if p.AgentDomain == "" {
+		if p.AgentTTL != 0 {
+			return c.Err("agent_ttl set without agent_domain")
+		}
+		return nil
+	}
+	if p.AgentDomain == "." {
+		// RFC 9567 §6.1 forbids advertising the null label, and serving it here
+		// would claim the entire namespace.
+		return c.Err("agent_domain must not be the root")
+	}
+	if dns.IsSubDomain(p.Zone, p.AgentDomain) {
+		return c.Errf("agent_domain %s is inside the zone %s it reports on; RFC 9567 §6.3 forbids it, "+
+			"because a resolver that cannot resolve the zone cannot deliver the report either",
+			p.AgentDomain, p.Zone)
+	}
+	if dns.IsSubDomain(p.AgentDomain, p.Zone) {
+		return c.Errf("zone %s is inside agent_domain %s; probe names and report names would be indistinguishable",
+			p.Zone, p.AgentDomain)
+	}
+	if p.AgentTTL == 0 {
+		p.AgentTTL = defaultAgentTTL
+	}
+	return nil
 }
 
 // echConfigID is fixed. RFC 9848 uses it to select among several configs; there is

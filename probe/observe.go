@@ -383,7 +383,24 @@ type Store interface {
 	Record(obs Observation) (Observation, error)
 	// Lookup returns everything recorded for a token, oldest first.
 	Lookup(token string) ([]Observation, error)
+	// RecordReport stores one inbound RFC 9567 error report. A record whose
+	// Token is empty is unattributed and stored separately — see agent.go for
+	// why those are kept rather than dropped.
+	RecordReport(rec ReportRecord) error
+	// LookupReports returns the reports recorded against a token, oldest first.
+	// The empty token returns the unattributed ones.
+	LookupReports(token string) ([]ReportRecord, error)
 }
+
+// maxUnattributedReports bounds the shared unattributed list.
+//
+// It needs a ceiling the per-token cap cannot provide: an unattributed report is
+// one whose reported name carried no token of ours, which is precisely the shape
+// anyone wanting to fill this list would send. Kept larger than MaxPerToken
+// because it is one list for every reporter on the internet rather than one per
+// visitor, and it is the only place a report about the zone APEX — a legitimate
+// and interesting report — can land.
+const maxUnattributedReports = 256
 
 // MemStore is an in-process Store with time-based expiry. It is the default so
 // that the plugin is useful (and testable) with no external dependency; a
@@ -402,11 +419,25 @@ type MemStore struct {
 
 	mu      sync.Mutex
 	entries map[string]*memEntry
+	// reports is keyed by token, with "" holding the unattributed ones. Tokens
+	// are lowercase hex (see parseToken), so the empty key cannot collide with a
+	// real one.
+	//
+	// A separate map from entries on purpose: a report can arrive for a token
+	// whose observations have already expired — that is the normal case, since a
+	// resolver reports after it gives up — and folding the two together would
+	// make the report's retention depend on the visitor still being around.
+	reports map[string]*memReports
 }
 
 type memEntry struct {
 	first time.Time
 	obs   []Observation
+}
+
+type memReports struct {
+	first time.Time
+	recs  []ReportRecord
 }
 
 // ErrStoreFull means the token ceiling was reached, so this observation was not
@@ -439,6 +470,7 @@ func NewMemStore(ttl time.Duration, maxTokens, maxPerToken int) *MemStore {
 		MaxTokens:   maxTokens,
 		MaxPerToken: maxPerToken,
 		entries:     make(map[string]*memEntry),
+		reports:     make(map[string]*memReports),
 	}
 }
 
@@ -492,6 +524,56 @@ func (s *MemStore) Lookup(token string) ([]Observation, error) {
 	return out, nil
 }
 
+// RecordReport implements Store.
+func (s *MemStore) RecordReport(rec ReportRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := rec.At
+	if now.IsZero() {
+		now = time.Now().UTC()
+		rec.At = now
+	}
+	s.expireLocked(now)
+
+	limit := s.MaxPerToken
+	if rec.Token == "" {
+		limit = maxUnattributedReports
+	}
+
+	e, ok := s.reports[rec.Token]
+	if !ok {
+		// Same reasoning as Record: refuse a new key rather than evict an
+		// existing one, so a flood of unrecognised report names cannot displace
+		// the reports belonging to real visitors.
+		if len(s.reports) >= s.MaxTokens {
+			return ErrStoreFull
+		}
+		e = &memReports{first: now}
+		s.reports[rec.Token] = e
+	}
+	if len(e.recs) >= limit {
+		return ErrStoreFull
+	}
+	e.recs = append(e.recs, rec)
+	return nil
+}
+
+// LookupReports implements Store.
+func (s *MemStore) LookupReports(token string) ([]ReportRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.expireLocked(time.Now().UTC())
+
+	e, ok := s.reports[token]
+	if !ok {
+		return nil, nil
+	}
+	out := make([]ReportRecord, len(e.recs))
+	copy(out, e.recs)
+	return out, nil
+}
+
 // expireLocked drops entries whose first observation is older than TTL. Expiry
 // is keyed on first-seen, not last-seen, so a token cannot be kept alive
 // indefinitely by continuing to query it.
@@ -499,6 +581,11 @@ func (s *MemStore) expireLocked(now time.Time) {
 	for token, e := range s.entries {
 		if now.Sub(e.first) > s.TTL {
 			delete(s.entries, token)
+		}
+	}
+	for token, e := range s.reports {
+		if now.Sub(e.first) > s.TTL {
+			delete(s.reports, token)
 		}
 	}
 }
