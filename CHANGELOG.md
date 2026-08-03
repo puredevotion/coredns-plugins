@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/puredevotion/coredns-plugins/compare/v0.4.0...v0.4.1) (2026-08-03)
+
+
+### Bug Fixes
+
+* **ci:** nightly still pinned golangci-lint v1, so it never linted anything ([#39](https://github.com/puredevotion/coredns-plugins/issues/39)) ([33e66b3](https://github.com/puredevotion/coredns-plugins/commit/33e66b3b8f39ac229e2b46abd93742977acaefb7))
+
 ## [0.4.0](https://github.com/puredevotion/coredns-plugins/compare/v0.3.0...v0.4.0) (2026-08-02)
 
 
