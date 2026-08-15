@@ -13,7 +13,7 @@ func TestEncode_ALPN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	// key=1, len=4, value = \x03dot (alpn-id list: 1-octet len + "dot")
+	// Key=1, len=4, value = \x03dot (alpn-id list: 1-octet len + "dot").
 	want := []byte{0x00, 0x01, 0x00, 0x04, 0x03, 'd', 'o', 't'}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("alpn: got=%x want=%x", got, want)
@@ -25,7 +25,7 @@ func TestEncode_Port(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	// key=3, len=2, value = 853 = 0x0355
+	// Key=3, len=2, value = 853 = 0x0355.
 	want := []byte{0x00, 0x03, 0x00, 0x02, 0x03, 0x55}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("port: got=%x want=%x", got, want)
@@ -37,7 +37,7 @@ func TestEncode_DohPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	// key=7, len=16, value = "/dns-query{?dns}"
+	// Key=7, len=16, value = "/dns-query{?dns}".
 	v := []byte("/dns-query{?dns}")
 	want := append([]byte{0x00, 0x07, 0x00, 16}, v...)
 	if !bytes.Equal(got, want) {
@@ -51,11 +51,11 @@ func TestEncode_KeysSortedAscending(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	// keys appear in order 1,3,7
+	// Keys appear in order 1,3,7.
 	if got[0] != 0 || got[1] != 1 {
 		t.Fatalf("first key not 1 (alpn): %x", got[:2])
 	}
-	// find sequence — assert 1 before 3 before 7 by scanning keys
+	// Find sequence — assert 1 before 3 before 7 by scanning keys.
 	keys := scanKeys(t, got)
 	for i := 1; i < len(keys); i++ {
 		if keys[i] <= keys[i-1] {
@@ -69,7 +69,7 @@ func TestEncode_ALPNMulti(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	// value = \x03dot\x03doq = 8 octets, len=8
+	// Value = \x03dot\x03doq = 8 octets, len=8.
 	want := []byte{0x00, 0x01, 0x00, 0x08, 0x03, 'd', 'o', 't', 0x03, 'd', 'o', 'q'}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("alpn multi: got=%x want=%x", got, want)

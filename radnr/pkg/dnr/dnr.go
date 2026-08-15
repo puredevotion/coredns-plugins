@@ -8,6 +8,8 @@
 //	Type(1)=144 | Length(1, units of 8) | ServicePriority(2) | Lifetime(4) |
 //	ADNLength(2) | ADN(DNS wire labels) | AddrLength(2, mult of 16) |
 //	IPv6 addrs(16 each) | SvcParamsLength(2) | SvcParams | zero-pad to mult of 8
+//
+//nolint:misspell // ADN throughout this file: RFC 9463 Authentication Domain Name, not a typo for AND
 package dnr
 
 import (
@@ -20,13 +22,25 @@ import (
 // OptionType is the RA option type for the Encrypted DNS option (RFC 9463).
 const OptionType = 144
 
+// Wire-format field sizes and limits (RFC 9463 §6.1, RFC 1035 §3.1).
+const (
+	headerSize     = 2    // Type(1) + Length(1) octets.
+	octetUnit      = 8    // Length field units, and the padding modulus.
+	maxLengthUnits = 0xff // Max value of the 1-octet Length field.
+	uint16Size     = 2
+	uint32Size     = 4
+	maxLabelLen    = 63   // Max length of a single DNS wire-format label.
+	maxNameLen     = 255  // Max length of a DNS wire-format name.
+	rootLabel      = 0x00 // The zero-length root label terminating a name.
+)
+
 // EncryptedDNS is a decoded RFC 9463 RA Encrypted DNS option.
 type EncryptedDNS struct {
-	ServicePriority uint16
-	Lifetime        uint32 // seconds
-	ADN             string // authentication domain name, e.g. "dns.example.com"
+	ADN             string // Authentication domain name, e.g. "dns.example.com".
 	Addrs           []netip.Addr
-	SvcParams       []byte // pre-encoded RFC 9460 SvcParams (see pkg/svcparams)
+	SvcParams       []byte // Pre-encoded RFC 9460 SvcParams (see pkg/svcparams).
+	ServicePriority uint16
+	Lifetime        uint32 // Seconds.
 }
 
 // checkedUint16 converts n to uint16, erroring instead of silently truncating
@@ -41,9 +55,9 @@ func checkedUint16(n int, what string) (uint16, error) {
 
 // checkedByteMax converts n to a byte, erroring instead of silently
 // truncating if it exceeds max (which itself must fit in a byte).
-func checkedByteMax(n, max int, what string) (byte, error) {
-	if n < 0 || n > max {
-		return 0, fmt.Errorf("dnr: %s exceeds %d octets", what, max)
+func checkedByteMax(n, maxVal int, what string) (byte, error) {
+	if n < 0 || n > maxVal {
+		return 0, fmt.Errorf("dnr: %s exceeds %d octets", what, maxVal)
 	}
 	return byte(n), nil //nolint:gosec // G115: bounds-checked immediately above; this is the checked conversion itself, not a suppressed truncation.
 }
@@ -89,94 +103,134 @@ func (o EncryptedDNS) Marshal() ([]byte, error) {
 	body = binary.BigEndian.AppendUint16(body, svcParamsLen)
 	body = append(body, o.SvcParams...)
 
-	total := 2 + len(body)
-	if pad := (8 - total%8) % 8; pad != 0 {
+	total := headerSize + len(body)
+	if pad := (octetUnit - total%octetUnit) % octetUnit; pad != 0 {
 		body = append(body, make([]byte, pad)...)
 		total += pad
 	}
-	if total/8 > 0xff {
+	if total/octetUnit > maxLengthUnits {
 		return nil, fmt.Errorf("dnr: option too large (%d octets)", total)
 	}
 
 	out := make([]byte, 0, total)
-	out = append(out, OptionType, byte(total/8))
+	out = append(out, OptionType, byte(total/octetUnit))
 	out = append(out, body...)
 	return out, nil
+}
+
+// parseADNField decodes the ADN field starting at p, given its already-read
+// length prefix, and returns the decoded name and the remaining bytes after
+// the field.
+func parseADNField(p []byte, adnLen uint16) (name string, rest []byte, err error) {
+	if int(adnLen) > len(p) {
+		return "", nil, fmt.Errorf("dnr: ADN length %d exceeds remaining %d", adnLen, len(p))
+	}
+	name, err = decodeADN(p[:adnLen])
+	if err != nil {
+		return "", nil, err
+	}
+	return name, p[adnLen:], nil
+}
+
+// parseAddrs decodes the fixed-width IPv6 address list starting at p, given
+// its already-read length prefix, and returns the addresses and the
+// remaining bytes after the field.
+func parseAddrs(p []byte, addrLen uint16) ([]netip.Addr, []byte, error) {
+	const ipv6Size = 16
+	if addrLen%ipv6Size != 0 {
+		return nil, nil, fmt.Errorf("dnr: AddrLength %d not a multiple of %d", addrLen, ipv6Size)
+	}
+	if int(addrLen) > len(p) {
+		return nil, nil, fmt.Errorf("dnr: AddrLength %d exceeds remaining %d", addrLen, len(p))
+	}
+	var addrs []netip.Addr
+	for i := 0; i < int(addrLen); i += ipv6Size {
+		var a16 [ipv6Size]byte
+		copy(a16[:], p[i:i+ipv6Size])
+		addrs = append(addrs, netip.AddrFrom16(a16))
+	}
+	return addrs, p[addrLen:], nil
+}
+
+// parseSvcParams decodes the trailing SvcParams field starting at p, given
+// its already-read length prefix.
+func parseSvcParams(p []byte, spLen uint16) ([]byte, error) {
+	if int(spLen) > len(p) {
+		return nil, fmt.Errorf("dnr: SvcParamsLength %d exceeds remaining %d", spLen, len(p))
+	}
+	if spLen == 0 {
+		return nil, nil
+	}
+	return append([]byte(nil), p[:spLen]...), nil
+}
+
+// parseHeader validates the (Type, Length) header of the wire form and
+// returns the body bytes it delimits (after the 2-octet header itself).
+func parseHeader(b []byte) ([]byte, error) {
+	if len(b) < octetUnit {
+		return nil, fmt.Errorf("dnr: too short (%d octets)", len(b))
+	}
+	if b[0] != OptionType {
+		return nil, fmt.Errorf("dnr: wrong type %d", b[0])
+	}
+	total := int(b[1]) * octetUnit
+	if total == 0 || total > len(b) {
+		return nil, fmt.Errorf("dnr: length field %d octets exceeds buffer %d", total, len(b))
+	}
+	return b[headerSize:total], nil
 }
 
 // Unmarshal decodes an RA Encrypted DNS option from its wire form.
 func Unmarshal(b []byte) (EncryptedDNS, error) {
 	var o EncryptedDNS
-	if len(b) < 8 {
-		return o, fmt.Errorf("dnr: too short (%d octets)", len(b))
+	p, err := parseHeader(b)
+	if err != nil {
+		return o, err
 	}
-	if b[0] != OptionType {
-		return o, fmt.Errorf("dnr: wrong type %d", b[0])
-	}
-	total := int(b[1]) * 8
-	if total == 0 || total > len(b) {
-		return o, fmt.Errorf("dnr: length field %d octets exceeds buffer %d", total, len(b))
-	}
-	p := b[2:total]
 
 	read16 := func() (uint16, error) {
-		if len(p) < 2 {
+		if len(p) < uint16Size {
 			return 0, fmt.Errorf("dnr: truncated")
 		}
 		v := binary.BigEndian.Uint16(p)
-		p = p[2:]
+		p = p[uint16Size:]
 		return v, nil
 	}
 
-	var err error
 	if o.ServicePriority, err = read16(); err != nil {
 		return o, err
 	}
-	if len(p) < 4 {
+	if len(p) < uint32Size {
 		return o, fmt.Errorf("dnr: truncated lifetime")
 	}
 	o.Lifetime = binary.BigEndian.Uint32(p)
-	p = p[4:]
+	p = p[uint32Size:]
 
 	adnLen, err := read16()
 	if err != nil {
 		return o, err
 	}
-	if int(adnLen) > len(p) {
-		return o, fmt.Errorf("dnr: ADN length %d exceeds remaining %d", adnLen, len(p))
-	}
-	o.ADN, err = decodeADN(p[:adnLen])
+	o.ADN, p, err = parseADNField(p, adnLen)
 	if err != nil {
 		return o, err
 	}
-	p = p[adnLen:]
 
 	addrLen, err := read16()
 	if err != nil {
 		return o, err
 	}
-	if addrLen%16 != 0 {
-		return o, fmt.Errorf("dnr: AddrLength %d not a multiple of 16", addrLen)
+	o.Addrs, p, err = parseAddrs(p, addrLen)
+	if err != nil {
+		return o, err
 	}
-	if int(addrLen) > len(p) {
-		return o, fmt.Errorf("dnr: AddrLength %d exceeds remaining %d", addrLen, len(p))
-	}
-	for i := 0; i < int(addrLen); i += 16 {
-		var a16 [16]byte
-		copy(a16[:], p[i:i+16])
-		o.Addrs = append(o.Addrs, netip.AddrFrom16(a16))
-	}
-	p = p[addrLen:]
 
 	spLen, err := read16()
 	if err != nil {
 		return o, err
 	}
-	if int(spLen) > len(p) {
-		return o, fmt.Errorf("dnr: SvcParamsLength %d exceeds remaining %d", spLen, len(p))
-	}
-	if spLen > 0 {
-		o.SvcParams = append([]byte(nil), p[:spLen]...)
+	o.SvcParams, err = parseSvcParams(p, spLen)
+	if err != nil {
+		return o, err
 	}
 	return o, nil
 }
@@ -189,19 +243,19 @@ func encodeADN(name string) ([]byte, error) {
 		return nil, fmt.Errorf("dnr: empty ADN")
 	}
 	var out []byte
-	for _, label := range strings.Split(name, ".") {
-		if len(label) == 0 {
+	for label := range strings.SplitSeq(name, ".") {
+		if label == "" {
 			return nil, fmt.Errorf("dnr: empty label in ADN %q", name)
 		}
-		labelLen, err := checkedByteMax(len(label), 63, fmt.Sprintf("label %q", label))
+		labelLen, err := checkedByteMax(len(label), maxLabelLen, fmt.Sprintf("label %q", label))
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, labelLen)
 		out = append(out, label...)
 	}
-	out = append(out, 0x00) // root
-	if len(out) > 255 {
+	out = append(out, rootLabel)
+	if len(out) > maxNameLen {
 		return nil, fmt.Errorf("dnr: ADN %q exceeds 255 octets", name)
 	}
 	return out, nil

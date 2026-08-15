@@ -2,63 +2,65 @@ package probe
 
 import "testing"
 
+// parseQueryTests is TestParseQuery's table, pulled out to a package-level var
+// purely to keep that function's length down.
+var parseQueryTests = []struct {
+	name     string
+	sub      string
+	wantTok  string
+	wantMods Modifier
+	wantOK   bool
+}{
+	{name: "baseline token", sub: testToken, wantOK: true, wantTok: testToken},
+	{name: "trailing dot tolerated", sub: "a1b2c3d4.", wantOK: true, wantTok: "a1b2c3d4"},
+	{
+		name: "single modifier", sub: "_unsigned.a1b2c3d4",
+		wantOK: true, wantTok: testToken, wantMods: ModUnsigned,
+	},
+	{
+		// Order must not matter: a browser generating these should not have
+		// to know a canonical ordering.
+		name: "two modifiers", sub: "_truncate._big.deadbeefcafe",
+		wantOK: true, wantTok: "deadbeefcafe", wantMods: ModTruncate | ModBig,
+	},
+	{
+		name: "reversed order is the same set", sub: "_big._truncate.deadbeefcafe",
+		wantOK: true, wantTok: "deadbeefcafe", wantMods: ModTruncate | ModBig,
+	},
+	{
+		// 0x20 randomization means we get mixed case off the wire.
+		name: "case insensitive", sub: "_UnSigned.A1B2C3D4",
+		wantOK: true, wantTok: testToken, wantMods: ModUnsigned,
+	},
+	{
+		name: "max length token", sub: "0123456789abcdef0123456789abcdef",
+		wantOK: true, wantTok: "0123456789abcdef0123456789abcdef",
+	},
+
+	{name: "apex is not a probe query", sub: "", wantOK: false},
+	{name: "token too short", sub: "a1b2c3d", wantOK: false},
+	{name: "token too long", sub: "0123456789abcdef0123456789abcdef0", wantOK: false},
+	{name: "token not hex", sub: "zzzzzzzz", wantOK: false},
+	{name: "unknown modifier", sub: "_nosuchthing.a1b2c3d4", wantOK: false},
+	{name: "bare extra label is not a modifier", sub: "www.a1b2c3d4", wantOK: false},
+	{name: "repeated modifier", sub: "_big._big.a1b2c3d4", wantOK: false},
+	{name: "missing token, modifier only", sub: "_big", wantOK: false},
+	{
+		// Only one signature exists to spoil, so asking for two spoilings
+		// is a client error, not a precedence question.
+		name: "conflicting signature modifiers", sub: "_unsigned._badsig.a1b2c3d4", wantOK: false,
+	},
+	{name: "conflicting expired and future", sub: "_expiredsig._futuresig.a1b2c3d4", wantOK: false},
+	{name: "conflicting rcode modifiers", sub: "_nxdomain._servfail.a1b2c3d4", wantOK: false},
+	{
+		// Different groups compose fine.
+		name: "cross-group combination is allowed", sub: "_badsig._truncate.a1b2c3d4",
+		wantOK: true, wantTok: testToken, wantMods: ModBadSig | ModTruncate,
+	},
+}
+
 func TestParseQuery(t *testing.T) {
-	tests := []struct {
-		name     string
-		sub      string
-		wantOK   bool
-		wantTok  string
-		wantMods Modifier
-	}{
-		{name: "baseline token", sub: "a1b2c3d4", wantOK: true, wantTok: "a1b2c3d4"},
-		{name: "trailing dot tolerated", sub: "a1b2c3d4.", wantOK: true, wantTok: "a1b2c3d4"},
-		{
-			name: "single modifier", sub: "_unsigned.a1b2c3d4",
-			wantOK: true, wantTok: "a1b2c3d4", wantMods: ModUnsigned,
-		},
-		{
-			// Order must not matter: a browser generating these should not have
-			// to know a canonical ordering.
-			name: "two modifiers", sub: "_truncate._big.deadbeefcafe",
-			wantOK: true, wantTok: "deadbeefcafe", wantMods: ModTruncate | ModBig,
-		},
-		{
-			name: "reversed order is the same set", sub: "_big._truncate.deadbeefcafe",
-			wantOK: true, wantTok: "deadbeefcafe", wantMods: ModTruncate | ModBig,
-		},
-		{
-			// 0x20 randomization means we get mixed case off the wire.
-			name: "case insensitive", sub: "_UnSigned.A1B2C3D4",
-			wantOK: true, wantTok: "a1b2c3d4", wantMods: ModUnsigned,
-		},
-		{
-			name: "max length token", sub: "0123456789abcdef0123456789abcdef",
-			wantOK: true, wantTok: "0123456789abcdef0123456789abcdef",
-		},
-
-		{name: "apex is not a probe query", sub: "", wantOK: false},
-		{name: "token too short", sub: "a1b2c3d", wantOK: false},
-		{name: "token too long", sub: "0123456789abcdef0123456789abcdef0", wantOK: false},
-		{name: "token not hex", sub: "zzzzzzzz", wantOK: false},
-		{name: "unknown modifier", sub: "_nosuchthing.a1b2c3d4", wantOK: false},
-		{name: "bare extra label is not a modifier", sub: "www.a1b2c3d4", wantOK: false},
-		{name: "repeated modifier", sub: "_big._big.a1b2c3d4", wantOK: false},
-		{name: "missing token, modifier only", sub: "_big", wantOK: false},
-		{
-			// Only one signature exists to spoil, so asking for two spoilings
-			// is a client error, not a precedence question.
-			name: "conflicting signature modifiers", sub: "_unsigned._badsig.a1b2c3d4", wantOK: false,
-		},
-		{name: "conflicting expired and future", sub: "_expiredsig._futuresig.a1b2c3d4", wantOK: false},
-		{name: "conflicting rcode modifiers", sub: "_nxdomain._servfail.a1b2c3d4", wantOK: false},
-		{
-			// Different groups compose fine.
-			name: "cross-group combination is allowed", sub: "_badsig._truncate.a1b2c3d4",
-			wantOK: true, wantTok: "a1b2c3d4", wantMods: ModBadSig | ModTruncate,
-		},
-	}
-
-	for _, tc := range tests {
+	for _, tc := range parseQueryTests {
 		t.Run(tc.name, func(t *testing.T) {
 			got, ok := ParseQuery(tc.sub)
 			if ok != tc.wantOK {
@@ -80,11 +82,11 @@ func TestParseQuery(t *testing.T) {
 
 func TestModifierString(t *testing.T) {
 	tests := []struct {
-		mods Modifier
 		want string
+		mods Modifier
 	}{
-		{mods: 0, want: "none"},
-		{mods: ModUnsigned, want: "unsigned"},
+		{mods: 0, want: modLabelNone},
+		{mods: ModUnsigned, want: modLabelUnsigned},
 		// Stable regardless of the order the bits were set in.
 		{mods: ModBig | ModTruncate, want: "truncate,big"},
 		{mods: ModTruncate | ModBig, want: "truncate,big"},

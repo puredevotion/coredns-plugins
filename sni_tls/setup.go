@@ -1,7 +1,7 @@
-// Package sni_tls registers the sni_tls plugin with CoreDNS. See ../docs/sni-tls-plugin.md
+// Package snitls registers the sni_tls plugin with CoreDNS. See ../docs/sni-tls-plugin.md
 // for the full design rationale (SNI-multiplexed cert selection replacing the stock tls
 // plugin's single-cert-per-listener limitation).
-package sni_tls
+package snitls
 
 import (
 	ctls "crypto/tls"
@@ -11,8 +11,17 @@ import (
 	"github.com/coredns/coredns/plugin"
 )
 
+// pluginName is the CoreDNS plugin/Corefile directive name; kept separate from
+// the Go package identifier (snitls) since CoreDNS plugin names conventionally
+// use underscores.
+const pluginName = "sni_tls"
+
+// setupArgsCertKey is the number of Corefile arguments a `sni_tls <cert> <key>`
+// line takes.
+const setupArgsCertKey = 2
+
 func init() {
-	plugin.Register("sni_tls", setup)
+	plugin.Register(pluginName, setup)
 }
 
 // setup parses one or more `sni_tls <cert> <key>` lines from the Corefile, plus an
@@ -25,7 +34,7 @@ func init() {
 func setup(c *caddy.Controller) error {
 	config := dnsserver.GetConfig(c)
 	if config.TLSConfig != nil {
-		return plugin.Error("sni_tls", c.Errf("TLS already configured for this server instance"))
+		return plugin.Error(pluginName, c.Errf("TLS already configured for this server instance")) //nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors; plugin.Error is the conventional coredns setup-parsing wrapper (see plugin/tls's parseTLS)
 	}
 
 	var pairs [][2]string
@@ -34,38 +43,27 @@ func setup(c *caddy.Controller) error {
 	for c.Next() {
 		args := c.RemainingArgs()
 		switch len(args) {
-		case 2:
+		case setupArgsCertKey:
 			pairs = append(pairs, [2]string{args[0], args[1]})
 		case 0:
 			if !c.NextBlock() {
-				return plugin.Error("sni_tls", c.ArgErr())
+				return plugin.Error(pluginName, c.ArgErr()) //nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors; plugin.Error is the conventional coredns setup-parsing wrapper (see plugin/tls's parseTLS)
 			}
-			for {
-				switch c.Val() {
-				case "strict":
-					if len(c.RemainingArgs()) != 0 {
-						return plugin.Error("sni_tls", c.ArgErr())
-					}
-					strict = true
-				default:
-					return plugin.Error("sni_tls", c.Errf("unknown sni_tls option %q", c.Val()))
-				}
-				if !c.NextBlock() {
-					break
-				}
+			if err := parseBlockOptions(c, &strict); err != nil {
+				return err
 			}
 		default:
-			return plugin.Error("sni_tls", c.ArgErr())
+			return plugin.Error(pluginName, c.ArgErr()) //nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors; plugin.Error is the conventional coredns setup-parsing wrapper (see plugin/tls's parseTLS)
 		}
 	}
 
 	if len(pairs) == 0 {
-		return plugin.Error("sni_tls", c.ArgErr())
+		return plugin.Error(pluginName, c.ArgErr()) //nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors; plugin.Error is the conventional coredns setup-parsing wrapper (see plugin/tls's parseTLS)
 	}
 
 	store, err := buildCertStore(pairs, strict)
 	if err != nil {
-		return plugin.Error("sni_tls", err)
+		return plugin.Error(pluginName, err) //nolint:wrapcheck // plugin.Error is the conventional coredns setup-parsing wrapper (see plugin/tls's parseTLS); err itself is already wrapped by buildCertStore/loadCert
 	}
 
 	live := newLiveStore(pairs, strict, store, digestPairs(pairs))
@@ -81,4 +79,24 @@ func setup(c *caddy.Controller) error {
 	}
 
 	return nil
+}
+
+// parseBlockOptions parses the body of a `sni_tls { ... }` block, currently
+// only the bare `strict` option, setting *strict when found. Extracted from
+// setup so the caller's Corefile line-dispatch switch stays simple.
+func parseBlockOptions(c *caddy.Controller, strict *bool) error {
+	for {
+		switch c.Val() {
+		case "strict":
+			if len(c.RemainingArgs()) != 0 {
+				return plugin.Error(pluginName, c.ArgErr()) //nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors; plugin.Error is the conventional coredns setup-parsing wrapper (see plugin/tls's parseTLS)
+			}
+			*strict = true
+		default:
+			return plugin.Error(pluginName, c.Errf("unknown sni_tls option %q", c.Val())) //nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors; plugin.Error is the conventional coredns setup-parsing wrapper (see plugin/tls's parseTLS)
+		}
+		if !c.NextBlock() {
+			return nil
+		}
+	}
 }

@@ -27,25 +27,25 @@ func TestEDEForModifiers(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		mods Modifier
-		want uint16 // 0xFFFF sentinel for "no EDE at all"
+		want uint16 // 0xFFFF sentinel for "no EDE at all".
 	}{
 		{"expired", ModExpiredSig, dns.ExtendedErrorCodeSignatureExpired},
 		{"future", ModFutureSig, dns.ExtendedErrorCodeSignatureNotYetValid},
-		{"unsigned", ModUnsigned, dns.ExtendedErrorCodeRRSIGsMissing},
-		{"badsig", ModBadSig, dns.ExtendedErrorCodeDNSBogus},
+		{modLabelUnsigned, ModUnsigned, dns.ExtendedErrorCodeRRSIGsMissing},
+		{modLabelBadSig, ModBadSig, dns.ExtendedErrorCodeDNSBogus},
 		// A synthetic SERVFAIL is not a validation failure. Labelling it with a
 		// DNSSEC code would inject a false one into the resolver's telemetry.
-		{"servfail", ModServfail, dns.ExtendedErrorCodeOther},
+		{modLabelServfail, ModServfail, dns.ExtendedErrorCodeOther},
 
 		// Nothing is wrong with these, so nothing is claimed.
-		{"truncate", ModTruncate, 0xFFFF},
-		{"big", ModBig, 0xFFFF},
-		{"none", 0, 0xFFFF},
+		{modLabelTruncate, ModTruncate, 0xFFFF},
+		{modLabelBig, ModBig, 0xFFFF},
+		{modLabelNone, 0, 0xFFFF},
 		// The unprovable-denial experiment: whether it is bogus is the RESOLVER's
 		// judgement, and that judgement is the thing being measured. Pre-empting it
 		// with our own code would contaminate the result.
-		{"nxdomain", ModNXDOMAIN, 0xFFFF},
-		{"nxname", ModNXNAME, 0xFFFF},
+		{modLabelNXDOMAIN, ModNXDOMAIN, 0xFFFF},
+		{modLabelNXNAME, ModNXNAME, 0xFFFF},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := edeFor(tc.mods)
@@ -95,7 +95,7 @@ func TestEDESpecificBeatsGeneral(t *testing.T) {
 func TestEDEOnlyWithEDNS(t *testing.T) {
 	p := newTestProbe(t, true)
 
-	// do=false in this harness still sends no OPT at all.
+	// Do=false in this harness still sends no OPT at all.
 	plain := query(t, p, "_badsig.deadbeef."+testZone, dns.TypeTXT, false)
 	if e := responseEDE(plain); e != nil {
 		t.Errorf("EDE sent to a querier with no OPT record: code %d", e.InfoCode)
@@ -169,7 +169,11 @@ func TestEDENotDuplicated(t *testing.T) {
 	if count != 1 {
 		t.Errorf("%d EDE options attached, want 1", count)
 	}
-	if e := responseEDE(m); e.InfoCode != dns.ExtendedErrorCodeDNSBogus {
+	e := responseEDE(m)
+	if e == nil {
+		t.Fatal("no EDE option found after attaching one")
+	}
+	if e.InfoCode != dns.ExtendedErrorCodeDNSBogus {
 		t.Errorf("second attach overwrote the first: code %d", e.InfoCode)
 	}
 }

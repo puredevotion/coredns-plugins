@@ -27,16 +27,11 @@ import (
 
 // Report is one decoded RFC 9567 error report.
 type Report struct {
-	// Qtype is the type of the query that failed, as the reporting resolver
-	// stated it.
-	Qtype uint16
 	// QtypeName is Qtype rendered for display, e.g. "A"; "TYPE1234" for types
 	// with no mnemonic.
 	QtypeName string
 	// Qname is the name the resolver could not resolve, fully qualified.
 	Qname string
-	// EDE is the RFC 8914 extended error code the resolver reported.
-	EDE uint16
 	// EDEText is the registered description for EDE, empty for codes this build
 	// does not know. Unknown is not an error: the registry grows, and a report
 	// carrying a code we cannot name is still a report.
@@ -45,6 +40,11 @@ type Report struct {
 	// one of ours, empty otherwise. This is what correlates a report back to a
 	// visitor's session.
 	Token string
+	// Qtype is the type of the query that failed, as the reporting resolver
+	// stated it.
+	Qtype uint16
+	// EDE is the RFC 8914 extended error code the resolver reported.
+	EDE uint16
 }
 
 // ReportRecord is a Report as stored: the decoded report plus who sent it and
@@ -59,17 +59,6 @@ type ReportRecord struct {
 	// resolver reports after it gives up, and may cache the report query for a
 	// TTL before repeating it, so this can lag the failure by minutes.
 	At time.Time `json:"at"`
-	// Token correlates the report to a visitor, empty when the reported name was
-	// not one of ours. Empty is common and expected: a resolver can report about
-	// any name in the zone, including the apex.
-	Token string `json:"token,omitempty"`
-
-	Qtype     uint16 `json:"qtype"`
-	QtypeName string `json:"qtype_name"`
-	Qname     string `json:"qname"`
-	EDE       uint16 `json:"ede"`
-	EDEText   string `json:"ede_text,omitempty"`
-
 	// ReporterAddr is the egress address of the RESOLVER that sent the report.
 	// It need not equal the address that made the failing query — a resolver
 	// pool can report from a different member than the one that failed, and that
@@ -78,8 +67,17 @@ type ReportRecord struct {
 	// ReporterPrefix groups a resolver pool's addresses, same widths as
 	// Observation.ResolverPrefix and for the same reason.
 	ReporterPrefix netip.Prefix `json:"reporter_prefix"`
+	// Token correlates the report to a visitor, empty when the reported name was
+	// not one of ours. Empty is common and expected: a resolver can report about
+	// any name in the zone, including the apex.
+	Token     string `json:"token,omitempty"`
+	QtypeName string `json:"qtype_name"`
+	Qname     string `json:"qname"`
+	EDEText   string `json:"ede_text,omitempty"`
 	// Transport is how the report query itself arrived.
 	Transport Transport `json:"transport"`
+	Qtype     uint16    `json:"qtype"`
+	EDE       uint16    `json:"ede"`
 }
 
 // NewReportRecord stamps a parsed report with its arrival facts.
@@ -123,15 +121,18 @@ var (
 // Bounds on what will be parsed. These exist because the input is chosen by
 // whoever sends it, not by us.
 //
-// maxReportLabels is generous relative to any real report (a reported name is
+// MaxReportLabels is generous relative to any real report (a reported name is
 // normally a handful of labels) but far below the 127-label DNS ceiling, so a
 // name crafted purely to make us do work is rejected on sight rather than
-// walked. maxDecimalLabel bounds the numeric labels: a uint16 is at most five
+// Walked. MaxDecimalLabel bounds the numeric labels: a uint16 is at most five
 // digits, so anything longer is malformed by construction and there is no
 // reason to hand it to strconv.
 const (
 	maxReportLabels = 24
 	maxDecimalLabel = 5
+
+	// MinReportLabels is _er + QTYPE + at least one reported-name label + EDE + _er.
+	minReportLabels = 5
 )
 
 // ParseReport decodes an RFC 9567 report QNAME addressed to agentDomain.
@@ -162,39 +163,10 @@ func ParseReport(qname, agentDomain, probeZone string) (Report, error) {
 		return Report{}, ErrNotReport
 	}
 
-	rest := strings.TrimSuffix(name, agent)
-	rest = strings.TrimSuffix(rest, ".")
-	if rest == "" {
-		return Report{}, ErrNotReport
-	}
-
-	labels := dns.SplitDomainName(rest)
-	// _er + qtype + >=1 reported label + ede + _er
-	if len(labels) < 5 {
-		return Report{}, ErrNotReport
-	}
-	if len(labels) > maxReportLabels {
-		// Refused before any per-label work, deliberately.
-		return Report{}, ErrBadReport
-	}
-	if labels[0] != "_er" || labels[len(labels)-1] != "_er" {
-		return Report{}, ErrNotReport
-	}
-
-	qtype, err := parseDecimalLabel(labels[1])
+	qtype, ede, qn, err := parseReportLabels(name, agent)
 	if err != nil {
 		return Report{}, err
 	}
-	ede, err := parseDecimalLabel(labels[len(labels)-2])
-	if err != nil {
-		return Report{}, err
-	}
-
-	reported := labels[2 : len(labels)-2]
-	if len(reported) == 0 {
-		return Report{}, ErrBadReport
-	}
-	qn := dns.Fqdn(strings.Join(reported, "."))
 
 	r := Report{
 		Qtype:     qtype,
@@ -218,6 +190,48 @@ func ParseReport(qname, agentDomain, probeZone string) (Report, error) {
 		}
 	}
 	return r, nil
+}
+
+// parseReportLabels splits the report qname's labels (after the agent domain
+// suffix has been removed) into the QTYPE, EDE code and reported name.
+//
+// Split out of ParseReport purely to keep that function's length down; every
+// check and error is unchanged.
+func parseReportLabels(name, agent string) (qtype, ede uint16, qn string, err error) {
+	rest := strings.TrimSuffix(name, agent)
+	rest = strings.TrimSuffix(rest, ".")
+	if rest == "" {
+		return 0, 0, "", ErrNotReport
+	}
+
+	labels := dns.SplitDomainName(rest)
+	// _er + qtype + >=1 reported label + ede + _er.
+	if len(labels) < minReportLabels {
+		return 0, 0, "", ErrNotReport
+	}
+	if len(labels) > maxReportLabels {
+		// Refused before any per-label work, deliberately.
+		return 0, 0, "", ErrBadReport
+	}
+	if labels[0] != "_er" || labels[len(labels)-1] != "_er" {
+		return 0, 0, "", ErrNotReport
+	}
+
+	qtype, err = parseDecimalLabel(labels[1])
+	if err != nil {
+		return 0, 0, "", err
+	}
+	ede, err = parseDecimalLabel(labels[len(labels)-2])
+	if err != nil {
+		return 0, 0, "", err
+	}
+
+	reported := labels[2 : len(labels)-2]
+	if len(reported) == 0 {
+		return 0, 0, "", ErrBadReport
+	}
+	qn = dns.Fqdn(strings.Join(reported, "."))
+	return qtype, ede, qn, nil
 }
 
 // parseDecimalLabel parses one of the two numeric labels. Rejects anything that
@@ -300,7 +314,7 @@ func attachReportChannel(m *dns.Msg, agentDomain string) {
 // chosen by a stranger rather than merely varied.
 func edeLabel(code uint16) string {
 	if _, known := dns.ExtendedErrorCodeToString[code]; !known {
-		return "other"
+		return labelOther
 	}
 	return strconv.Itoa(int(code))
 }

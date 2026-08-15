@@ -6,6 +6,10 @@ import (
 	"github.com/coredns/caddy"
 )
 
+// testCorefileZoneOnly is the minimal valid Corefile stanza: a zone and
+// nothing else, reused by every test that only cares about the defaults.
+const testCorefileZoneOnly = "probe check.example.com"
+
 // TestDefaultBigSizeStaysDeliverable pins the measured constraint behind
 // defaultBigSize. Above 1232 it demonstrates exceeding the flag-day cap; below
 // ~1500 it still arrives over UDP. Raising this past the MTU would turn the
@@ -19,36 +23,58 @@ func TestDefaultBigSizeStaysDeliverable(t *testing.T) {
 	}
 }
 
+// checkZoneOnlyDefaults verifies the defaults applied to the minimal
+// zone-only Corefile stanza. Declared as a named top-level function, rather
+// than a closure inline in TestParseCorefile's table, purely to keep that
+// test's cognitive complexity down; every assertion is unchanged.
+func checkZoneOnlyDefaults(t *testing.T, p *Probe) {
+	t.Helper()
+	if p.Zone != "check.example.com." {
+		t.Errorf("Zone = %q, want fully qualified", p.Zone)
+	}
+	if p.TTL != defaultTTL {
+		t.Errorf("TTL = %d, want %d", p.TTL, defaultTTL)
+	}
+	if p.NSName != "ns.check.example.com." {
+		t.Errorf("NSName = %q", p.NSName)
+	}
+	if p.Mbox != "hostmaster.check.example.com." {
+		t.Errorf("Mbox = %q", p.Mbox)
+	}
+	if p.Signer != nil {
+		t.Error("no key was configured, so Signer must be nil")
+	}
+	if p.Store == nil {
+		t.Error("Store must never be nil after setup")
+	}
+}
+
+// checkAllKnobsApplied verifies the "all knobs" Corefile stanza below took
+// effect. Named for the same reason as checkZoneOnlyDefaults above.
+func checkAllKnobsApplied(t *testing.T, p *Probe) {
+	t.Helper()
+	if p.TTL != 30 {
+		t.Errorf("TTL = %d, want 30", p.TTL)
+	}
+	if p.NSName != "dns.example.net." {
+		t.Errorf("NSName = %q", p.NSName)
+	}
+	if p.BigSize != 1300 {
+		t.Errorf("BigSize = %d, want 1300", p.BigSize)
+	}
+}
+
 func TestParseCorefile(t *testing.T) {
 	tests := []struct {
+		check   func(*testing.T, *Probe)
 		name    string
 		input   string
 		wantErr bool
-		check   func(*testing.T, *Probe)
 	}{
 		{
 			name:  "zone only, defaults applied",
-			input: `probe check.example.com`,
-			check: func(t *testing.T, p *Probe) {
-				if p.Zone != "check.example.com." {
-					t.Errorf("Zone = %q, want fully qualified", p.Zone)
-				}
-				if p.TTL != defaultTTL {
-					t.Errorf("TTL = %d, want %d", p.TTL, defaultTTL)
-				}
-				if p.NSName != "ns.check.example.com." {
-					t.Errorf("NSName = %q", p.NSName)
-				}
-				if p.Mbox != "hostmaster.check.example.com." {
-					t.Errorf("Mbox = %q", p.Mbox)
-				}
-				if p.Signer != nil {
-					t.Error("no key was configured, so Signer must be nil")
-				}
-				if p.Store == nil {
-					t.Error("Store must never be nil after setup")
-				}
-			},
+			input: testCorefileZoneOnly,
+			check: checkZoneOnlyDefaults,
 		},
 		{
 			name: "all knobs",
@@ -61,19 +87,9 @@ func TestParseCorefile(t *testing.T) {
 				max_per_token 4
 				big_size 1300
 			}`,
-			check: func(t *testing.T, p *Probe) {
-				if p.TTL != 30 {
-					t.Errorf("TTL = %d, want 30", p.TTL)
-				}
-				if p.NSName != "dns.example.net." {
-					t.Errorf("NSName = %q", p.NSName)
-				}
-				if p.BigSize != 1300 {
-					t.Errorf("BigSize = %d, want 1300", p.BigSize)
-				}
-			},
+			check: checkAllKnobsApplied,
 		},
-		{name: "missing zone", input: `probe`, wantErr: true},
+		{name: "missing zone", input: pluginName, wantErr: true},
 		{name: "two zone args", input: `probe a.example.com b.example.com`, wantErr: true},
 		{name: "unknown property", input: "probe check.example.com {\n\tbogus 1\n}", wantErr: true},
 		{name: "non-numeric ttl", input: "probe check.example.com {\n\tttl abc\n}", wantErr: true},
@@ -111,6 +127,100 @@ func TestParseCorefile(t *testing.T) {
 	}
 }
 
+// checkSiblingAgentDomainDefaultTTL, checkExplicitAgentTTL and
+// checkAgentReportingOff back TestParseAgentDomain's table below. Declared as
+// named top-level functions, rather than closures inline in the table, purely
+// to keep that test's cognitive complexity down; every assertion is
+// unchanged.
+func checkSiblingAgentDomainDefaultTTL(t *testing.T, p *Probe) {
+	t.Helper()
+	if p.AgentDomain != "er.example.com." {
+		t.Errorf("AgentDomain = %q, want fully qualified", p.AgentDomain)
+	}
+	if p.AgentTTL != defaultAgentTTL {
+		t.Errorf("AgentTTL = %d, want the default %d", p.AgentTTL, defaultAgentTTL)
+	}
+}
+
+func checkExplicitAgentTTL(t *testing.T, p *Probe) {
+	t.Helper()
+	if p.AgentTTL != 60 {
+		t.Errorf("AgentTTL = %d, want 60", p.AgentTTL)
+	}
+}
+
+func checkAgentReportingOff(t *testing.T, p *Probe) {
+	t.Helper()
+	if p.AgentDomain != "" {
+		t.Errorf("AgentDomain = %q, want empty", p.AgentDomain)
+	}
+	if p.AgentTTL != 0 {
+		t.Errorf("AgentTTL = %d, want 0 when reporting is off", p.AgentTTL)
+	}
+}
+
+// parseAgentDomainTests is TestParseAgentDomain's table, pulled out to a
+// package-level var purely to keep that function's length down.
+var parseAgentDomainTests = []struct {
+	check   func(*testing.T, *Probe)
+	name    string
+	input   string
+	wantErr bool
+}{
+	{
+		name:  "sibling agent domain, default ttl",
+		input: "probe check.example.com {\n\tagent_domain er.example.com\n}",
+		check: checkSiblingAgentDomainDefaultTTL,
+	},
+	{
+		name:  "explicit agent_ttl",
+		input: "probe check.example.com {\n\tagent_domain er.example.com\n\tagent_ttl 60\n}",
+		check: checkExplicitAgentTTL,
+	},
+	{
+		name:  "unconfigured leaves reporting off",
+		input: testCorefileZoneOnly,
+		check: checkAgentReportingOff,
+	},
+	{
+		name:    "agent domain inside the reported zone",
+		input:   "probe check.example.com {\n\tagent_domain er.check.example.com\n}",
+		wantErr: true,
+	},
+	{
+		name:    "agent domain equal to the reported zone",
+		input:   "probe check.example.com {\n\tagent_domain check.example.com\n}",
+		wantErr: true,
+	},
+	{
+		name:    "reported zone inside the agent domain",
+		input:   "probe check.example.com {\n\tagent_domain example.com\n}",
+		wantErr: true,
+	},
+	{
+		name:    "root as agent domain",
+		input:   "probe check.example.com {\n\tagent_domain .\n}",
+		wantErr: true,
+	},
+	{
+		// Zero TTL would defeat the caching RFC 9567 §6.2 calls essential,
+		// turning one persistent failure into an unbounded report stream.
+		name:    "agent_ttl zero",
+		input:   "probe check.example.com {\n\tagent_domain er.example.com\n\tagent_ttl 0\n}",
+		wantErr: true,
+	},
+	{
+		name:    "agent_ttl without agent_domain",
+		input:   "probe check.example.com {\n\tagent_ttl 60\n}",
+		wantErr: true,
+	},
+	{
+		name:    "agent_domain with no argument",
+		input:   "probe check.example.com {\n\tagent_domain\n}",
+		wantErr: true,
+	},
+}
+
 // TestParseAgentDomain covers the RFC 9567 configuration, including the two
 // nesting rules. Both are load-bearing rather than tidiness:
 //
@@ -121,85 +231,7 @@ func TestParseCorefile(t *testing.T) {
 //     under the agent domain, ServeDNS could not tell a probe name from a report
 //     name and the more permissive parser would win silently.
 func TestParseAgentDomain(t *testing.T) {
-	tests := []struct {
-		name    string
-		input   string
-		wantErr bool
-		check   func(*testing.T, *Probe)
-	}{
-		{
-			name:  "sibling agent domain, default ttl",
-			input: "probe check.example.com {\n\tagent_domain er.example.com\n}",
-			check: func(t *testing.T, p *Probe) {
-				if p.AgentDomain != "er.example.com." {
-					t.Errorf("AgentDomain = %q, want fully qualified", p.AgentDomain)
-				}
-				if p.AgentTTL != defaultAgentTTL {
-					t.Errorf("AgentTTL = %d, want the default %d", p.AgentTTL, defaultAgentTTL)
-				}
-			},
-		},
-		{
-			name:  "explicit agent_ttl",
-			input: "probe check.example.com {\n\tagent_domain er.example.com\n\tagent_ttl 60\n}",
-			check: func(t *testing.T, p *Probe) {
-				if p.AgentTTL != 60 {
-					t.Errorf("AgentTTL = %d, want 60", p.AgentTTL)
-				}
-			},
-		},
-		{
-			name:  "unconfigured leaves reporting off",
-			input: "probe check.example.com",
-			check: func(t *testing.T, p *Probe) {
-				if p.AgentDomain != "" {
-					t.Errorf("AgentDomain = %q, want empty", p.AgentDomain)
-				}
-				if p.AgentTTL != 0 {
-					t.Errorf("AgentTTL = %d, want 0 when reporting is off", p.AgentTTL)
-				}
-			},
-		},
-		{
-			name:    "agent domain inside the reported zone",
-			input:   "probe check.example.com {\n\tagent_domain er.check.example.com\n}",
-			wantErr: true,
-		},
-		{
-			name:    "agent domain equal to the reported zone",
-			input:   "probe check.example.com {\n\tagent_domain check.example.com\n}",
-			wantErr: true,
-		},
-		{
-			name:    "reported zone inside the agent domain",
-			input:   "probe check.example.com {\n\tagent_domain example.com\n}",
-			wantErr: true,
-		},
-		{
-			name:    "root as agent domain",
-			input:   "probe check.example.com {\n\tagent_domain .\n}",
-			wantErr: true,
-		},
-		{
-			// Zero TTL would defeat the caching RFC 9567 §6.2 calls essential,
-			// turning one persistent failure into an unbounded report stream.
-			name:    "agent_ttl zero",
-			input:   "probe check.example.com {\n\tagent_domain er.example.com\n\tagent_ttl 0\n}",
-			wantErr: true,
-		},
-		{
-			name:    "agent_ttl without agent_domain",
-			input:   "probe check.example.com {\n\tagent_ttl 60\n}",
-			wantErr: true,
-		},
-		{
-			name:    "agent_domain with no argument",
-			input:   "probe check.example.com {\n\tagent_domain\n}",
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
+	for _, tc := range parseAgentDomainTests {
 		t.Run(tc.name, func(t *testing.T) {
 			p, err := parse(caddy.NewTestController("dns", tc.input))
 			if tc.wantErr {
@@ -223,7 +255,7 @@ func TestParseAgentDomain(t *testing.T) {
 // every validator rejects, and the symptom is "the entire zone is bogus" with
 // nothing logged anywhere.
 func TestParseRejectsKeyForWrongZone(t *testing.T) {
-	s := newTestSigner(t, 0) // key owns check.example.com.
+	s := newTestSigner(t, 0) // Key owns check.example.com.
 	base := keyBasenameFor(t, s)
 
 	_, err := parse(caddy.NewTestController("dns",
@@ -269,7 +301,7 @@ func TestParseValkeyRequiresVerifiedTLS(t *testing.T) {
 		{
 			// No addresses at all is the in-process default, which needs no TLS.
 			name:  "no valkey at all is fine",
-			input: "probe check.example.com",
+			input: testCorefileZoneOnly,
 		},
 	}
 	for _, tc := range tests {

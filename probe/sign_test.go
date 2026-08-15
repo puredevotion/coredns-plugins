@@ -35,11 +35,11 @@ func newTestSigner(t *testing.T, validity time.Duration) *Signer {
 
 	dir := t.TempDir()
 	base := filepath.Join(dir, "Kcheck.example.com.+013+00000")
-	if err := os.WriteFile(base+".key", []byte(key.String()+"\n"), 0o600); err != nil {
-		t.Fatalf("writing .key: %v", err)
+	if writeErr := os.WriteFile(base+".key", []byte(key.String()+"\n"), 0o600); writeErr != nil {
+		t.Fatalf("writing .key: %v", writeErr)
 	}
-	if err := os.WriteFile(base+".private", []byte(key.PrivateKeyString(priv)), 0o600); err != nil {
-		t.Fatalf("writing .private: %v", err)
+	if writeErr := os.WriteFile(base+".private", []byte(key.PrivateKeyString(priv)), 0o600); writeErr != nil {
+		t.Fatalf("writing .private: %v", writeErr)
 	}
 
 	s, err := LoadSigner(base, validity)
@@ -80,11 +80,11 @@ func TestSignRRsetBaseline(t *testing.T) {
 	s := newTestSigner(t, time.Hour)
 	rrs := testRRset()
 
-	sig, err := s.signRRset(rrs, 0)
+	sig, ok, err := s.signRRset(rrs, 0)
 	if err != nil {
 		t.Fatalf("signRRset: %v", err)
 	}
-	if sig == nil {
+	if !ok || sig == nil {
 		t.Fatal("no RRSIG produced for an unmodified query")
 	}
 	if err := sig.Verify(s.DNSKEY(), rrs); err != nil {
@@ -103,11 +103,11 @@ func TestSignRRsetBaseline(t *testing.T) {
 
 func TestSignRRsetUnsignedOmitsSignature(t *testing.T) {
 	s := newTestSigner(t, time.Hour)
-	sig, err := s.signRRset(testRRset(), ModUnsigned)
+	sig, ok, err := s.signRRset(testRRset(), ModUnsigned)
 	if err != nil {
 		t.Fatalf("signRRset: %v", err)
 	}
-	if sig != nil {
+	if ok {
 		t.Fatalf("ModUnsigned produced an RRSIG: %v", sig)
 	}
 }
@@ -120,14 +120,14 @@ func TestSignRRsetBadSigFailsVerification(t *testing.T) {
 	s := newTestSigner(t, time.Hour)
 	rrs := testRRset()
 
-	sig, err := s.signRRset(rrs, ModBadSig)
+	sig, ok, err := s.signRRset(rrs, ModBadSig)
 	if err != nil {
 		t.Fatalf("signRRset: %v", err)
 	}
-	if sig == nil {
+	if !ok || sig == nil {
 		t.Fatal("ModBadSig produced no RRSIG at all; it must produce a bad one")
 	}
-	if err := sig.Verify(s.DNSKEY(), rrs); err == nil {
+	if verifyErr := sig.Verify(s.DNSKEY(), rrs); verifyErr == nil {
 		t.Error("corrupted signature verified successfully")
 	}
 	// Still inside its validity window, so a resolver rejecting it must be
@@ -142,7 +142,11 @@ func TestSignRRsetBadSigFailsVerification(t *testing.T) {
 	if err != nil {
 		t.Fatalf("corrupted RRSIG does not round-trip through presentation format: %v", err)
 	}
-	if err := parsed.(*dns.RRSIG).Verify(s.DNSKEY(), rrs); err == nil {
+	parsedSig, ok := parsed.(*dns.RRSIG)
+	if !ok {
+		t.Fatalf("parsed round-tripped record is %T, want *dns.RRSIG", parsed)
+	}
+	if err := parsedSig.Verify(s.DNSKEY(), rrs); err == nil {
 		t.Error("corrupted signature verified after round-trip")
 	}
 }
@@ -163,11 +167,11 @@ func TestSignRRsetTimeVariants(t *testing.T) {
 			s := newTestSigner(t, time.Hour)
 			rrs := testRRset()
 
-			sig, err := s.signRRset(rrs, tc.mod)
+			sig, ok, err := s.signRRset(rrs, tc.mod)
 			if err != nil {
 				t.Fatalf("signRRset: %v", err)
 			}
-			if sig == nil {
+			if !ok || sig == nil {
 				t.Fatal("no RRSIG produced")
 			}
 			if err := sig.Verify(s.DNSKEY(), rrs); err != nil {
@@ -245,8 +249,8 @@ func TestLoadSignerRefusesSymlinkEscape(t *testing.T) {
 	keyDir := t.TempDir()
 
 	// A valid keypair, but parked outside the directory LoadSigner will root.
-	real := newTestSigner(t, 0)
-	realBase := keyBasenameFor(t, real)
+	origSigner := newTestSigner(t, 0)
+	realBase := keyBasenameFor(t, origSigner)
 
 	base := filepath.Join(keyDir, "Kescape.example.com.+013+00000")
 	if err := os.Symlink(realBase+".key", base+".key"); err != nil {

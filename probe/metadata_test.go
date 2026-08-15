@@ -102,7 +102,7 @@ func TestMetadataSilentOutsideBothZones(t *testing.T) {
 // With reporting disabled there is no agent zone, so a name that would have
 // matched it must not be claimed.
 func TestMetadataIgnoresAgentZoneWhenReportingDisabled(t *testing.T) {
-	p := newTestProbe(t, true) // no AgentDomain
+	p := newTestProbe(t, true) // No AgentDomain.
 
 	if got, ok := wildcardFor(t, p, "_er.16.x."+testAgent); ok {
 		t.Fatalf("published %q for the agent zone while reporting is disabled", got)

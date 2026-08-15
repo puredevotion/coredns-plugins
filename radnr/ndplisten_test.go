@@ -2,6 +2,7 @@ package radnr
 
 import (
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"testing"
@@ -36,7 +37,11 @@ func TestNdpListen_RealRawSocket_RequiresPrivilege(t *testing.T) {
 	}
 	// Only reachable when actually running privileged (e.g. root in CI with
 	// NET_RAW granted): prove the conn this plugin would really use works.
-	defer func() { _ = conn.Close() }()
+	defer func() {
+		if err := conn.Close(); err != nil {
+			t.Logf("conn.Close: %v", err)
+		}
+	}()
 	if !addr.IsValid() {
 		t.Fatal("ndp.Listen returned an invalid link-local address")
 	}
@@ -48,7 +53,7 @@ func TestNdpListen_RealRawSocket_RequiresPrivilege(t *testing.T) {
 func realLinkLocalInterface() (*net.Interface, error) {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list interfaces: %w", err)
 	}
 	for i := range ifaces {
 		ifi := &ifaces[i]

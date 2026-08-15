@@ -27,8 +27,9 @@ func TestBuildZoneVersionWireFormat(t *testing.T) {
 	if zv.Type != zoneVersionTypeSOASerial {
 		t.Errorf("Type = %d, want %d (SOA-SERIAL)", zv.Type, zoneVersionTypeSOASerial)
 	}
-	// check.example.com. is three labels; the count identifies which zone the
-	// version refers to when the queried name sits below a delegation.
+	// The test domain has three labels ("check", "example", "com"); the count
+	// identifies which zone the version refers to when the queried name sits
+	// below a delegation.
 	if zv.LabelCount != 3 {
 		t.Errorf("LabelCount = %d, want 3", zv.LabelCount)
 	}
@@ -56,7 +57,7 @@ func TestBuildZoneVersionLabelCounts(t *testing.T) {
 		{"check.example.com.", 3},
 		{"a.b.check.example.com.", 5},
 		// Unqualified input must be treated the same as qualified.
-		{"check.example.com", 3},
+		{testPublicName, 3},
 	} {
 		zv := buildZoneVersion(tc.zone, 1)
 		if zv == nil {
@@ -111,14 +112,14 @@ func TestRequestsZoneVersion(t *testing.T) {
 // absent one, because it looks authoritative.
 func TestParseZoneVersionSerialRejectsNonsense(t *testing.T) {
 	for _, tc := range []struct {
-		name string
 		in   *dns.EDNS0_ZONEVERSION
+		name string
 	}{
-		{"nil", nil},
-		{"unknown version type", &dns.EDNS0_ZONEVERSION{Type: 1, Version: "\x00\x00\x00\x01"}},
-		{"short payload", &dns.EDNS0_ZONEVERSION{Type: 0, Version: "\x00\x01"}},
-		{"long payload", &dns.EDNS0_ZONEVERSION{Type: 0, Version: "\x00\x00\x00\x00\x01"}},
-		{"empty payload", &dns.EDNS0_ZONEVERSION{Type: 0, Version: ""}},
+		{name: "nil", in: nil},
+		{name: "unknown version type", in: &dns.EDNS0_ZONEVERSION{Type: 1, Version: "\x00\x00\x00\x01"}},
+		{name: "short payload", in: &dns.EDNS0_ZONEVERSION{Type: 0, Version: "\x00\x01"}},
+		{name: "long payload", in: &dns.EDNS0_ZONEVERSION{Type: 0, Version: "\x00\x00\x00\x00\x01"}},
+		{name: "empty payload", in: &dns.EDNS0_ZONEVERSION{Type: 0, Version: ""}},
 	} {
 		if _, ok := parseZoneVersionSerial(tc.in); ok {
 			t.Errorf("%s: parsed as valid", tc.name)
@@ -287,7 +288,8 @@ func TestObserveRecordsZoneVersionAsked(t *testing.T) {
 	if s := obs.Summary(); !strings.Contains(s, "zoneversion=1") {
 		t.Errorf("Summary lacks zoneversion=1: %s", s)
 	}
-	if s := observeWith(t, ednsQuery(newOpt())).Summary(); !strings.Contains(s, "zoneversion=0") {
+	obs2 := observeWith(t, ednsQuery(newOpt()))
+	if s := obs2.Summary(); !strings.Contains(s, "zoneversion=0") {
 		t.Errorf("Summary lacks zoneversion=0: %s", s)
 	}
 }

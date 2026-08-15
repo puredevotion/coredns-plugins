@@ -12,7 +12,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func init() { plugin.Register("probe", setup) }
+func init() { plugin.Register(pluginName, setup) }
 
 // Corefile syntax
 //
@@ -37,7 +37,7 @@ func init() { plugin.Register("probe", setup) }
 func setup(c *caddy.Controller) error {
 	p, err := parse(c)
 	if err != nil {
-		return plugin.Error("probe", err)
+		return fmt.Errorf("configure probe plugin: %w", plugin.Error(pluginName, err))
 	}
 	dnsserver.GetConfig(c).AddPlugin(func(next plugin.Handler) plugin.Handler {
 		p.Next = next
@@ -51,7 +51,7 @@ func setup(c *caddy.Controller) error {
 const (
 	defaultTTL = 10
 
-	// defaultBigSize sits above the DNS-flag-day-2020 consensus EDNS cap of
+	// DefaultBigSize sits above the DNS-flag-day-2020 consensus EDNS cap of
 	// 1232 bytes — so the answer demonstrably exceeds what a resolver should be
 	// advertising room for — but below the ~1500-byte Ethernet MTU, so it still
 	// arrives.
@@ -70,20 +70,28 @@ const (
 	defaultBigSize = 1400
 )
 
+// parseState holds the setup values that do not live on Probe directly —
+// either because they are consumed before the signer/store are built, or
+// because several directives feed one field (valkeyCfg).
+type parseState struct {
+	keyBase     string
+	valkeyCfg   ValkeyConfig
+	validity    time.Duration
+	storeTTL    time.Duration
+	maxTokens   int
+	maxPerToken int
+}
+
 func parse(c *caddy.Controller) (*Probe, error) {
 	p := &Probe{TTL: defaultTTL, BigSize: defaultBigSize}
 
-	var (
-		keyBase                string
-		validity, storeTTL     time.Duration
-		maxTokens, maxPerToken int
-		seenZone               bool
-		valkeyCfg              ValkeyConfig
-	)
+	var st parseState
+	var seenZone bool
 
-	for c.Next() { // "probe"
+	for c.Next() { // "probe".
 		args := c.RemainingArgs()
 		if len(args) != 1 {
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 			return nil, c.ArgErr()
 		}
 		if seenZone {
@@ -95,110 +103,14 @@ func parse(c *caddy.Controller) (*Probe, error) {
 		p.Zone = dns.CanonicalName(args[0])
 
 		for c.NextBlock() {
-			switch c.Val() {
-			case "key":
-				if !c.NextArg() {
-					return nil, c.ArgErr()
-				}
-				keyBase = c.Val()
-			case "ttl":
-				v, err := parseUint32Arg(c)
-				if err != nil {
-					return nil, err
-				}
-				p.TTL = v
-			case "ns":
-				if !c.NextArg() {
-					return nil, c.ArgErr()
-				}
-				p.NSName = dns.CanonicalName(c.Val())
-			case "mbox":
-				if !c.NextArg() {
-					return nil, c.ArgErr()
-				}
-				p.Mbox = dns.CanonicalName(c.Val())
-			case "validity":
-				d, err := parseDurationArg(c)
-				if err != nil {
-					return nil, err
-				}
-				validity = d
-			case "store_ttl":
-				d, err := parseDurationArg(c)
-				if err != nil {
-					return nil, err
-				}
-				storeTTL = d
-			case "max_tokens":
-				v, err := parseIntArg(c)
-				if err != nil {
-					return nil, err
-				}
-				maxTokens = v
-			case "max_per_token":
-				v, err := parseIntArg(c)
-				if err != nil {
-					return nil, err
-				}
-				maxPerToken = v
-			case "valkey":
-				// Repeatable and/or multi-valued, so a Corefile can list every
-				// endpoint without a delimiter convention.
-				vs := c.RemainingArgs()
-				if len(vs) == 0 {
-					return nil, c.ArgErr()
-				}
-				valkeyCfg.Addrs = append(valkeyCfg.Addrs, vs...)
-			case "valkey_ca":
-				if !c.NextArg() {
-					return nil, c.ArgErr()
-				}
-				valkeyCfg.CAFile = c.Val()
-			case "valkey_timeout":
-				d, err := parseDurationArg(c)
-				if err != nil {
-					return nil, err
-				}
-				valkeyCfg.Timeout = d
-			case "agent_domain":
-				if !c.NextArg() {
-					return nil, c.ArgErr()
-				}
-				p.AgentDomain = dns.CanonicalName(c.Val())
-			case "agent_ttl":
-				v, err := parseUint32Arg(c)
-				if err != nil {
-					return nil, err
-				}
-				if v == 0 {
-					// Zero would mean "never cache a report answer", which RFC
-					// 9567 §6.2 specifically warns against: caching is what limits
-					// a reporting resolver to one report per TTL for the same
-					// problem, so disabling it turns every persistent failure into
-					// an unbounded stream of report queries at us.
-					return nil, c.Err("agent_ttl must be greater than zero")
-				}
-				p.AgentTTL = v
-			case "big_size":
-				v, err := parseIntArg(c)
-				if err != nil {
-					return nil, err
-				}
-				// A modifier that exists to demonstrate amplification must not
-				// become an unbounded one. 4096 keeps a single answer inside
-				// what a resolver will accept over TCP without this turning
-				// into a memory knob.
-				if v < 1 || v > 4096 {
-					return nil, fmt.Errorf("big_size %d out of range (1-4096)", v)
-				}
-				p.BigSize = v
-			default:
-				return nil, c.Errf("unknown property %q", c.Val())
+			if err := applyDirective(c, p, &st); err != nil {
+				return nil, err
 			}
 		}
 	}
 
 	if !seenZone {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return nil, c.ArgErr()
 	}
 	if p.NSName == "" {
@@ -212,24 +124,11 @@ func parse(c *caddy.Controller) (*Probe, error) {
 		return nil, err
 	}
 
-	if keyBase != "" {
-		s, err := LoadSigner(keyBase, validity)
-		if err != nil {
-			return nil, err
-		}
-		// A key whose owner name is not this zone produces signatures every
-		// validator rejects, and the symptom is "everything is bogus" with no
-		// error logged anywhere. Refuse at startup instead.
-		if s.Owner() != p.Zone {
-			return nil, fmt.Errorf("key is for zone %s but this block serves %s",
-				s.Owner(), p.Zone)
-		}
-		p.Signer = s
-	} else {
-		log.Warningf("zone %s has no signing key: the unsigned/badsig/expiredsig/futuresig modifiers will be no-ops", p.Zone)
+	if err := p.loadSignerFromState(&st); err != nil {
+		return nil, err
 	}
 
-	store, err := buildStore(c, valkeyCfg, storeTTL, maxTokens, maxPerToken)
+	store, err := buildStore(c, st.valkeyCfg, st.storeTTL, st.maxTokens, st.maxPerToken)
 	if err != nil {
 		return nil, err
 	}
@@ -250,11 +149,199 @@ func parse(c *caddy.Controller) (*Probe, error) {
 		// Only reachable if the zone name exceeds 255 bytes, which CoreDNS would
 		// have rejected earlier. Surfaced rather than ignored so the zone never
 		// comes up serving HTTPS records with no ech= to measure.
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return nil, c.Errf("building ECH canary for %s: %v", p.Zone, err)
 	}
 	p.ECHConfigList = echList
 
 	return p, nil
+}
+
+// applyValkeyDirective handles the three `valkey*` directives, reporting
+// whether c.Val() named one of them. Split out of applyDirective purely to
+// keep that function's cognitive complexity down; every check is unchanged.
+func applyValkeyDirective(c *caddy.Controller, st *parseState) (handled bool, err error) {
+	switch c.Val() {
+	case "valkey":
+		// Repeatable and/or multi-valued, so a Corefile can list every
+		// endpoint without a delimiter convention.
+		vs := c.RemainingArgs()
+		if len(vs) == 0 {
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
+			return true, c.ArgErr()
+		}
+		st.valkeyCfg.Addrs = append(st.valkeyCfg.Addrs, vs...)
+		return true, nil
+	case "valkey_ca":
+		if !c.NextArg() {
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
+			return true, c.ArgErr()
+		}
+		st.valkeyCfg.CAFile = c.Val()
+		return true, nil
+	case "valkey_timeout":
+		d, err := parseDurationArg(c)
+		if err != nil {
+			return true, err
+		}
+		st.valkeyCfg.Timeout = d
+		return true, nil
+	}
+	return false, nil
+}
+
+// applySimpleDirective handles the directives that are just "parse one arg,
+// assign it" with no extra validation, reporting whether c.Val() named one of
+// them. Split out of applyDirective purely to keep that function's cognitive
+// complexity down; every check is unchanged.
+func applySimpleDirective(c *caddy.Controller, p *Probe, st *parseState) (handled bool, err error) {
+	switch c.Val() {
+	case "ttl":
+		v, err := parseUint32Arg(c)
+		if err != nil {
+			return true, err
+		}
+		p.TTL = v
+		return true, nil
+	case "ns":
+		if !c.NextArg() {
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
+			return true, c.ArgErr()
+		}
+		p.NSName = dns.CanonicalName(c.Val())
+		return true, nil
+	case "mbox":
+		if !c.NextArg() {
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
+			return true, c.ArgErr()
+		}
+		p.Mbox = dns.CanonicalName(c.Val())
+		return true, nil
+	case "validity":
+		d, err := parseDurationArg(c)
+		if err != nil {
+			return true, err
+		}
+		st.validity = d
+		return true, nil
+	}
+	return false, nil
+}
+
+// applyStoreLimitDirective handles the store-sizing directives (store_ttl,
+// max_tokens, max_per_token), reporting whether c.Val() named one of them.
+// Split out of applySimpleDirective purely to keep that function's length
+// down; every check is unchanged.
+func applyStoreLimitDirective(c *caddy.Controller, st *parseState) (handled bool, err error) {
+	switch c.Val() {
+	case "store_ttl":
+		d, err := parseDurationArg(c)
+		if err != nil {
+			return true, err
+		}
+		st.storeTTL = d
+		return true, nil
+	case "max_tokens":
+		v, err := parseIntArg(c)
+		if err != nil {
+			return true, err
+		}
+		st.maxTokens = v
+		return true, nil
+	case "max_per_token":
+		v, err := parseIntArg(c)
+		if err != nil {
+			return true, err
+		}
+		st.maxPerToken = v
+		return true, nil
+	}
+	return false, nil
+}
+
+// applyDirective handles one Corefile directive inside a probe block. Split
+// out of parse purely to keep that function's cognitive complexity down —
+// every check, default and error message is unchanged.
+func applyDirective(c *caddy.Controller, p *Probe, st *parseState) error {
+	if handled, err := applyValkeyDirective(c, st); handled || err != nil {
+		return err
+	}
+	if handled, err := applySimpleDirective(c, p, st); handled || err != nil {
+		return err
+	}
+	if handled, err := applyStoreLimitDirective(c, st); handled || err != nil {
+		return err
+	}
+
+	switch c.Val() {
+	case "key":
+		if !c.NextArg() {
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
+			return c.ArgErr()
+		}
+		st.keyBase = c.Val()
+	case "agent_domain":
+		if !c.NextArg() {
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
+			return c.ArgErr()
+		}
+		p.AgentDomain = dns.CanonicalName(c.Val())
+	case "agent_ttl":
+		v, err := parseUint32Arg(c)
+		if err != nil {
+			return err
+		}
+		if v == 0 {
+			// Zero would mean "never cache a report answer", which RFC
+			// 9567 §6.2 specifically warns against: caching is what limits
+			// a reporting resolver to one report per TTL for the same
+			// problem, so disabling it turns every persistent failure into
+			// an unbounded stream of report queries at us.
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
+			return c.Err("agent_ttl must be greater than zero")
+		}
+		p.AgentTTL = v
+	case "big_size":
+		v, err := parseIntArg(c)
+		if err != nil {
+			return err
+		}
+		// A modifier that exists to demonstrate amplification must not
+		// become an unbounded one. 4096 keeps a single answer inside
+		// what a resolver will accept over TCP without this turning
+		// into a memory knob.
+		if v < 1 || v > 4096 {
+			return fmt.Errorf("big_size %d out of range (1-4096)", v)
+		}
+		p.BigSize = v
+	default:
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
+		return c.Errf("unknown property %q", c.Val())
+	}
+	return nil
+}
+
+// loadSignerFromState loads and validates the signing key named by
+// st.keyBase, if any. Split out of parse purely to keep that function's
+// cognitive complexity down; every check and error message is unchanged.
+func (p *Probe) loadSignerFromState(st *parseState) error {
+	if st.keyBase == "" {
+		log.Warningf("zone %s has no signing key: the unsigned/badsig/expiredsig/futuresig modifiers will be no-ops", p.Zone)
+		return nil
+	}
+	s, err := LoadSigner(st.keyBase, st.validity)
+	if err != nil {
+		return err
+	}
+	// A key whose owner name is not this zone produces signatures every
+	// validator rejects, and the symptom is "everything is bogus" with no
+	// error logged anywhere. Refuse at startup instead.
+	if s.Owner() != p.Zone {
+		return fmt.Errorf("key is for zone %s but this block serves %s",
+			s.Owner(), p.Zone)
+	}
+	p.Signer = s
+	return nil
 }
 
 // defaultAgentTTL governs agent-zone answers, and through the SOA MINIMUM the
@@ -282,6 +369,7 @@ const defaultAgentTTL = 300
 func (p *Probe) validateAgentDomain(c *caddy.Controller) error {
 	if p.AgentDomain == "" {
 		if p.AgentTTL != 0 {
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 			return c.Err("agent_ttl set without agent_domain")
 		}
 		return nil
@@ -289,14 +377,17 @@ func (p *Probe) validateAgentDomain(c *caddy.Controller) error {
 	if p.AgentDomain == "." {
 		// RFC 9567 §6.1 forbids advertising the null label, and serving it here
 		// would claim the entire namespace.
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return c.Err("agent_domain must not be the root")
 	}
 	if dns.IsSubDomain(p.Zone, p.AgentDomain) {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return c.Errf("agent_domain %s is inside the zone %s it reports on; RFC 9567 §6.3 forbids it, "+
 			"because a resolver that cannot resolve the zone cannot deliver the report either",
 			p.AgentDomain, p.Zone)
 	}
 	if dns.IsSubDomain(p.AgentDomain, p.Zone) {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return c.Errf("zone %s is inside agent_domain %s; probe names and report names would be indistinguishable",
 			p.Zone, p.AgentDomain)
 	}
@@ -316,6 +407,7 @@ const echConfigID = 0x01
 func buildStore(c *caddy.Controller, vc ValkeyConfig, ttl time.Duration, maxTokens, maxPerToken int) (Store, error) {
 	if len(vc.Addrs) == 0 {
 		if vc.CAFile != "" || vc.Timeout != 0 {
+			//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 			return nil, c.Err("valkey_ca / valkey_timeout set without any `valkey` address")
 		}
 		return NewMemStore(ttl, maxTokens, maxPerToken), nil
@@ -326,6 +418,7 @@ func buildStore(c *caddy.Controller, vc ValkeyConfig, ttl time.Duration, maxToke
 		// certificate is the only thing distinguishing it from anything else
 		// that answers on that address — and what travels over the link is
 		// observations about other people's networks.
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return nil, c.Err("valkey requires valkey_ca so the server certificate can be verified")
 	}
 	vc.TTL, vc.MaxPerToken = ttl, maxPerToken
@@ -334,10 +427,12 @@ func buildStore(c *caddy.Controller, vc ValkeyConfig, ttl time.Duration, maxToke
 
 func parseIntArg(c *caddy.Controller) (int, error) {
 	if !c.NextArg() {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return 0, c.ArgErr()
 	}
 	var v int
 	if _, err := fmt.Sscanf(c.Val(), "%d", &v); err != nil {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return 0, c.Errf("%q is not a number", c.Val())
 	}
 	return v, nil
@@ -349,6 +444,7 @@ func parseUint32Arg(c *caddy.Controller) (uint32, error) {
 		return 0, err
 	}
 	if v < 0 || v > int(^uint32(0)) {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return 0, c.Errf("value %d out of range", v)
 	}
 	return uint32(v), nil
@@ -356,13 +452,16 @@ func parseUint32Arg(c *caddy.Controller) (uint32, error) {
 
 func parseDurationArg(c *caddy.Controller) (time.Duration, error) {
 	if !c.NextArg() {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return 0, c.ArgErr()
 	}
 	d, err := time.ParseDuration(c.Val())
 	if err != nil {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return 0, c.Errf("%q is not a duration", c.Val())
 	}
 	if d <= 0 {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
 		return 0, c.Errf("duration %q must be positive", c.Val())
 	}
 	return d, nil

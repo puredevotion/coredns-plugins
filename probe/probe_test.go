@@ -2,6 +2,7 @@ package probe
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,14 @@ import (
 // carry it, which is the point of the zone (the resolver's address, not the
 // visitor's).
 const testResolverIP = "10.240.0.1"
+
+// testToken and testToken2 are arbitrary, valid-shaped probe tokens reused
+// across tests that need one but do not care which. Two distinct values exist
+// because some tests need to tell one token's data apart from another's.
+const (
+	testToken  = "a1b2c3d4"
+	testToken2 = "deadbeef"
+)
 
 func newTestProbe(t *testing.T, signed bool) *Probe {
 	t.Helper()
@@ -91,7 +100,7 @@ func TestTXTCarriesObservationInBand(t *testing.T) {
 	// each field a page would show must actually be present.
 	for _, want := range []string{
 		"resolver=" + testResolverIP,
-		"prefix=10.240.0.0/24", // /24 grouping, per response-rate-limiting convention
+		"prefix=10.240.0.0/24", // /24 grouping, per response-rate-limiting convention.
 		"proto=udp",
 		"edns=1",
 		"do=1",
@@ -109,13 +118,13 @@ func TestSignatureVariantsOverTheWire(t *testing.T) {
 		name      string
 		qname     string
 		wantRRSIG bool
-		// verifies is whether the emitted RRSIG should verify against the key.
+		// Verifies is whether the emitted RRSIG should verify against the key.
 		verifies bool
-		// currentlyValid is whether it should be inside its validity window.
+		// CurrentlyValid is whether it should be inside its validity window.
 		currentlyValid bool
 	}{
 		{
-			name: "baseline is correctly signed", qname: "a1b2c3d4",
+			name: "baseline is correctly signed", qname: testToken,
 			wantRRSIG: true, verifies: true, currentlyValid: true,
 		},
 		{
@@ -138,43 +147,51 @@ func TestSignatureVariantsOverTheWire(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			p := newTestProbe(t, true)
-			m := query(t, p, tc.qname+"."+testZone, dns.TypeTXT, true)
-
-			var sig *dns.RRSIG
-			var covered []dns.RR
-			for _, rr := range m.Answer {
-				if s, ok := rr.(*dns.RRSIG); ok {
-					sig = s
-					continue
-				}
-				covered = append(covered, rr)
-			}
-
-			if !tc.wantRRSIG {
-				if sig != nil {
-					t.Fatalf("expected no RRSIG, got %v", sig)
-				}
-				if len(covered) == 0 {
-					t.Error("unsigned variant should still return the record itself")
-				}
-				return
-			}
-			if sig == nil {
-				t.Fatal("expected an RRSIG in the answer, got none")
-			}
-
-			err := sig.Verify(p.Signer.DNSKEY(), covered)
-			if tc.verifies && err != nil {
-				t.Errorf("signature should verify, got %v", err)
-			}
-			if !tc.verifies && err == nil {
-				t.Error("signature should NOT verify, but it did")
-			}
-			if got := sig.ValidityPeriod(time.Now()); got != tc.currentlyValid {
-				t.Errorf("ValidityPeriod = %v, want %v", got, tc.currentlyValid)
-			}
+			checkSignatureVariant(t, tc.qname, tc.wantRRSIG, tc.verifies, tc.currentlyValid)
 		})
+	}
+}
+
+// checkSignatureVariant runs one TestSignatureVariantsOverTheWire case. Split
+// out of that test purely to keep its cognitive complexity down; every
+// assertion is unchanged.
+func checkSignatureVariant(t *testing.T, qname string, wantRRSIG, verifies, currentlyValid bool) {
+	t.Helper()
+	p := newTestProbe(t, true)
+	m := query(t, p, qname+"."+testZone, dns.TypeTXT, true)
+
+	var sig *dns.RRSIG
+	var covered []dns.RR
+	for _, rr := range m.Answer {
+		if s, ok := rr.(*dns.RRSIG); ok {
+			sig = s
+			continue
+		}
+		covered = append(covered, rr)
+	}
+
+	if !wantRRSIG {
+		if sig != nil {
+			t.Fatalf("expected no RRSIG, got %v", sig)
+		}
+		if len(covered) == 0 {
+			t.Error("unsigned variant should still return the record itself")
+		}
+		return
+	}
+	if sig == nil {
+		t.Fatal("expected an RRSIG in the answer, got none")
+	}
+
+	err := sig.Verify(p.Signer.DNSKEY(), covered)
+	if verifies && err != nil {
+		t.Errorf("signature should verify, got %v", err)
+	}
+	if !verifies && err == nil {
+		t.Error("signature should NOT verify, but it did")
+	}
+	if got := sig.ValidityPeriod(time.Now()); got != currentlyValid {
+		t.Errorf("ValidityPeriod = %v, want %v", got, currentlyValid)
 	}
 }
 
@@ -286,7 +303,7 @@ func TestNodataReturnsSignedDenial(t *testing.T) {
 
 // queryBuf is like query but lets the test advertise a specific EDNS buffer,
 // which for the oversized-answer variant is the whole point.
-func queryBuf(t *testing.T, p *Probe, qname string, qtype uint16, bufsize uint16) *dns.Msg {
+func queryBuf(t *testing.T, p *Probe, qname string, qtype, bufsize uint16) *dns.Msg {
 	t.Helper()
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
@@ -321,7 +338,10 @@ func TestBigVariantIsBoundedByClientBuffer(t *testing.T) {
 		t.Fatal("big variant returned no answer to a 4096-byte client")
 	}
 	baseline := queryBuf(t, p, "a1b2c3d7."+testZone, dns.TypeTXT, 4096)
-	bigTXT := big.Answer[0].(*dns.TXT)
+	bigTXT, ok := big.Answer[0].(*dns.TXT)
+	if !ok {
+		t.Fatalf("answer is %T, want *dns.TXT", big.Answer[0])
+	}
 	total := 0
 	for _, s := range bigTXT.Txt {
 		total += len(s)
@@ -418,7 +438,7 @@ func TestOutOfZoneFallsThrough(t *testing.T) {
 
 func TestObservationsAccumulatePerToken(t *testing.T) {
 	p := newTestProbe(t, false)
-	const token = "a1b2c3d4"
+	token := testToken
 
 	// Different modifiers, same token: the whole point of the token is that a
 	// page can correlate every query one visit provoked.
@@ -441,7 +461,7 @@ func TestObservationsAccumulatePerToken(t *testing.T) {
 			t.Errorf("observation %d has token %q, want %q", i, o.Token, token)
 		}
 	}
-	if obs[1].Mods != "truncate" {
+	if obs[1].Mods != modLabelTruncate {
 		t.Errorf("second observation mods = %q, want \"truncate\"", obs[1].Mods)
 	}
 	// DO was only set on the third query.
@@ -457,7 +477,7 @@ func TestCaseRandomizationIsObserved(t *testing.T) {
 	p := newTestProbe(t, false)
 	query(t, p, "A1b2C3d4."+testZone, dns.TypeTXT, false)
 
-	obs, err := p.Store.Lookup("a1b2c3d4")
+	obs, err := p.Store.Lookup(testToken)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -465,14 +485,20 @@ func TestCaseRandomizationIsObserved(t *testing.T) {
 		t.Fatalf("got %d observations, want 1", len(obs))
 	}
 	if !obs[0].CaseRandomized {
-		t.Error("mixed-case query was not recorded as 0x20 randomized")
+		t.Error("mixed-case query was not recorded as 0x20 randomised")
 	}
 
 	p2 := newTestProbe(t, false)
 	query(t, p2, "a1b2c3d4."+testZone, dns.TypeTXT, false)
-	obs2, _ := p2.Store.Lookup("a1b2c3d4")
+	obs2, err := p2.Store.Lookup(testToken)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if len(obs2) != 1 {
+		t.Fatalf("got %d observations, want 1", len(obs2))
+	}
 	if obs2[0].CaseRandomized {
-		t.Error("all-lowercase query was wrongly recorded as randomized")
+		t.Error("all-lowercase query was wrongly recorded as randomised")
 	}
 }
 
@@ -503,17 +529,12 @@ func nsecFrom(t *testing.T, m *dns.Msg) (*dns.NSEC, bool) {
 }
 
 func bitmapHas(n *dns.NSEC, t uint16) bool {
-	for _, b := range n.TypeBitMap {
-		if b == t {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(n.TypeBitMap, t)
 }
 
 // TestCompactDenialSetsNXNAME covers the RFC 9824 path. The NXNAME bit is the
 // entire mechanism: it is what lets a resolver turn a provable NODATA into
-// NXDOMAIN for its own client, which is the thing a synthesized zone cannot do
+// NXDOMAIN for its own client, which is the thing a synthesised zone cannot do
 // with a traditional NSEC chain.
 func TestCompactDenialSetsNXNAME(t *testing.T) {
 	p := newTestProbe(t, true)

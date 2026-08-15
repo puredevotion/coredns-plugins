@@ -47,23 +47,30 @@ import (
 // and a wrong one produces bytes a resolver may happily forward while no client can
 // parse them, which is the failure this file's tests exist to catch.
 const (
-	// echVersion is draft-ietf-tls-esni's final codepoint, the one shipping
+	// Uint16Len is the width, in bytes, of a 16-bit length or version field on
+	// the wire — every length prefix in this encoding is one of these.
+	uint16Len = 2
+	// EchConfigHeaderLen is version(2) + length(2): the minimum an ECHConfig
+	// needs before its contents can even be addressed.
+	echConfigHeaderLen = 2 * uint16Len
+
+	// EchVersion is draft-ietf-tls-esni's final codepoint, the one shipping
 	// browsers use.
 	echVersion uint16 = 0xfe0d
 
-	// echKEMX25519 is DHKEM(X25519, HKDF-SHA256) from RFC 9180's registry.
+	// EchKEMX25519 is DHKEM(X25519, HKDF-SHA256) from RFC 9180's registry.
 	echKEMX25519 uint16 = 0x0020
 
-	// echKDFHKDFSHA256 and echAEADAES128GCM are the mandatory-to-implement pair,
+	// EchKDFHKDFSHA256 and echAEADAES128GCM are the mandatory-to-implement pair,
 	// so a client that supports ECH at all supports this suite.
 	echKDFHKDFSHA256 uint16 = 0x0001
 	echAEADAES128GCM uint16 = 0x0001
 
-	// x25519PubKeyLen is fixed by the curve; a config carrying any other length is
+	// X25519PubKeyLen is fixed by the curve; a config carrying any other length is
 	// malformed rather than merely unusual.
 	x25519PubKeyLen = 32
 
-	// echMaxNameLength is the padding hint. 0 means "no guidance", which is
+	// EchMaxNameLength is the padding hint. 0 means "no guidance", which is
 	// honest here: this config is never used to encrypt anything, so inventing a
 	// padding length would imply a deployment that does not exist.
 	echMaxNameLength uint8 = 0
@@ -94,25 +101,12 @@ func u8(n int, what string) (byte, error) {
 	return byte(n), nil
 }
 
-// BuildECHConfigList encodes a single-config ECHConfigList.
+// buildHPKEKeyConfig encodes the HpkeKeyConfig: config_id, kem_id, the public
+// key with its length prefix, and the one mandatory-to-implement cipher suite.
 //
-// publicName is the SNI a client would send on the OUTER ClientHello. It must be a
-// name the visitor can plausibly reach, so the zone apex is the sensible choice —
-// an outer SNI naming something unroutable turns a privacy feature into a
-// connection failure.
-func BuildECHConfigList(configID byte, publicKey []byte, publicName string) ([]byte, error) {
-	if len(publicKey) != x25519PubKeyLen {
-		return nil, fmt.Errorf("%w, got %d", ErrECHPublicKeyLen, len(publicKey))
-	}
-	if len(publicName) > math.MaxUint8 {
-		// Checked here as well as in u8 below, for the better message: a
-		// too-long name is a caller mistake worth naming, not just a width
-		// failure. Silently truncating it would produce a config pointing
-		// somewhere else entirely.
-		return nil, fmt.Errorf("probe: ECH public_name %q exceeds %d bytes", publicName, math.MaxUint8)
-	}
-
-	// HpkeKeyConfig
+// Split out of BuildECHConfigList purely to keep that function's length down;
+// the wire format and every length check are unchanged.
+func buildHPKEKeyConfig(configID byte, publicKey []byte) ([]byte, error) {
 	keyLen, err := u16(len(publicKey), "public key")
 	if err != nil {
 		return nil, err
@@ -133,19 +127,44 @@ func BuildECHConfigList(configID byte, publicKey []byte, publicName string) ([]b
 	}
 	key = binary.BigEndian.AppendUint16(key, suitesLen)
 	key = append(key, suites...)
+	return key, nil
+}
 
-	// ECHConfig contents
+// BuildECHConfigList encodes a single-config ECHConfigList.
+//
+// PublicName is the SNI a client would send on the OUTER ClientHello. It must be a
+// name the visitor can plausibly reach, so the zone apex is the sensible choice —
+// an outer SNI naming something unroutable turns a privacy feature into a
+// connection failure.
+func BuildECHConfigList(configID byte, publicKey []byte, publicName string) ([]byte, error) {
+	if len(publicKey) != x25519PubKeyLen {
+		return nil, fmt.Errorf("%w, got %d", ErrECHPublicKeyLen, len(publicKey))
+	}
+	if len(publicName) > math.MaxUint8 {
+		// Checked here as well as in u8 below, for the better message: a
+		// too-long name is a caller mistake worth naming, not just a width
+		// failure. Silently truncating it would produce a config pointing
+		// somewhere else entirely.
+		return nil, fmt.Errorf("probe: ECH public_name %q exceeds %d bytes", publicName, math.MaxUint8)
+	}
+
+	// HpkeKeyConfig.
+	key, err := buildHPKEKeyConfig(configID, publicKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// ECHConfig contents.
 	nameLen, err := u8(len(publicName), "public_name")
 	if err != nil {
 		return nil, err
 	}
 	contents := key
-	contents = append(contents, echMaxNameLength)
-	contents = append(contents, nameLen)
+	contents = append(contents, echMaxNameLength, nameLen)
 	contents = append(contents, publicName...)
-	contents = binary.BigEndian.AppendUint16(contents, 0) // no extensions
+	contents = binary.BigEndian.AppendUint16(contents, 0) // No extensions.
 
-	// ECHConfig
+	// ECHConfig.
 	contentsLen, err := u16(len(contents), "config contents")
 	if err != nil {
 		return nil, err
@@ -167,43 +186,17 @@ func BuildECHConfigList(configID byte, publicKey []byte, publicName string) ([]b
 	return list, nil
 }
 
-// ParseECHConfigList does the minimum needed to verify our own encoding and to
-// check that a config read back from the network is intact.
+// parseHPKEKeyConfig parses the HpkeKeyConfig and the cipher suite list that
+// follows it off the front of c, returning configID, the public key, and the
+// remaining bytes for the caller to continue parsing.
 //
-// Not a general ECH parser: it validates structure and returns the fields this
-// zone compares, which is enough to distinguish "arrived intact" from "something
-// on the path rewrote it" — the actual measurement.
-func ParseECHConfigList(b []byte) (configID byte, publicKey []byte, publicName string, err error) {
-	fail := func(what string) (byte, []byte, string, error) {
-		return 0, nil, "", fmt.Errorf("probe: malformed ECHConfigList: %s", what)
+// Split out of ParseECHConfigList purely to keep that function's length down;
+// every check and error message is unchanged.
+func parseHPKEKeyConfig(c []byte) (configID byte, publicKey, rest []byte, err error) {
+	fail := func(what string) (byte, []byte, []byte, error) {
+		return 0, nil, nil, fmt.Errorf("probe: malformed ECHConfigList: %s", what)
 	}
 
-	if len(b) < 2 {
-		return fail("shorter than its own length prefix")
-	}
-	outer := int(binary.BigEndian.Uint16(b[0:2]))
-	b = b[2:]
-	if outer != len(b) {
-		// A mismatch here is the single most likely symptom of truncation on the
-		// path, so it is reported distinctly rather than as generic corruption.
-		return fail(fmt.Sprintf("list length %d but %d bytes follow", outer, len(b)))
-	}
-	if len(b) < 4 {
-		return fail("no room for an ECHConfig header")
-	}
-
-	version := binary.BigEndian.Uint16(b[0:2])
-	if version != echVersion {
-		return fail(fmt.Sprintf("unexpected version %#04x", version))
-	}
-	clen := int(binary.BigEndian.Uint16(b[2:4]))
-	b = b[4:]
-	if clen > len(b) {
-		return fail("config length exceeds available bytes")
-	}
-	c := b[:clen]
-
-	// HpkeKeyConfig
 	if len(c) < 1+2+2 {
 		return fail("truncated HpkeKeyConfig")
 	}
@@ -220,7 +213,7 @@ func ParseECHConfigList(b []byte) (configID byte, publicKey []byte, publicName s
 	publicKey = c[:klen]
 	c = c[klen:]
 
-	if len(c) < 2 {
+	if len(c) < uint16Len {
 		return fail("truncated cipher suite list")
 	}
 	slen := int(binary.BigEndian.Uint16(c[0:2]))
@@ -228,12 +221,55 @@ func ParseECHConfigList(b []byte) (configID byte, publicKey []byte, publicName s
 	if slen > len(c) || slen%4 != 0 {
 		return fail("cipher suite list length invalid")
 	}
-	c = c[slen:]
+	return configID, publicKey, c[slen:], nil
+}
 
-	if len(c) < 2 {
+// ParseECHConfigList does the minimum needed to verify our own encoding and to
+// check that a config read back from the network is intact.
+//
+// Not a general ECH parser: it validates structure and returns the fields this
+// zone compares, which is enough to distinguish "arrived intact" from "something
+// on the path rewrote it" — the actual measurement.
+func ParseECHConfigList(b []byte) (configID byte, publicKey []byte, publicName string, err error) {
+	fail := func(what string) (byte, []byte, string, error) {
+		return 0, nil, "", fmt.Errorf("probe: malformed ECHConfigList: %s", what)
+	}
+
+	if len(b) < uint16Len {
+		return fail("shorter than its own length prefix")
+	}
+	outer := int(binary.BigEndian.Uint16(b[0:2]))
+	b = b[2:]
+	if outer != len(b) {
+		// A mismatch here is the single most likely symptom of truncation on the
+		// path, so it is reported distinctly rather than as generic corruption.
+		return fail(fmt.Sprintf("list length %d but %d bytes follow", outer, len(b)))
+	}
+	if len(b) < echConfigHeaderLen {
+		return fail("no room for an ECHConfig header")
+	}
+
+	version := binary.BigEndian.Uint16(b[0:2])
+	if version != echVersion {
+		return fail(fmt.Sprintf("unexpected version %#04x", version))
+	}
+	clen := int(binary.BigEndian.Uint16(b[2:4]))
+	b = b[4:]
+	if clen > len(b) {
+		return fail("config length exceeds available bytes")
+	}
+	c := b[:clen]
+
+	// HpkeKeyConfig.
+	configID, publicKey, c, hpkeErr := parseHPKEKeyConfig(c)
+	if hpkeErr != nil {
+		return 0, nil, "", hpkeErr
+	}
+
+	if len(c) < uint16Len {
 		return fail("truncated public_name")
 	}
-	// maximum_name_length, then the name.
+	// Maximum_name_length, then the name.
 	c = c[1:]
 	nlen := int(c[0])
 	c = c[1:]

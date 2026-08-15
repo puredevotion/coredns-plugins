@@ -16,14 +16,24 @@ const (
 	keyDohPath uint16 = 7
 )
 
+// uint16MaxLen is the max byte length of anything stored in a 16-bit length
+// prefix (RFC 9460 §2.2).
+const uint16MaxLen = 0xffff
+
+// uint16Size is the wire size of a 16-bit field.
+const uint16Size = 2
+
+// hdrSize is the wire size of a SvcParam's (key, length) header.
+const hdrSize = 2 * uint16Size
+
 // Params is a high-level description of the SvcParams to encode.
 type Params struct {
-	ALPN    []string // e.g. {"dot","doq","h2","h3"}
-	Port    uint16   // 0 = omit
-	DohPath string   // e.g. "/dns-query{?dns}"; "" = omit
 	// Forbidden carries keys that must be rejected (ipv4hint/ipv6hint are
 	// forbidden in the RFC 9463 option — addresses go in the option itself).
 	Forbidden map[string]string
+	DohPath   string   // E.g. "/dns-query{?dns}"; "" = omit.
+	ALPN      []string // E.g. {"dot","doq","h2","h3"}.
+	Port      uint16   // 0 = omit.
 }
 
 // Encode returns the RFC 9460 §2.2 wire encoding of params (keys ascending).
@@ -36,8 +46,8 @@ func Encode(p Params) ([]byte, error) {
 	}
 
 	type kv struct {
-		key uint16
 		val []byte
+		key uint16
 	}
 	var params []kv
 
@@ -46,31 +56,31 @@ func Encode(p Params) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		params = append(params, kv{keyALPN, val})
+		params = append(params, kv{val, keyALPN})
 	}
 	if p.Port != 0 {
-		v := make([]byte, 2)
+		v := make([]byte, uint16Size)
 		binary.BigEndian.PutUint16(v, p.Port)
-		params = append(params, kv{keyPort, v})
+		params = append(params, kv{v, keyPort})
 	}
 	if p.DohPath != "" {
-		if len(p.DohPath) > 0xffff {
+		if len(p.DohPath) > uint16MaxLen {
 			return nil, fmt.Errorf("svcparams: dohpath too long")
 		}
-		params = append(params, kv{keyDohPath, []byte(p.DohPath)})
+		params = append(params, kv{[]byte(p.DohPath), keyDohPath})
 	}
 
 	sort.Slice(params, func(i, j int) bool { return params[i].key < params[j].key })
 
-	var out []byte
+	out := make([]byte, 0)
 	for _, p := range params {
 		valLen, err := checkedUint16(len(p.val), fmt.Sprintf("svcparam key %d value", p.key))
 		if err != nil {
 			return nil, err
 		}
-		hdr := make([]byte, 4)
-		binary.BigEndian.PutUint16(hdr[0:2], p.key)
-		binary.BigEndian.PutUint16(hdr[2:4], valLen)
+		hdr := make([]byte, hdrSize)
+		binary.BigEndian.PutUint16(hdr[0:uint16Size], p.key)
+		binary.BigEndian.PutUint16(hdr[uint16Size:hdrSize], valLen)
 		out = append(out, hdr...)
 		out = append(out, p.val...)
 	}
@@ -102,7 +112,7 @@ func checkedByte(n int, what string) (byte, error) {
 func encodeALPN(ids []string) ([]byte, error) {
 	var out []byte
 	for _, id := range ids {
-		if len(id) == 0 {
+		if id == "" {
 			return nil, fmt.Errorf("svcparams: empty alpn id")
 		}
 		idLen, err := checkedByte(len(id), fmt.Sprintf("alpn id %q", id))

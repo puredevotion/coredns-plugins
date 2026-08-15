@@ -2,12 +2,21 @@ package probe
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"net"
 	"strings"
 	"testing"
+)
+
+// testPublicName and testOtherName are unqualified names (no trailing dot)
+// used as ECH public_name / SNI values across these tests, distinct from
+// testZone which is fully qualified.
+const (
+	testPublicName = "check.example.com"
+	testOtherName  = "example.com"
 )
 
 func testECHKey() []byte {
@@ -23,7 +32,7 @@ func testECHKey() []byte {
 // below exists.
 func TestECHConfigListRoundTrip(t *testing.T) {
 	key := testECHKey()
-	list, err := BuildECHConfigList(0x2a, key, "check.example.com")
+	list, err := BuildECHConfigList(0x2a, key, testPublicName)
 	if err != nil {
 		t.Fatalf("BuildECHConfigList: %v", err)
 	}
@@ -38,7 +47,7 @@ func TestECHConfigListRoundTrip(t *testing.T) {
 	if !bytes.Equal(gotKey, key) {
 		t.Errorf("public key round trip mismatch")
 	}
-	if name != "check.example.com" {
+	if name != testPublicName {
 		t.Errorf("publicName = %q", name)
 	}
 }
@@ -48,7 +57,7 @@ func TestECHConfigListRoundTrip(t *testing.T) {
 // bytes a resolver may forward happily while no client can parse them — the
 // failure would look like a successful measurement.
 //
-// crypto/tls is the real consumer: it parses ECHConfigList when a client is
+// Crypto/tls is the real consumer: it parses ECHConfigList when a client is
 // configured with one. A malformed list fails at parse time with a distinctive
 // error, before any network activity, which is what this detects.
 func TestECHConfigListAcceptedByCryptoTLS(t *testing.T) {
@@ -64,18 +73,31 @@ func TestECHConfigListAcceptedByCryptoTLS(t *testing.T) {
 	// passes while validating nothing — worth stating, because that was the first
 	// version of this test.
 	c1, c2 := net.Pipe()
-	defer func() { _ = c1.Close() }()
-	defer func() { _ = c2.Close() }()
+	defer func() {
+		if closeErr := c1.Close(); closeErr != nil {
+			t.Logf("c1.Close: %v", closeErr)
+		}
+	}()
+	defer func() {
+		if closeErr := c2.Close(); closeErr != nil {
+			t.Logf("c2.Close: %v", closeErr)
+		}
+	}()
 
 	var hello []byte
 	read := make(chan struct{})
 	go func() {
 		defer close(read)
 		buf := make([]byte, 16384)
-		n, _ := c2.Read(buf)
+		n, readErr := c2.Read(buf)
+		if readErr != nil {
+			t.Logf("c2.Read: %v", readErr)
+		}
 		hello = buf[:n]
 		// Drop the connection rather than answering: we only need the ClientHello.
-		_ = c2.Close()
+		if closeErr := c2.Close(); closeErr != nil {
+			t.Logf("c2.Close: %v", closeErr)
+		}
 	}()
 
 	conn := tls.Client(c1, &tls.Config{
@@ -83,14 +105,14 @@ func TestECHConfigListAcceptedByCryptoTLS(t *testing.T) {
 		EncryptedClientHelloConfigList: list,
 		MinVersion:                     tls.VersionTLS13,
 	})
-	err = conn.Handshake()
+	err = conn.HandshakeContext(context.Background())
 	<-read
 
 	if err == nil {
 		t.Fatal("handshake unexpectedly succeeded")
 	}
 
-	// crypto/tls reports a bad list as an ECH/config parse failure rather than an
+	// Crypto/tls reports a bad list as an ECH/config parse failure rather than an
 	// I/O error. Anything naming the config is a real finding about our encoding.
 	msg := strings.ToLower(err.Error())
 	for _, bad := range []string{"ech", "encryptedclienthello", "config list", "invalid"} {
@@ -116,13 +138,13 @@ func TestECHConfigListAcceptedByCryptoTLS(t *testing.T) {
 func TestECHConfigListRejectsBadInput(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		key  []byte
 		pub  string
+		key  []byte
 	}{
-		{"short key", make([]byte, 31), "example.com"},
-		{"long key", make([]byte, 33), "example.com"},
-		{"nil key", nil, "example.com"},
-		{"public_name too long", testECHKey(), strings.Repeat("a", 256)},
+		{name: "short key", key: make([]byte, 31), pub: testOtherName},
+		{name: "long key", key: make([]byte, 33), pub: testOtherName},
+		{name: "nil key", key: nil, pub: testOtherName},
+		{name: "public_name too long", key: testECHKey(), pub: strings.Repeat("a", 256)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := BuildECHConfigList(1, tc.key, tc.pub); err == nil {
@@ -139,7 +161,7 @@ func TestECHConfigListRejectsBadInput(t *testing.T) {
 // TestParseECHConfigListDetectsTampering is the measurement's whole point: a config
 // that arrives altered must be detectable as altered, not silently accepted.
 func TestParseECHConfigListDetectsTampering(t *testing.T) {
-	good, err := BuildECHConfigList(0x05, testECHKey(), "check.example.com")
+	good, err := BuildECHConfigList(0x05, testECHKey(), testPublicName)
 	if err != nil {
 		t.Fatalf("BuildECHConfigList: %v", err)
 	}
@@ -156,7 +178,7 @@ func TestParseECHConfigListDetectsTampering(t *testing.T) {
 
 	t.Run("version rewritten", func(t *testing.T) {
 		bad := bytes.Clone(good)
-		binary.BigEndian.PutUint16(bad[2:4], 0xfe0a) // an older draft codepoint
+		binary.BigEndian.PutUint16(bad[2:4], 0xfe0a) // An older draft codepoint.
 		if _, _, _, err := ParseECHConfigList(bad); err == nil {
 			t.Error("rewritten version parsed as valid")
 		}
@@ -164,7 +186,7 @@ func TestParseECHConfigListDetectsTampering(t *testing.T) {
 
 	t.Run("KEM rewritten", func(t *testing.T) {
 		bad := bytes.Clone(good)
-		// version(2) + len(2) + configID(1) -> KEM at offset 2+2+2+1 = 7
+		// Version(2) + len(2) + configID(1) -> KEM at offset 2+2+2+1 = 7.
 		binary.BigEndian.PutUint16(bad[7:9], 0x0010)
 		if _, _, _, err := ParseECHConfigList(bad); err == nil {
 			t.Error("rewritten KEM parsed as valid")
@@ -184,11 +206,11 @@ func TestParseECHConfigListDetectsTampering(t *testing.T) {
 // bytes that arrived. That comparison is only possible if the same inputs always
 // produce the same output, so this pins it rather than leaving it to luck.
 func TestECHConfigListIsDeterministic(t *testing.T) {
-	a, err := BuildECHConfigList(9, testECHKey(), "check.example.com")
+	a, err := BuildECHConfigList(9, testECHKey(), testPublicName)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := BuildECHConfigList(9, testECHKey(), "check.example.com")
+	b, err := BuildECHConfigList(9, testECHKey(), testPublicName)
 	if err != nil {
 		t.Fatal(err)
 	}

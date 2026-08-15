@@ -32,7 +32,7 @@ func newOpt() *dns.OPT {
 func observeWith(t *testing.T, m *dns.Msg) Observation {
 	t.Helper()
 	return Observe(
-		Query{Token: "deadbeef"},
+		Query{Token: testToken2},
 		"deadbeef.check.example.com.",
 		netip.MustParseAddr("192.0.2.53"),
 		TransportUDP,
@@ -186,7 +186,10 @@ func TestECSMalformedDoesNotPanicOrLie(t *testing.T) {
 // what a bare `dig` user sees. It has to preserve the declined/leaked
 // distinction too, not just the JSON.
 func TestSummaryCarriesAllThreeECSStates(t *testing.T) {
-	mk := func(o *dns.OPT) string { return observeWith(t, ednsQuery(o)).Summary() }
+	mk := func(o *dns.OPT) string {
+		obs := observeWith(t, ednsQuery(o))
+		return obs.Summary()
+	}
 
 	absent := mk(newOpt())
 	if !strings.Contains(absent, "ecs=0 ecs_src=0") {
@@ -224,15 +227,17 @@ func TestSummaryCarriesAllThreeECSStates(t *testing.T) {
 // for the two new flags.
 func TestSummaryCarriesFlagBits(t *testing.T) {
 	o := newOpt()
-	o.Hdr.Ttl |= 1<<14 | 1<<13 // CO + DE
-	s := observeWith(t, ednsQuery(o)).Summary()
+	o.Hdr.Ttl |= 1<<14 | 1<<13 // CO + DE.
+	obs := observeWith(t, ednsQuery(o))
+	s := obs.Summary()
 	for _, want := range []string{"co=1", "deleg=1"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("summary lacks %q: %s", want, s)
 		}
 	}
 
-	s = observeWith(t, ednsQuery(newOpt())).Summary()
+	obs = observeWith(t, ednsQuery(newOpt()))
+	s = obs.Summary()
 	for _, want := range []string{"co=0", "deleg=0"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("summary lacks %q: %s", want, s)

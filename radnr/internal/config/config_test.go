@@ -1,3 +1,4 @@
+//nolint:misspell // ADN throughout this file: RFC 9463 Authentication Domain Name, not a typo for AND
 package config
 
 import "testing"
@@ -49,18 +50,18 @@ func TestValidate_SafetyInvariants(t *testing.T) {
 
 func TestValidate_FieldErrors(t *testing.T) {
 	cases := []struct {
-		name string
 		mut  func(*Config)
+		name string
 	}{
-		{"empty interface", func(c *Config) { c.Interface = "" }},
-		{"empty ADN", func(c *Config) { c.ADN = "" }},
-		{"bad ADN", func(c *Config) { c.ADN = "no spaces allowed!" }},
-		{"no addrs", func(c *Config) { c.Addrs = nil }},
-		{"ipv4 addr", func(c *Config) { c.Addrs = []string{"192.0.2.1"} }},
-		{"malformed addr", func(c *Config) { c.Addrs = []string{"not-an-ip"} }},
-		{"bad unicast target", func(c *Config) { c.UnicastTarget = "nope" }},
-		{"ipv4 unicast target", func(c *Config) { c.UnicastTarget = "192.0.2.2" }},
-		{"empty alpn id", func(c *Config) { c.ALPN = []string{""} }},
+		{func(c *Config) { c.Interface = "" }, "empty interface"},
+		{func(c *Config) { c.ADN = "" }, "empty ADN"},
+		{func(c *Config) { c.ADN = "no spaces allowed!" }, "bad ADN"},
+		{func(c *Config) { c.Addrs = nil }, "no addrs"},
+		{func(c *Config) { c.Addrs = []string{"192.0.2.1"} }, "ipv4 addr"},
+		{func(c *Config) { c.Addrs = []string{"not-an-ip"} }, "malformed addr"},
+		{func(c *Config) { c.UnicastTarget = "nope" }, "bad unicast target"},
+		{func(c *Config) { c.UnicastTarget = "192.0.2.2" }, "ipv4 unicast target"},
+		{func(c *Config) { c.ALPN = []string{""} }, "empty alpn id"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -13,25 +13,25 @@ func TestParseDNSSDLevels(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		sub   string
-		kind  dnssdKind
 		token string
+		kind  dnssdKind
 	}{
-		{"browse", "_services._dns-sd._udp.deadbeef", dnssdBrowse, "deadbeef"},
-		{"enumerate", "_probe._tcp.deadbeef", dnssdEnumerate, "deadbeef"},
-		{"instance", "probe._probe._tcp.deadbeef", dnssdInstanceName, "deadbeef"},
+		{name: "browse", sub: "_services._dns-sd._udp.deadbeef", kind: dnssdBrowse, token: testToken2},
+		{name: "enumerate", sub: "_probe._tcp.deadbeef", kind: dnssdEnumerate, token: testToken2},
+		{name: "instance", sub: "probe._probe._tcp.deadbeef", kind: dnssdInstanceName, token: testToken2},
 		// A resolver doing 0x20 randomization sends these mixed-case; rejecting
 		// them would drop precisely the most careful clients.
-		{"mixed case", "_SERVICES._DNS-SD._UDP.deadbeef", dnssdBrowse, "deadbeef"},
+		{name: "mixed case", sub: "_SERVICES._DNS-SD._UDP.deadbeef", kind: dnssdBrowse, token: testToken2},
 
-		{"bare token is not DNS-SD", "deadbeef", dnssdNone, ""},
-		{"modifier query is not DNS-SD", "_badsig.deadbeef", dnssdNone, ""},
-		{"wrong proto", "_probe._udp.deadbeef", dnssdNone, ""},
-		{"unknown service type", "_other._tcp.deadbeef", dnssdNone, ""},
-		{"meta with wrong proto", "_services._dns-sd._tcp.deadbeef", dnssdNone, ""},
-		{"no token", "_probe._tcp", dnssdNone, ""},
-		{"invalid token", "_probe._tcp.not-hex", dnssdNone, ""},
-		{"too deep", "x.probe._probe._tcp.deadbeef", dnssdNone, ""},
-		{"empty", "", dnssdNone, ""},
+		{name: "bare token is not DNS-SD", sub: testToken2, kind: dnssdNone, token: ""},
+		{name: "modifier query is not DNS-SD", sub: "_badsig.deadbeef", kind: dnssdNone, token: ""},
+		{name: "wrong proto", sub: "_probe._udp.deadbeef", kind: dnssdNone, token: ""},
+		{name: "unknown service type", sub: "_other._tcp.deadbeef", kind: dnssdNone, token: ""},
+		{name: "meta with wrong proto", sub: "_services._dns-sd._tcp.deadbeef", kind: dnssdNone, token: ""},
+		{name: "no token", sub: "_probe._tcp", kind: dnssdNone, token: ""},
+		{name: "invalid token", sub: "_probe._tcp.not-hex", kind: dnssdNone, token: ""},
+		{name: "too deep", sub: "x.probe._probe._tcp.deadbeef", kind: dnssdNone, token: ""},
+		{name: "empty", sub: "", kind: dnssdNone, token: ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			kind, token := parseDNSSD(tc.sub)
@@ -50,7 +50,7 @@ func TestParseDNSSDLevels(t *testing.T) {
 // no later visitor would ever be observed — implemented, measuring nothing.
 func TestDNSSDNamesAreTokenScoped(t *testing.T) {
 	p := newTestProbe(t, false)
-	b1, e1, i1 := p.dnssdNames("deadbeef")
+	b1, e1, i1 := p.dnssdNames(testToken2)
 	b2, e2, i2 := p.dnssdNames("cafebabe")
 
 	for _, pair := range [][2]string{{b1, b2}, {e1, e2}, {i1, i2}} {
@@ -59,7 +59,7 @@ func TestDNSSDNamesAreTokenScoped(t *testing.T) {
 		}
 	}
 	for _, n := range []string{b1, e1, i1} {
-		if !strings.Contains(n, "deadbeef") {
+		if !strings.Contains(n, testToken2) {
 			t.Errorf("%q does not carry the token, so it is cacheable across visitors", n)
 		}
 		if !strings.HasSuffix(n, p.Zone) {
@@ -72,7 +72,7 @@ func TestDNSSDNamesAreTokenScoped(t *testing.T) {
 // behaviour a client performs and the thing being measured.
 func TestDNSSDBrowseChainWalks(t *testing.T) {
 	p := newTestProbe(t, false)
-	browse, enumerate, instance := p.dnssdNames("deadbeef")
+	browse, enumerate, instance := p.dnssdNames(testToken2)
 
 	// Step 1: browse -> the service type.
 	m := query(t, p, browse, dns.TypePTR, true)
@@ -125,7 +125,7 @@ func TestDNSSDBrowseChainWalks(t *testing.T) {
 // type mistake; the name exists, so NXDOMAIN would be wrong.
 func TestDNSSDWrongTypeIsNODATA(t *testing.T) {
 	p := newTestProbe(t, false)
-	_, enumerate, _ := p.dnssdNames("deadbeef")
+	_, enumerate, _ := p.dnssdNames(testToken2)
 
 	m := query(t, p, enumerate, dns.TypeSRV, true)
 	if m.Rcode != dns.RcodeSuccess {
@@ -143,13 +143,13 @@ func TestDNSSDWrongTypeIsNODATA(t *testing.T) {
 // level must be attributable to the same visitor.
 func TestDNSSDIsObserved(t *testing.T) {
 	p := newTestProbe(t, false)
-	browse, enumerate, instance := p.dnssdNames("deadbeef")
+	browse, enumerate, instance := p.dnssdNames(testToken2)
 
 	query(t, p, browse, dns.TypePTR, true)
 	query(t, p, enumerate, dns.TypePTR, true)
 	query(t, p, instance, dns.TypeSRV, true)
 
-	obs, err := p.Store.Lookup("deadbeef")
+	obs, err := p.Store.Lookup(testToken2)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestDNSSDIsObserved(t *testing.T) {
 // malformed name or an over-long TXT string would surface.
 func TestDNSSDPacksOnTheWire(t *testing.T) {
 	p := newTestProbe(t, false)
-	_, enumerate, _ := p.dnssdNames("deadbeef")
+	_, enumerate, _ := p.dnssdNames(testToken2)
 
 	m := query(t, p, enumerate, dns.TypePTR, true)
 	wire, err := m.Pack()

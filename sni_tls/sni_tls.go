@@ -1,4 +1,4 @@
-package sni_tls
+package snitls
 
 import (
 	"crypto/tls"
@@ -74,7 +74,7 @@ func wildcardOf(name string) (string, bool) {
 
 // loadCert loads a cert/key pair via tls.LoadX509KeyPair and returns it
 // alongside its SAN DNS names (lowercased, matching TLS SNI's case-insensitive
-// comparison per RFC 6066 §3). tls.Certificate.Leaf is NOT populated by
+// comparison per RFC 6066 §3); tls.Certificate.Leaf is NOT populated by
 // LoadX509KeyPair (see design doc step 1), so the leaf must be parsed
 // explicitly via x509.ParseCertificate to read its DNSNames.
 func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
@@ -102,7 +102,7 @@ func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
 // buildCertStore loads each (cert, key) pair in order and returns a certStore
 // keyed by every loaded cert's SAN DNS names. The first SUCCESSFULLY LOADED
 // pair's cert becomes the fallback for absent/unmatched SNI, matching the
-// stock tls plugin's SNI-agnostic single-cert behavior for those cases (see
+// stock tls plugin's SNI-agnostic single-cert behaviour for those cases (see
 // design doc step 2) — unless strict is set, in which case no fallback is
 // installed at all and unmatched/absent SNI hard-fails in GetCertificate.
 //
@@ -115,7 +115,7 @@ func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
 // not an expected rollout gap, and silently skipping a broken cert would mask
 // a real misconfiguration. If ALL configured pairs are missing (and at least
 // one was configured), that's fatal too — a Corefile listing certs that never
-// materialize is worth failing loudly on, unlike a genuinely empty
+// materialise is worth failing loudly on, unlike a genuinely empty
 // configuration (setup() already rejects zero pairs before calling this; an
 // empty slice here is a valid input with no fallback, not an error).
 func buildCertStore(pairs [][2]string, strict bool) (*certStore, error) {

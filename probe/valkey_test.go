@@ -60,7 +60,7 @@ func sampleObservation(token string) Observation {
 		ResolverPrefix: netip.MustParsePrefix("192.0.2.0/24"),
 		Transport:      TransportUDP,
 		Qtype:          "TXT",
-		Mods:           "badsig",
+		Mods:           modLabelBadSig,
 		DO:             true,
 		EDNS:           true,
 		UDPSize:        1232,
@@ -74,7 +74,7 @@ func TestValkeyRoundTrip(t *testing.T) {
 	token := uniqueToken(t)
 
 	want := sampleObservation(token)
-	got, err := s.Record(want)
+	got, err := s.Record(&want)
 	if err != nil {
 		t.Fatalf("Record: %v", err)
 	}
@@ -119,7 +119,8 @@ func TestValkeySeenIncrements(t *testing.T) {
 	token := uniqueToken(t)
 
 	for i := 1; i <= 3; i++ {
-		got, err := s.Record(sampleObservation(token))
+		obs := sampleObservation(token)
+		got, err := s.Record(&obs)
 		if err != nil {
 			t.Fatalf("Record %d: %v", i, err)
 		}
@@ -142,13 +143,14 @@ func TestValkeySeenIncrements(t *testing.T) {
 // limit, but "we saw this 20 times" must stay reportable past the cap, because
 // that is itself the interesting finding.
 func TestValkeyCapKeepsCountTruthful(t *testing.T) {
-	const cap = 3
-	s := valkeyStoreForTest(t, cap)
+	const wantCap = 3
+	s := valkeyStoreForTest(t, wantCap)
 	token := uniqueToken(t)
 
 	const total = 10
-	for i := 0; i < total; i++ {
-		if _, err := s.Record(sampleObservation(token)); err != nil {
+	for i := range total {
+		obs := sampleObservation(token)
+		if _, err := s.Record(&obs); err != nil {
 			t.Fatalf("Record %d: %v", i, err)
 		}
 	}
@@ -157,8 +159,8 @@ func TestValkeyCapKeepsCountTruthful(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
-	if len(back) != cap {
-		t.Errorf("retained %d observations, want the cap of %d", len(back), cap)
+	if len(back) != wantCap {
+		t.Errorf("retained %d observations, want the cap of %d", len(back), wantCap)
 	}
 
 	n, err := s.SeenCount(token)
@@ -210,7 +212,7 @@ func TestValkeyReportRoundTrip(t *testing.T) {
 		ReporterPrefix: netip.MustParsePrefix("192.0.2.0/24"),
 		Transport:      TransportUDP,
 	}
-	if err := s.RecordReport(want); err != nil {
+	if err := s.RecordReport(&want); err != nil {
 		t.Fatalf("RecordReport: %v", err)
 	}
 
@@ -243,8 +245,8 @@ func TestValkeyReportCapKeepsNewest(t *testing.T) {
 	token := uniqueToken(t)
 
 	const total = limit + 4
-	for i := uint16(0); i < total; i++ {
-		if err := s.RecordReport(ReportRecord{Token: token, EDE: i}); err != nil {
+	for i := range uint16(total) {
+		if err := s.RecordReport(&ReportRecord{Token: token, EDE: i}); err != nil {
 			t.Fatalf("RecordReport %d: %v", i, err)
 		}
 	}
@@ -270,10 +272,10 @@ func TestValkeyUnattributedReportsAreSeparate(t *testing.T) {
 	s := valkeyStoreForTest(t, 8)
 	token := uniqueToken(t)
 
-	if err := s.RecordReport(ReportRecord{Token: token, EDE: 6}); err != nil {
+	if err := s.RecordReport(&ReportRecord{Token: token, EDE: 6}); err != nil {
 		t.Fatalf("RecordReport attributed: %v", err)
 	}
-	if err := s.RecordReport(ReportRecord{EDE: 10}); err != nil {
+	if err := s.RecordReport(&ReportRecord{EDE: 10}); err != nil {
 		t.Fatalf("RecordReport unattributed: %v", err)
 	}
 
@@ -290,10 +292,10 @@ func TestValkeyUnattributedReportsAreSeparate(t *testing.T) {
 // prefix with every token, so the only thing keeping them apart is that a token
 // is lowercase hex and "unattributed" is not.
 func TestReportKeyNamespacing(t *testing.T) {
-	if reportKey("") == reportKey("deadbeef") {
+	if reportKey("") == reportKey(testToken2) {
 		t.Fatal("the unattributed key collides with a real token's key")
 	}
-	for _, token := range []string{"deadbeef", "0123456789abcdef"} {
+	for _, token := range []string{testToken2, "0123456789abcdef"} {
 		if !parseTokenOK(token) {
 			t.Fatalf("test setup: %q is not a valid token", token)
 		}
