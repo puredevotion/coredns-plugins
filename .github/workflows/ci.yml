@@ -189,7 +189,7 @@ jobs:
           # (`golangci-lint migrate`) alongside this bump -- the two must
           # move together, a v2 binary against a stale v1-format config (or
           # vice versa) fails to load.
-          version: v2.12.2
+          version: v2.13.2
           working-directory: ${{ matrix.plugin }}
 
   gitleaks:

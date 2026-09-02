@@ -208,7 +208,7 @@ func (m *CorednsPluginsCi) TestPlugin(ctx context.Context, source *dagger.Direct
 // ci-coredns-plugins job, which fires on a flake.lock bump. The next such bump
 // failed on sni_tls before it ever reached the new plugin. Keep this in step
 // with that workflow's `version:` pin.
-const golangciLintImage = "golangci/golangci-lint:v2.12.2-alpine"
+const golangciLintImage = "golangci/golangci-lint:v2.13.2-alpine"
 
 // LintPlugin runs golangci-lint on the plugin. Upgraded from a bare `go vet`
 // (which only ever caught the small, non-security subset go vet's analyzers
@@ -265,7 +265,7 @@ func (m *CorednsPluginsCi) YamlLint(ctx context.Context, source *dagger.Director
 
 // cyclonedxGomodVersion is pinned for the same reproducibility reason as
 // every other tool version in this file.
-const cyclonedxGomodVersion = "v1.10.0"
+const cyclonedxGomodVersion = "v1.12.0"
 
 // Sbom generates a CycloneDX SBOM for `pluginDir`'s Go module graph.
 //
@@ -304,7 +304,7 @@ func (m *CorednsPluginsCi) SbomScan(ctx context.Context, source *dagger.Director
 // opengrepVersion pins the same Opengrep release homelab's ci/dagger module
 // already uses — one version across the ecosystem, same reasoning as every
 // other pinned tool here.
-const opengrepVersion = "v1.26.0"
+const opengrepVersion = "v1.29.0"
 
 // OpengrepScan runs Opengrep (the OSS fork of Semgrep) against this repo's Go
 // source — broad static-analysis coverage beyond golangci-lint's gosec linter

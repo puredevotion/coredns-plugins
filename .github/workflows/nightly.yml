@@ -75,7 +75,7 @@ jobs:
           # version" for all four plugins, before a single line was linted.
           # Nightly is the run nobody watches, which is why it went unnoticed.
           # Keep the two pins moving together.
-          version: v2.12.2
+          version: v2.13.2
           working-directory: ${{ matrix.plugin }}
 
   vulncheck:

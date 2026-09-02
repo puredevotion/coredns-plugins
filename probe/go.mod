@@ -2,15 +2,15 @@ module github.com/puredevotion/coredns-plugins/probe
 
 go 1.26.0
 
-toolchain go1.26.5
+toolchain go1.27.1
 
 require (
 	github.com/coredns/caddy v1.1.4
-	github.com/coredns/coredns v1.14.6
-	github.com/miekg/dns v1.1.72
-	github.com/prometheus/client_golang v1.23.2
-	github.com/prometheus/common v0.69.0
-	github.com/valkey-io/valkey-go v1.0.76
+	github.com/coredns/coredns v1.14.7
+	github.com/miekg/dns v1.1.73
+	github.com/prometheus/client_golang v1.24.1
+	github.com/prometheus/common v0.71.0
+	github.com/valkey-io/valkey-go v1.0.77
 )
 
 require (
