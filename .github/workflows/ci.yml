@@ -166,11 +166,59 @@ jobs:
           fi
           echo "gofmt clean"
 
+  build-custom-gcl:
+    # .golangci.yml enables the nilaway plugin (see its "linters.settings.
+    # custom.nilaway" block), which only exists in a custom-built binary
+    # produced from .custom-gcl.yml (`golangci-lint custom`) — the stock
+    # golangci-lint-action binary golangci-lint-action would otherwise
+    # install has no such plugin and fails with `plugin(nilaway): plugin
+    # "nilaway" not found`. So: `go install` the stock v2.14.0 binary just
+    # to get its `custom` subcommand, use that to build custom-gcl from the
+    # repo root (where .custom-gcl.yml lives), then hand the binary to every
+    # golangci-lint matrix leg below via artifact — building it once here
+    # instead of four times (once per plugin) is the whole point of this
+    # separate job. Cached across runs too, keyed on the inputs that
+    # actually change custom-gcl's output.
+    #
+    # v1.62.2 (and the newest v1.x, v1.64.8) were both built against a Go
+    # version lower than go.mod's 1.26.5 toolchain ("Go language version
+    # used to build golangci-lint is lower than the targeted Go version")
+    # -- no v1.x release ever will build against it, so v2 isn't optional
+    # here. Same failure mode hit again at the go1.27.0 bump: v2.12.2 is
+    # built with go1.26.2, so it refused to load. v2.14.0 (2026-09-24) is
+    # the first release built with go1.27. .golangci.yml is on the v2
+    # schema (`golangci-lint migrate`) -- a v2 binary against a stale
+    # v1-format config (or the reverse) fails to load either way.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
+        with:
+          go-version-file: probe/go.mod
+      - name: Restore custom-gcl cache
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
+        with:
+          path: custom-gcl
+          key: custom-gcl-v2.14.0-${{ hashFiles('.custom-gcl.yml') }}
+      - name: Install golangci-lint (for its `custom` subcommand)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+      - name: Build custom-gcl (bundles the nilaway plugin)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: golangci-lint custom
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: custom-gcl
+          path: custom-gcl
+          retention-days: 1
+
   golangci-lint:
     # Upgraded from a bare `go vet` — see .golangci.yml (root) for the enabled
     # linter set (govet, staticcheck, errcheck, gosec), kept identical across
     # every Go repo in this ecosystem. Mirrors ci/main.go's LintPlugin.
     runs-on: ubuntu-latest
+    needs: build-custom-gcl
     strategy:
       fail-fast: false
       matrix:
@@ -181,22 +229,13 @@ jobs:
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
         with:
-          # v1.62.2 (and the newest v1.x, v1.64.8) were both built against a
-          # Go version lower than go.mod's 1.26.5 toolchain ("Go language
-          # version used to build golangci-lint is lower than the targeted
-          # Go version") -- no v1.x release ever will build against it, so
-          # v2 isn't optional here. Same failure mode hit again at the
-          # go1.27.0 bump: v2.12.2 is built with go1.26.2, so it refused to
-          # load. v2.14.0 (2026-09-24) is the first release built with
-          # go1.27. golangci-lint-action v6/v7 predate proper v2-binary
-          # support; v9 is current. .golangci.yml migrated to the v2 schema
-          # (`golangci-lint migrate`) alongside this bump -- the two must
-          # move together, a v2 binary against a stale v1-format config (or
-          # vice versa) fails to load.
-          version: v2.14.0
-          working-directory: ${{ matrix.plugin }}
+          name: custom-gcl
+      - run: chmod +x custom-gcl
+      - name: Run golangci-lint
+        working-directory: ${{ matrix.plugin }}
+        run: ../custom-gcl run --timeout=5m ./...
 
   gitleaks:
     # This repo had no secret scanning at all before this. Mirrors ci/main.go's
