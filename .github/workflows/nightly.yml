@@ -31,7 +31,8 @@ env:
   OPENGREP_RULES_SHA: "f1d2b562b414783763fd02a6ed2736eaed622efa"
   DAGGER_VERSION: "0.21.7"
   DAGGER_SHA256: "44430afc6f9c390fc47c4f352b15de9309a5e97ebd1ae563839617d6df8e8cc5"
-  GOVULNCHECK_VERSION: "v1.1.4"
+  # See ci.yml's GOVULNCHECK_VERSION comment: v1.1.4 panics on go1.27+ source.
+  GOVULNCHECK_VERSION: "v1.8.0"
 
 jobs:
   test:
@@ -75,7 +76,7 @@ jobs:
           # version" for all four plugins, before a single line was linted.
           # Nightly is the run nobody watches, which is why it went unnoticed.
           # Keep the two pins moving together.
-          version: v2.12.2
+          version: v2.14.0
           working-directory: ${{ matrix.plugin }}
 
   vulncheck:

@@ -36,7 +36,11 @@ env:
   OPENGREP_RULES_SHA: "f1d2b562b414783763fd02a6ed2736eaed622efa"
   DAGGER_VERSION: "0.21.7"
   DAGGER_SHA256: "44430afc6f9c390fc47c4f352b15de9309a5e97ebd1ae563839617d6df8e8cc5"
-  GOVULNCHECK_VERSION: "v1.1.4"
+  # v1.1.4 vendored x/tools/go/ssa v0.29.0, which panics ("unexpected expr:
+  # *ast.KeyValueExpr") building SSA against go1.27+ source that uses the
+  # newly-allowed promoted-field keyed composite literals. v1.8.0 vendors
+  # x/tools v0.50.0 (fix landed in v0.45.0) and scans clean on go1.27.1.
+  GOVULNCHECK_VERSION: "v1.8.0"
 
 jobs:
   test:
@@ -183,13 +187,15 @@ jobs:
           # Go version lower than go.mod's 1.26.5 toolchain ("Go language
           # version used to build golangci-lint is lower than the targeted
           # Go version") -- no v1.x release ever will build against it, so
-          # v2 isn't optional here. v2.12.2 is built with go1.26.2.
-          # golangci-lint-action v6/v7 predate proper v2-binary support;
-          # v9 is current. .golangci.yml migrated to the v2 schema
+          # v2 isn't optional here. Same failure mode hit again at the
+          # go1.27.0 bump: v2.12.2 is built with go1.26.2, so it refused to
+          # load. v2.14.0 (2026-09-24) is the first release built with
+          # go1.27. golangci-lint-action v6/v7 predate proper v2-binary
+          # support; v9 is current. .golangci.yml migrated to the v2 schema
           # (`golangci-lint migrate`) alongside this bump -- the two must
           # move together, a v2 binary against a stale v1-format config (or
           # vice versa) fails to load.
-          version: v2.12.2
+          version: v2.14.0
           working-directory: ${{ matrix.plugin }}
 
   gitleaks:
