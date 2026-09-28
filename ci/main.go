@@ -165,7 +165,7 @@ var pluginCfgPatches = map[string]struct {
 // the shipped binary.
 func (m *CorednsPluginsCi) goBase(source *dagger.Directory) *dagger.Container {
 	return dag.Container().
-		From("golang:1.26").
+		From("golang:1.27").
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
 		WithDirectory("/src", source).
@@ -208,7 +208,11 @@ func (m *CorednsPluginsCi) TestPlugin(ctx context.Context, source *dagger.Direct
 // ci-coredns-plugins job, which fires on a flake.lock bump. The next such bump
 // failed on sni_tls before it ever reached the new plugin. Keep this in step
 // with that workflow's `version:` pin.
-const golangciLintImage = "golangci/golangci-lint:v2.12.2-alpine"
+//
+// v2.14.0 is the first release built with go1.27 (v2.12.2 was built with
+// go1.26.2 and hit the exact same "build's Go version is lower than the
+// targeted Go version" refusal once go.mod moved to 1.27.0).
+const golangciLintImage = "golangci/golangci-lint:v2.14.0-alpine"
 
 // LintPlugin runs golangci-lint on the plugin. Upgraded from a bare `go vet`
 // (which only ever caught the small, non-security subset go vet's analyzers
@@ -333,13 +337,13 @@ func (m *CorednsPluginsCi) OpengrepScan(ctx context.Context, source *dagger.Dire
 // goBase's cache convention.
 func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 	return dag.Container().
-		From("golang:1.26").
+		From("golang:1.27").
 		// The actual root cause of three straight failed theories (stale
 		// cache, IPv6-only, "flaky mirror"): this container runs inside the
 		// shared Dagger engine, which k8s/dagger/networkpolicy.yaml in the
 		// consuming homelab repo deliberately fences to egress on port 443
 		// only (issue #27, "fence the privileged Dagger engine") plus a
-		// scoped hole to the internal Zot registry. golang:1.26's default
+		// scoped hole to the internal Zot registry. golang:1.27's default
 		// apt sources point at http://deb.debian.org (port 80), which that
 		// policy actively refuses -- "Connection refused" on every mirror
 		// IP, every time, is a NetworkPolicy doing exactly its job, not
@@ -358,7 +362,7 @@ func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 		`}).
 		WithMountedCache("/go/pkg/mod", dag.CacheVolume("go-mod")).
 		WithMountedCache("/root/.cache/go-build", dag.CacheVolume("go-build")).
-		// golang:1.26 ships gcc, so cgo defaults on and go build produces a
+		// golang:1.27 ships gcc, so cgo defaults on and go build produces a
 		// dynamically-linked binary. Containerize packages that binary onto
 		// distroless/static, which has no libc at all — the runtime symptom
 		// is `exec /coredns: no such file or directory` (the missing ELF
@@ -452,12 +456,14 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 	ctr = ctr.
 		// Force these past their CoreDNS-1.14.6-pinned versions explicitly:
 		// grype found real High CVEs in the built binary (GO-2026-5970 /
-		// x/text, GHSA-hrxh-6v49-42gf / grpc) even though the radnr/sni_tls
-		// go.mod files here already require newer ones — `go mod tidy`
-		// alone wasn't reliably picking the higher version across the
-		// merged CoreDNS+plugin module graph, so pin the floor directly
-		// rather than depend on MVS resolving it the way we expect.
-		WithExec([]string{"go", "get", "golang.org/x/text@v0.39.0", "google.golang.org/grpc@v1.82.1"}).
+		// x/text, GHSA-hrxh-6v49-42gf / grpc, plus CVE-2026-84445 fixed only
+		// in grpc 1.83.2) even though the radnr/sni_tls go.mod files here
+		// already require newer ones — `go mod tidy` alone wasn't reliably
+		// picking the higher version across the merged CoreDNS+plugin module
+		// graph, so pin the floor directly rather than depend on MVS
+		// resolving it the way we expect. Keep in step with the floors each
+		// plugin's own go.mod now carries.
+		WithExec([]string{"go", "get", "golang.org/x/text@v0.41.0", "google.golang.org/grpc@v1.83.2"}).
 		WithExec([]string{"go", "mod", "tidy"}).
 		WithExec([]string{"go", "build", "-o", "/coredns-out/coredns", "."}).
 		// radnr needs a raw ICMPv6 socket (CAP_NET_RAW) to send Router
@@ -548,7 +554,7 @@ const runtimeBaseRef = "gcr.io/distroless/static-debian12:nonroot"
 // Before returning, this runs `/coredns -plugins` inside the actual runtime
 // container and checks every plugin in pluginCfgPatches shows up in its
 // output. BuildCoredns compiling successfully does NOT mean the binary can
-// run in this base image: golang:1.26 defaults cgo on, which produces a
+// run in this base image: golang:1.27 defaults cgo on, which produces a
 // dynamically-linked binary that fails to exec at all
 // (`exec /coredns: no such file or directory`) against distroless/static's
 // total absence of libc. That broke silently all the way through build, tar,

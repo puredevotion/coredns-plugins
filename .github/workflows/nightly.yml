@@ -31,7 +31,8 @@ env:
   OPENGREP_RULES_SHA: "f1d2b562b414783763fd02a6ed2736eaed622efa"
   DAGGER_VERSION: "0.21.7"
   DAGGER_SHA256: "44430afc6f9c390fc47c4f352b15de9309a5e97ebd1ae563839617d6df8e8cc5"
-  GOVULNCHECK_VERSION: "v1.1.4"
+  # See ci.yml's GOVULNCHECK_VERSION comment: v1.1.4 panics on go1.27+ source.
+  GOVULNCHECK_VERSION: "v1.8.0"
 
 jobs:
   test:
@@ -49,8 +50,44 @@ jobs:
       - run: go test -race -covermode=atomic -coverprofile=cover.out ./...
         working-directory: ${{ matrix.plugin }}
 
+  build-custom-gcl:
+    # MUST match ci.yml's build-custom-gcl job, which carries the full
+    # reasoning (nilaway plugin needs a custom-gcl build, built once here
+    # and shared via artifact rather than four times over; no v1.x release
+    # builds against go.mod's toolchain; .golangci.yml is v2-schema).
+    #
+    # This file was missed when ci.yml moved to v2 and sat on v1.62.2, so
+    # every nightly run failed at "Finding needed golangci-lint version"
+    # for all four plugins, before a single line was linted. Nightly is
+    # the run nobody watches, which is why it went unnoticed. Keep the two
+    # workflows' golangci-lint jobs moving together.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
+        with:
+          go-version-file: probe/go.mod
+      - name: Restore custom-gcl cache
+        id: cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
+        with:
+          path: custom-gcl
+          key: custom-gcl-v2.14.0-${{ hashFiles('.custom-gcl.yml') }}
+      - name: Install golangci-lint (for its `custom` subcommand)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+      - name: Build custom-gcl (bundles the nilaway plugin)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: golangci-lint custom
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        with:
+          name: custom-gcl
+          path: custom-gcl
+          retention-days: 1
+
   golangci-lint:
     runs-on: ubuntu-latest
+    needs: build-custom-gcl
     strategy:
       fail-fast: false
       matrix:
@@ -61,22 +98,13 @@ jobs:
         with:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
-      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7
         with:
-          # MUST match ci.yml's pin, which carries the full reasoning. Short
-          # version: no v1.x release builds against go.mod's toolchain, the
-          # action at v9 refuses v1 outright ("golangci-lint v1 is not
-          # supported by golangci-lint-action >= v7"), and .golangci.yml is in
-          # the v2 schema — a v2 binary against a v1 config, or the reverse,
-          # fails to load.
-          #
-          # This file was missed when ci.yml moved to v2 and sat on v1.62.2,
-          # so every nightly run failed at "Finding needed golangci-lint
-          # version" for all four plugins, before a single line was linted.
-          # Nightly is the run nobody watches, which is why it went unnoticed.
-          # Keep the two pins moving together.
-          version: v2.12.2
-          working-directory: ${{ matrix.plugin }}
+          name: custom-gcl
+      - run: chmod +x custom-gcl
+      - name: Run golangci-lint
+        working-directory: ${{ matrix.plugin }}
+        run: ../custom-gcl run --timeout=5m ./...
 
   vulncheck:
     runs-on: ubuntu-latest
