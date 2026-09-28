@@ -143,11 +143,9 @@ func (d *DynUpdate) build(rrs []dns.RR) (*file.File, error) {
 	}
 
 	return &file.File{
-		Next: d.Next,
-		Zones: file.Zones{
-			Z:     map[string]*file.Zone{d.Zone: z},
-			Names: []string{d.Zone},
-		},
+		Next:  d.Next,
+		Z:     map[string]*file.Zone{d.Zone: z},
+		Names: []string{d.Zone},
 	}, nil
 }
 

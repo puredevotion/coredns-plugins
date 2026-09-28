@@ -311,9 +311,9 @@ func (p *Probe) synthesize(qname string, qtype uint16, obs *Observation, mods Mo
 			&dns.SVCBECHConfig{ECH: p.ECHConfigList},
 		}
 		if qtype == dns.TypeHTTPS {
-			return []dns.RR{&dns.HTTPS{SVCB: dns.SVCB{
+			return []dns.RR{&dns.HTTPS{
 				Hdr: h, Priority: 1, Target: ".", Value: params,
-			}}}
+			}}
 		}
 		return []dns.RR{&dns.SVCB{
 			Hdr: h, Priority: 1, Target: ".", Value: params,
