@@ -219,6 +219,13 @@ const golangciLintImage = "golangci/golangci-lint:v2.14.0-alpine"
 // cover) — golangci-lint's config lives at the repo root and is picked up
 // automatically since golangci-lint walks up from the working directory to
 // find it. See TestPlugin's doc comment for the source-root path convention.
+//
+// .golangci.yml enables nilaway, which only exists as a module plugin
+// (.custom-gcl.yml at the repo root) — the stock golangci-lint binary this
+// image ships can't load it ("plugin(nilaway): plugin not found"). The repo
+// root's committed `custom-gcl` binary (built via `golangci-lint custom`,
+// same convention cardwallet's server/custom-gcl already uses) has the
+// plugin compiled in; run that instead of `golangci-lint` directly.
 func (m *CorednsPluginsCi) LintPlugin(ctx context.Context, source *dagger.Directory, pluginDir string) (string, error) {
 	return dag.Container().
 		From(golangciLintImage).
@@ -227,7 +234,7 @@ func (m *CorednsPluginsCi) LintPlugin(ctx context.Context, source *dagger.Direct
 		WithMountedCache("/root/.cache/golangci-lint", dag.CacheVolume("golangci-lint")).
 		WithDirectory("/src", source).
 		WithWorkdir("/src/" + pluginDir).
-		WithExec([]string{"golangci-lint", "run", "--timeout=5m", "./..."}).
+		WithExec([]string{"/src/custom-gcl", "run", "--timeout=5m", "./..."}).
 		Stdout(ctx)
 }
 
