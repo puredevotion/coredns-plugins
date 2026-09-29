@@ -10,10 +10,14 @@
 // SAFETY: a second RA sender can disrupt LAN IPv6. The plugin defaults to a
 // non-default-router RA (RouterLifetime=0) and refuses to advertise prefixes;
 // see internal/config for the enforced invariants.
+//
+//nolint:misspell // adn/ADN throughout this file: RFC 9463 Authentication Domain Name, not a typo for and/AND
 package radnr
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 
 	clog "github.com/coredns/coredns/plugin/pkg/log"
@@ -23,7 +27,10 @@ import (
 	"github.com/puredevotion/coredns-plugins/radnr/internal/config"
 )
 
-var log = clog.NewWithPlugin("radnr")
+// pluginName is the CoreDNS plugin name, used for both registration and logging.
+const pluginName = "radnr"
+
+var log = clog.NewWithPlugin(pluginName)
 
 // runner is the advertisement loop; abstracted so tests inject a fake without
 // opening an ICMPv6 socket.
@@ -34,27 +41,27 @@ type runner interface {
 // RADNR is the plugin instance. It holds the validated config and manages the
 // lifecycle of the background advertiser.
 type RADNR struct {
-	Cfg config.Config
-
-	// runner is set in tests; when nil, OnStartup builds a real advertiser.
+	// Runner is set in tests; when nil, OnStartup builds a real advertiser.
 	runner runner
 
 	cancel context.CancelFunc
+
+	Cfg config.Config
 }
 
 // Name implements the CoreDNS plugin interface.
-func (r *RADNR) Name() string { return "radnr" }
+func (r *RADNR) Name() string { return pluginName }
 
 // OnStartup validates the config, builds the advertiser (unless a runner was
 // injected for tests), and launches the advertisement loop in a goroutine.
 func (r *RADNR) OnStartup() error {
 	if err := r.Cfg.Validate(); err != nil {
-		return err
+		return fmt.Errorf("validate config: %w", err)
 	}
 
 	run := r.runner
 	if run == nil {
-		conn, err := dial(r.Cfg)
+		conn, err := dial(&r.Cfg)
 		if err != nil {
 			return err
 		}
@@ -65,7 +72,7 @@ func (r *RADNR) OnStartup() error {
 	r.cancel = cancel
 
 	go func() {
-		if err := run.Run(ctx); err != nil && err != context.Canceled {
+		if err := run.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Errorf("advertiser stopped: %v", err)
 		}
 	}()
@@ -93,7 +100,7 @@ var listenFn = ndpListen
 var dialNDP = func(ifi *net.Interface, addr ndp.Addr) (advertiser.Conn, error) {
 	c, _, err := ndp.Listen(ifi, addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ndp listen: %w", err)
 	}
 	return c, nil
 }
@@ -102,13 +109,13 @@ var dialNDP = func(ifi *net.Interface, addr ndp.Addr) (advertiser.Conn, error) {
 func ndpListen(name string) (advertiser.Conn, error) {
 	ifi, err := net.InterfaceByName(name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("lookup interface %q: %w", name, err)
 	}
 	return dialNDP(ifi, ndp.LinkLocal)
 }
 
 // dial returns a no-op conn for dry-run, otherwise opens a real ndp transport.
-func dial(cfg config.Config) (advertiser.Conn, error) {
+func dial(cfg *config.Config) (advertiser.Conn, error) {
 	if cfg.DryRun {
 		return nopConn{}, nil
 	}

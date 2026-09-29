@@ -43,12 +43,12 @@ import (
 // ValkeyStore is a Store backed by Valkey.
 type ValkeyStore struct {
 	client valkey.Client
-	// ttl bounds how long a token stays readable. Applied to both keys on every
+	// Ttl bounds how long a token stays readable. Applied to both keys on every
 	// write, keyed on the write rather than on first-seen — see Record.
 	ttl time.Duration
-	// timeout bounds how long a single store round-trip may delay a DNS answer.
+	// Timeout bounds how long a single store round-trip may delay a DNS answer.
 	timeout time.Duration
-	// maxPerToken caps retained detail per token.
+	// MaxPerToken caps retained detail per token.
 	maxPerToken int
 }
 
@@ -60,12 +60,12 @@ const defaultValkeyTimeout = 100 * time.Millisecond
 
 // ValkeyConfig is what the Corefile supplies.
 type ValkeyConfig struct {
-	// Addrs are host:port endpoints.
-	Addrs []string
 	// CAFile, when set, enables TLS and verifies the server certificate against
 	// this bundle. The fleet's Valkey presents a step-ca-issued certificate, so
 	// this should normally be the step-ca root.
 	CAFile string
+	// Addrs are host:port endpoints.
+	Addrs []string
 	// TTL, Timeout and MaxPerToken mirror MemStore's bounds.
 	TTL         time.Duration
 	Timeout     time.Duration
@@ -159,7 +159,7 @@ func reportKey(token string) string {
 // continued querying) a shared store has no cheap way to know first-seen
 // without an extra round-trip, and the cap on retained detail already bounds
 // what continued querying can achieve.
-func (s *ValkeyStore) Record(obs Observation) (Observation, error) {
+func (s *ValkeyStore) Record(obs *Observation) (Observation, error) {
 	if obs.At.IsZero() {
 		obs.At = time.Now().UTC()
 	}
@@ -174,7 +174,7 @@ func (s *ValkeyStore) Record(obs Observation) (Observation, error) {
 	if err != nil {
 		// Seen stays 0, which the in-band readout renders honestly rather than
 		// inventing a count.
-		return obs, fmt.Errorf("valkey INCR: %w", err)
+		return *obs, fmt.Errorf("valkey INCR: %w", err)
 	}
 	obs.Seen = int(n)
 
@@ -186,7 +186,7 @@ func (s *ValkeyStore) Record(obs Observation) (Observation, error) {
 	if obs.Seen <= s.maxPerToken {
 		payload, err := json.Marshal(obs)
 		if err != nil {
-			return obs, fmt.Errorf("marshalling observation: %w", err)
+			return *obs, fmt.Errorf("marshalling observation: %w", err)
 		}
 		cmds = append(cmds,
 			c.B().Rpush().Key(obsKey(obs.Token)).Element(string(payload)).Build(),
@@ -195,10 +195,10 @@ func (s *ValkeyStore) Record(obs Observation) (Observation, error) {
 	}
 	for _, res := range c.DoMulti(ctx, cmds...) {
 		if err := res.Error(); err != nil {
-			return obs, fmt.Errorf("valkey write: %w", err)
+			return *obs, fmt.Errorf("valkey write: %w", err)
 		}
 	}
-	return obs, nil
+	return *obs, nil
 }
 
 // Lookup implements Store. Read path only — the web tier is the usual caller,
@@ -238,7 +238,7 @@ func (s *ValkeyStore) Lookup(token string) ([]Observation, error) {
 // several pods take reports for the same token at once. The cost is that the
 // list can momentarily hold one entry past the cap, which is the right way round
 // — the alternative loses a report.
-func (s *ValkeyStore) RecordReport(rec ReportRecord) error {
+func (s *ValkeyStore) RecordReport(rec *ReportRecord) error {
 	if rec.At.IsZero() {
 		rec.At = time.Now().UTC()
 	}

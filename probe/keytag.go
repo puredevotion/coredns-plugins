@@ -4,12 +4,13 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-// RFC 8145 — Signaling Trust Anchor Knowledge in DNSSEC.
+// RFC 8145 — Signalling Trust Anchor Knowledge in DNSSEC.
 //
 // A validating resolver can tell a server which DNSSEC key(s) it would use to
 // validate that server's answers. This is the mechanism that measured the root
@@ -37,6 +38,10 @@ import (
 
 // keyTagPrefix is the label prefix RFC 8145 §5.2 defines for Key Tag queries.
 const keyTagPrefix = "_ta-"
+
+// keyTagHexDigits is RFC 8145 §5.2's mandatory zero-padded width for one key
+// tag: a uint16 rendered as exactly four hex digits.
+const keyTagHexDigits = 4
 
 // maxKeyTagsPerQuery bounds how many tags will be parsed out of one name or
 // option. RFC 8145 sets no limit; a sender picks this, so it needs one. Sixteen
@@ -67,7 +72,7 @@ var ErrBadKeyTagQuery = errors.New("probe: malformed key tag query")
 // exists to observe what implementations actually do rather than what they should.
 func ParseKeyTagQuery(sub string) ([]uint16, error) {
 	label := sub
-	if i := strings.IndexByte(label, '.'); i >= 0 {
+	if strings.Contains(label, ".") {
 		// Key Tag queries are sent to the zone apex, so the prefix must be the
 		// only label. Anything deeper is not one.
 		return nil, ErrNotKeyTagQuery
@@ -91,7 +96,7 @@ func ParseKeyTagQuery(sub string) ([]uint16, error) {
 		// Exactly four hex digits. RFC 8145 says MUST zero-pad, so "635" is
 		// malformed rather than 0x0635 — accepting it would silently normalise
 		// away a real implementation bug this zone exists to see.
-		if len(p) != 4 {
+		if len(p) != keyTagHexDigits {
 			return nil, ErrBadKeyTagQuery
 		}
 		n, err := strconv.ParseUint(p, 16, 16)
@@ -114,7 +119,7 @@ func KeyTagsSorted(tags []uint16) bool {
 func FormatKeyTagQuery(tags []uint16) string {
 	cp := make([]uint16, len(tags))
 	copy(cp, tags)
-	sort.Slice(cp, func(i, j int) bool { return cp[i] < cp[j] })
+	slices.Sort(cp)
 
 	var b strings.Builder
 	b.WriteString(keyTagPrefix)
@@ -127,7 +132,7 @@ func FormatKeyTagQuery(tags []uint16) string {
 	return b.String()
 }
 
-// ednsKeyTagOption is RFC 8145 §4's OPTION-CODE 14. miekg/dns has no type for
+// EdnsKeyTagOption is RFC 8145 §4's OPTION-CODE 14. Miekg/dns has no type for
 // it, so it arrives as an EDNS0_LOCAL and is decoded by hand — the same situation
 // as the DELEG DE bit.
 const ednsKeyTagOption = 14
@@ -142,7 +147,7 @@ func parseEDNSKeyTags(data []byte) ([]uint16, bool) {
 	if len(data) == 0 || len(data)%2 != 0 {
 		return nil, false
 	}
-	n := len(data) / 2
+	n := len(data) / uint16Len
 	if n > maxKeyTagsPerQuery {
 		return nil, false
 	}
@@ -155,10 +160,5 @@ func parseEDNSKeyTags(data []byte) ([]uint16, bool) {
 
 // hasKeyTag reports whether want appears in tags.
 func hasKeyTag(tags []uint16, want uint16) bool {
-	for _, t := range tags {
-		if t == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(tags, want)
 }

@@ -29,6 +29,7 @@ import (
 // TCP after truncation, or DoT to Do53) reveals its behaviour in the change.
 type Transport string
 
+// The transports this zone can observe a query arriving over.
 const (
 	TransportUDP  Transport = "udp"
 	TransportTCP  Transport = "tcp"
@@ -39,49 +40,67 @@ const (
 
 // Observation is one query, as seen from the authoritative side.
 type Observation struct {
-	Token string    `json:"token"`
-	At    time.Time `json:"at"`
+	At time.Time `json:"at"`
 
 	// ResolverAddr is the source address of the query: the resolver's egress
 	// address, NOT the visitor's. The difference is the single most common
 	// misconception these pages exist to correct.
 	ResolverAddr netip.Addr `json:"resolver_addr"`
+	// TLS is the handshake detail for queries that arrived encrypted, nil
+	// otherwise. See RFC 9539 in encrypted.go for why this is worth more than a
+	// boolean.
+	TLS *TLSInfo `json:"tls,omitempty"`
 	// ResolverPrefix groups egress addresses that belong to one network, so a
 	// resolver pool spread across many addresses still reads as one operator.
 	// Same widths as response rate limiting uses (/24, /56) and for the same
 	// reason: an individual address is too fine a unit to mean anything.
 	ResolverPrefix netip.Prefix `json:"resolver_prefix"`
+	// ECSPrefix is the prefix the resolver actually disclosed, zero when absent
+	// or declined.
+	//
+	// This is the most identifying thing this plugin stores — it is a truncated
+	// form of the visitor's own address, which nothing else here records. It is
+	// kept only because showing someone what leaked is the entire point of the
+	// measurement, it is reachable only via the random token the visitor holds,
+	// and it expires with the rest of the observation on the store's TTL. Do not
+	// add a second index over it.
+	ECSPrefix netip.Prefix `json:"ecs_prefix"`
 
-	Transport Transport `json:"transport"`
-	// TLS is the handshake detail for queries that arrived encrypted, nil
-	// otherwise. See RFC 9539 in encrypted.go for why this is worth more than a
-	// boolean.
-	TLS *TLSInfo `json:"tls,omitempty"`
-	// IPv6 records which protocol carried the query. A resolver reaching us
-	// over IPv6 for a visitor on IPv4 (and the reverse) is common and worth
-	// showing.
-	IPv6 bool `json:"ipv6"`
-
+	Token string `json:"token"`
 	Qtype string `json:"qtype"`
 	// Mods is the deviation set the query asked for, so a validation failure
 	// can be attributed to the variant that provoked it.
 	Mods string `json:"mods"`
 
-	// DO set means the resolver asked for DNSSEC records. Necessary but not
-	// sufficient for validation — plenty of resolvers set DO and then ignore
-	// what comes back, which is exactly what the badsig/unsigned variants
-	// expose.
-	DO bool `json:"do"`
-	// EDNS records whether an OPT record was present at all. Its absence dates
-	// a resolver severely.
-	EDNS bool `json:"edns"`
+	Transport Transport `json:"transport"`
+	// KeyTags are the DNSSEC key tags the resolver signalled it would validate
+	// this response with (RFC 8145 edns-key-tag, EDNS option 14). Empty when the
+	// resolver said nothing, which is the overwhelmingly common case.
+	KeyTags []uint16 `json:"key_tags,omitempty"`
+	// Seen is this observation's ordinal for the token, starting at 1. Set by
+	// the store, not the observer.
+	Seen int `json:"seen"`
+	// ECSFamily is the RFC 7871 address family of the disclosed prefix (1=IPv4,
+	// 2=IPv6), 0 when absent. Worth its own field because a resolver disclosing
+	// an IPv6 prefix for an IPv4 client (or the reverse) is itself a finding.
+	ECSFamily uint16 `json:"ecs_family"`
 	// UDPSize is the advertised EDNS buffer. Values above ~1232 invite
 	// fragmentation; the DNS-flag-day-2020 consensus is to advertise no more.
 	UDPSize uint16 `json:"udp_size"`
-	// Cookie means the resolver supports DNS cookies (RFC 7873), which is what
-	// lets an authoritative server distinguish a return-path-validated client
-	// from a spoofed source.
-	Cookie bool `json:"cookie"`
+	// IPv6 records which protocol carried the query. A resolver reaching us
+	// over IPv6 for a visitor on IPv4 (and the reverse) is common and worth
+	// showing.
+	IPv6 bool `json:"ipv6"`
+	// ECSScope is SOURCE PREFIX-LENGTH from the query — how many bits of the
+	// client address the resolver disclosed. 0 when absent OR when explicitly
+	// declined; see ECS.
+	//
+	// Named "Scope" for the field's history, not for accuracy: RFC 7871 calls
+	// the response-side field SCOPE PREFIX-LENGTH, and this is the query-side
+	// SOURCE PREFIX-LENGTH. Kept as-is because the web tier's
+	// internal/probereport mirrors this JSON tag and renaming would break the
+	// seam for no measurement benefit.
+	ECSScope uint8 `json:"ecs_scope"`
 	// ECS means the resolver forwarded a client-subnet prefix — a privacy leak
 	// the visitor probably did not opt into, and worth surfacing as such.
 	//
@@ -96,31 +115,10 @@ type Observation struct {
 	// The middle case is the *best* outcome (RFC 7871 §7.1.2's explicit opt-out)
 	// and must never render as "leaked".
 	ECS bool `json:"ecs"`
-	// ECSScope is SOURCE PREFIX-LENGTH from the query — how many bits of the
-	// client address the resolver disclosed. 0 when absent OR when explicitly
-	// declined; see ECS.
-	//
-	// Named "Scope" for the field's history, not for accuracy: RFC 7871 calls
-	// the response-side field SCOPE PREFIX-LENGTH, and this is the query-side
-	// SOURCE PREFIX-LENGTH. Kept as-is because the web tier's
-	// internal/probereport mirrors this JSON tag and renaming would break the
-	// seam for no measurement benefit.
-	ECSScope uint8 `json:"ecs_scope"`
-	// ECSFamily is the RFC 7871 address family of the disclosed prefix (1=IPv4,
-	// 2=IPv6), 0 when absent. Worth its own field because a resolver disclosing
-	// an IPv6 prefix for an IPv4 client (or the reverse) is itself a finding.
-	ECSFamily uint16 `json:"ecs_family"`
-	// ECSPrefix is the prefix the resolver actually disclosed, zero when absent
-	// or declined.
-	//
-	// This is the most identifying thing this plugin stores — it is a truncated
-	// form of the visitor's own address, which nothing else here records. It is
-	// kept only because showing someone what leaked is the entire point of the
-	// measurement, it is reachable only via the random token the visitor holds,
-	// and it expires with the rest of the observation on the store's TTL. Do not
-	// add a second index over it.
-	ECSPrefix netip.Prefix `json:"ecs_prefix"`
-
+	// Cookie means the resolver supports DNS cookies (RFC 7873), which is what
+	// lets an authoritative server distinguish a return-path-validated client
+	// from a spoofed source.
+	Cookie bool `json:"cookie"`
 	// DELEGAware means the resolver set the EDNS DE bit, signalling that it
 	// understands extensible delegation (draft-ietf-deleg). DELEG-unaware
 	// servers ignore the bit, so a resolver setting it is opting in to being
@@ -129,38 +127,36 @@ type Observation struct {
 	// See degFlag's comment for why this specific bit, and what would make it
 	// silently wrong.
 	DELEGAware bool `json:"deleg_aware"`
-	// KeyTags are the DNSSEC key tags the resolver signalled it would validate
-	// this response with (RFC 8145 edns-key-tag, EDNS option 14). Empty when the
-	// resolver said nothing, which is the overwhelmingly common case.
-	KeyTags []uint16 `json:"key_tags,omitempty"`
+	// EDNS records whether an OPT record was present at all. Its absence dates
+	// a resolver severely.
+	EDNS bool `json:"edns"`
 	// KnowsZoneKey means this zone's own key tag was among KeyTags — i.e. the
 	// resolver is holding the key it would need to validate us. Meaningful only
 	// when KeyTags is non-empty; false otherwise means "did not say", not "does
 	// not have it".
 	KnowsZoneKey bool `json:"knows_zone_key,omitempty"`
-
 	// ZoneVersionAsked means the resolver sent an RFC 9660 ZONEVERSION option,
 	// i.e. asked which version of the zone answered. Vanishingly rare, which is
 	// what makes it worth counting: it is a direct measure of how much
 	// diagnostic protocol a resolver actually implements.
 	ZoneVersionAsked bool `json:"zoneversion_asked"`
-
 	// CompactAware means the resolver set the EDNS CO bit (RFC 9824),
 	// signalling it understands compact denial of existence. This zone already
 	// SERVES compact denial via the `_nxname` variant, so pairing the two tells
 	// us something neither does alone: whether the resolvers that receive our
 	// compact denials actually asked for them.
 	CompactAware bool `json:"compact_aware"`
-
 	// CaseRandomized means the query arrived with mixed-case labels, i.e. the
 	// resolver implements DNS-0x20 (draft-vixie-dnsext-dns0x20) as an
 	// anti-spoofing measure. Detectable only because we compare against the
 	// name we would have generated ourselves.
+	//nolint:misspell // exported field name and JSON tag are the wire contract; renaming would be a behaviour change
 	CaseRandomized bool `json:"case_randomized"`
-
-	// Seen is this observation's ordinal for the token, starting at 1. Set by
-	// the store, not the observer.
-	Seen int `json:"seen"`
+	// DO set means the resolver asked for DNSSEC records. Necessary but not
+	// sufficient for validation — plenty of resolvers set DO and then ignore
+	// what comes back, which is exactly what the badsig/unsigned variants
+	// expose.
+	DO bool `json:"do"`
 }
 
 // v4PrefixBits and v6PrefixBits mirror response-rate-limiting's defaults.
@@ -170,7 +166,7 @@ const (
 )
 
 // EDNS header flag bits, as they sit in the OPT record's 16-bit flags field
-// (the low half of OPT.Hdr.Ttl). miekg/dns exposes only DO, via Do()/SetDo, so
+// (the low half of OPT.Hdr.Ttl). Miekg/dns exposes only DO, via Do()/SetDo, so
 // the other two are masked by hand.
 //
 // Bit numbering is MSB-first per RFC 6891, hence bit 0 == 1<<15:
@@ -181,7 +177,7 @@ const (
 //
 // CAVEAT, and the reason both constants are declared here with this comment
 // rather than inlined: DE is **not yet permanently assigned**.
-// draft-ietf-deleg-08 says the bit is "expected to be assigned by IANA as Bit 2
+// Draft-ietf-deleg-08 says the bit is "expected to be assigned by IANA as Bit 2
 // in the EDNS Header Flags registry" and separately gives 2 as a *temporary
 // testing* assignment, with the permanent request written as "Bit TBA2". If IANA
 // lands it elsewhere, this code keeps compiling and keeps returning a plausible
@@ -190,8 +186,8 @@ const (
 // sudden collapse to all-false (or all-true) as suspicion of a moved bit rather
 // than a finding about resolvers.
 const (
-	coFlag = 1 << 14 // RFC 9824, assigned
-	deFlag = 1 << 13 // draft-ietf-deleg, PROVISIONAL — see above
+	coFlag = 1 << 14 // RFC 9824, assigned.
+	deFlag = 1 << 13 // Draft-ietf-deleg, PROVISIONAL — see above.
 )
 
 // Observe builds an Observation from a query. `raw` is the qname exactly as it
@@ -226,59 +222,76 @@ func Observe(q Query, raw string, addr netip.Addr, transport Transport, qtype ui
 	}
 
 	if opt := msg.IsEdns0(); opt != nil {
-		obs.EDNS = true
-		obs.DO = opt.Do()
-		obs.UDPSize = opt.UDPSize()
-
-		// Flags miekg/dns has no accessor for. Masked off the same 16-bit field
-		// Do() reads; see coFlag/deFlag for the bit numbering and the caveat on
-		// DE not being permanently assigned.
-		obs.CompactAware = opt.Hdr.Ttl&coFlag != 0
-		obs.DELEGAware = opt.Hdr.Ttl&deFlag != 0
-
-		for _, o := range opt.Option {
-			switch v := o.(type) {
-			case *dns.EDNS0_COOKIE:
-				obs.Cookie = true
-			case *dns.EDNS0_ZONEVERSION:
-				obs.ZoneVersionAsked = true
-			case *dns.EDNS0_LOCAL:
-				// RFC 8145 option 14 has no type in miekg/dns, so it lands here.
-				// Decoded rather than ignored; a malformed payload records
-				// nothing rather than a truncated tag list.
-				if v.Code == ednsKeyTagOption {
-					if tags, ok := parseEDNSKeyTags(v.Data); ok {
-						obs.KeyTags = tags
-					}
-				}
-			case *dns.EDNS0_SUBNET:
-				obs.ECS = true
-				obs.ECSScope = v.SourceNetmask
-				obs.ECSFamily = v.Family
-				// SourceNetmask 0 is a deliberate "I am telling you nothing"
-				// (RFC 7871 §7.1.2), not a missing value, so it must not become
-				// a 0-bit prefix over 0.0.0.0 — that would render as a leak of
-				// everything. Leave ECSPrefix zero and let ECS+ECSScope carry
-				// the distinction.
-				if v.SourceNetmask > 0 {
-					if a, ok := netip.AddrFromSlice(v.Address); ok {
-						if p, err := a.Unmap().Prefix(int(v.SourceNetmask)); err == nil {
-							obs.ECSPrefix = p
-						}
-						// A SourceNetmask wider than the address family allows is
-						// malformed input from the resolver. Dropped silently on
-						// purpose: ECS/ECSScope still record that it happened, and
-						// a malformed option must not cost the visitor their answer.
-					}
-				}
-			}
-		}
+		applyEDNSObservation(&obs, opt)
 	}
 	return obs
 }
 
+// applyEDNSObservation folds the OPT record's flags and options into obs. Split
+// out of Observe purely to keep that function's cognitive complexity down; every
+// check and comment is unchanged.
+func applyEDNSObservation(obs *Observation, opt *dns.OPT) {
+	obs.EDNS = true
+	obs.DO = opt.Do()
+	obs.UDPSize = opt.UDPSize()
+
+	// Flags miekg/dns has no accessor for. Masked off the same 16-bit field
+	// Do() reads; see coFlag/deFlag for the bit numbering and the caveat on
+	// DE not being permanently assigned.
+	obs.CompactAware = opt.Hdr.Ttl&coFlag != 0
+	obs.DELEGAware = opt.Hdr.Ttl&deFlag != 0
+
+	for _, o := range opt.Option {
+		switch v := o.(type) {
+		case *dns.EDNS0_COOKIE:
+			obs.Cookie = true
+		case *dns.EDNS0_ZONEVERSION:
+			obs.ZoneVersionAsked = true
+		case *dns.EDNS0_LOCAL:
+			// RFC 8145 option 14 has no type in miekg/dns, so it lands here.
+			// Decoded rather than ignored; a malformed payload records
+			// nothing rather than a truncated tag list.
+			if v.Code == ednsKeyTagOption {
+				if tags, ok := parseEDNSKeyTags(v.Data); ok {
+					obs.KeyTags = tags
+				}
+			}
+		case *dns.EDNS0_SUBNET:
+			applyECSObservation(obs, v)
+		}
+	}
+}
+
+// applyECSObservation folds one RFC 7871 EDNS0_SUBNET option into obs. Split
+// out of applyEDNSObservation purely to keep that function's cognitive
+// complexity down; every check and comment is unchanged.
+func applyECSObservation(obs *Observation, v *dns.EDNS0_SUBNET) {
+	obs.ECS = true
+	obs.ECSScope = v.SourceNetmask
+	obs.ECSFamily = v.Family
+	// SourceNetmask 0 is a deliberate "I am telling you nothing"
+	// (RFC 7871 §7.1.2), not a missing value, so it must not become
+	// a 0-bit prefix over 0.0.0.0 — that would render as a leak of
+	// everything. Leave ECSPrefix zero and let ECS+ECSScope carry
+	// the distinction.
+	if v.SourceNetmask == 0 {
+		return
+	}
+	a, ok := netip.AddrFromSlice(v.Address)
+	if !ok {
+		return
+	}
+	if p, err := a.Unmap().Prefix(int(v.SourceNetmask)); err == nil {
+		obs.ECSPrefix = p
+	}
+	// A SourceNetmask wider than the address family allows is malformed input
+	// from the resolver. Dropped silently on purpose: ECS/ECSScope still
+	// record that it happened, and a malformed option must not cost the
+	// visitor their answer.
+}
+
 // isCaseRandomized reports whether the name mixes upper and lower case, which
-// only a resolver deliberately randomizing it would produce: the names this
+// only a resolver deliberately randomising it would produce: the names this
 // zone hands out are lowercase hex and underscore keywords.
 //
 // A name that is entirely uppercase is NOT randomization — that is just a
@@ -303,7 +316,7 @@ func isCaseRandomized(name string) bool {
 // user gets the same readout as the web page without any correlation store
 // being involved at all. Deliberately a flat key=value list: it has to survive
 // being read in a terminal, split across 255-byte TXT strings.
-func (o Observation) Summary() string {
+func (o *Observation) Summary() string {
 	var b strings.Builder
 	b.WriteString("resolver=")
 	b.WriteString(o.ResolverAddr.String())
@@ -323,7 +336,7 @@ func (o Observation) Summary() string {
 	b.WriteString(boolStr(o.Cookie))
 	b.WriteString(" ecs=")
 	b.WriteString(boolStr(o.ECS))
-	// ecs_src is what separates "declined" from "leaked", and a bare ecs= flag
+	// Ecs_src is what separates "declined" from "leaked", and a bare ecs= flag
 	// cannot: `ecs=1 ecs_src=0` is a resolver explicitly refusing to disclose,
 	// which is the opposite finding from `ecs=1 ecs_src=24`. Emitted always, so
 	// the terminal readout carries all three states the JSON does.
@@ -340,26 +353,34 @@ func (o Observation) Summary() string {
 	b.WriteString(" zoneversion=")
 	b.WriteString(boolStr(o.ZoneVersionAsked))
 	// RFC 9539: encrypted= is redundant with proto= above, and deliberately so.
-	// proto= is the transport; encrypted= is the question a reader actually has,
+	// Proto= is the transport; encrypted= is the question a reader actually has,
 	// and making them work it out from a list of transport names is how a
 	// terminal readout gets misread.
 	b.WriteString(" encrypted=")
 	b.WriteString(boolStr(o.Encrypted()))
-	if o.TLS != nil {
-		b.WriteString(" tls=")
-		b.WriteString(strings.ReplaceAll(o.TLS.Version, " ", ""))
-		if o.TLS.NamedGroup != "" {
-			b.WriteString(" group=")
-			b.WriteString(o.TLS.NamedGroup)
-		}
-		b.WriteString(" resumed=")
-		b.WriteString(boolStr(o.TLS.DidResume))
-	}
+	writeTLSSummary(&b, o.TLS)
 	b.WriteString(" case0x20=")
 	b.WriteString(boolStr(o.CaseRandomized))
 	b.WriteString(" seen=")
 	b.WriteString(strconv.Itoa(o.Seen))
 	return b.String()
+}
+
+// writeTLSSummary appends the TLS fields of the in-band summary, if the
+// observation carries any (see Observation.TLS). Split out of Summary purely
+// to keep that function's length down.
+func writeTLSSummary(b *strings.Builder, tls *TLSInfo) {
+	if tls == nil {
+		return
+	}
+	b.WriteString(" tls=")
+	b.WriteString(strings.ReplaceAll(tls.Version, " ", ""))
+	if tls.NamedGroup != "" {
+		b.WriteString(" group=")
+		b.WriteString(tls.NamedGroup)
+	}
+	b.WriteString(" resumed=")
+	b.WriteString(boolStr(tls.DidResume))
 }
 
 func boolStr(v bool) string {
@@ -380,13 +401,13 @@ type Store interface {
 	// Record stores one observation and returns it with Seen populated. It must
 	// not block the DNS response path for long — an unavailable store is a
 	// degraded probe, not a failed query.
-	Record(obs Observation) (Observation, error)
+	Record(obs *Observation) (Observation, error)
 	// Lookup returns everything recorded for a token, oldest first.
 	Lookup(token string) ([]Observation, error)
 	// RecordReport stores one inbound RFC 9567 error report. A record whose
 	// Token is empty is unattributed and stored separately — see agent.go for
 	// why those are kept rather than dropped.
-	RecordReport(rec ReportRecord) error
+	RecordReport(rec *ReportRecord) error
 	// LookupReports returns the reports recorded against a token, oldest first.
 	// The empty token returns the unattributed ones.
 	LookupReports(token string) ([]ReportRecord, error)
@@ -407,6 +428,16 @@ const maxUnattributedReports = 256
 // multi-replica deployment needs a shared store instead, since a visitor's
 // queries and their report request can land on different pods.
 type MemStore struct {
+	entries map[string]*memEntry
+	// Reports is keyed by token, with "" holding the unattributed ones. Tokens
+	// are lowercase hex (see parseToken), so the empty key cannot collide with a
+	// real one.
+	//
+	// A separate map from entries on purpose: a report can arrive for a token
+	// whose observations have already expired — that is the normal case, since a
+	// resolver reports after it gives up — and folding the two together would
+	// make the report's retention depend on the visitor still being around.
+	reports map[string]*memReports
 	// TTL bounds how long a token remains readable. Short by design: this is
 	// transient diagnostic state about someone's network, not a record to keep.
 	TTL time.Duration
@@ -417,17 +448,7 @@ type MemStore struct {
 	// name cannot grow a single entry without limit.
 	MaxPerToken int
 
-	mu      sync.Mutex
-	entries map[string]*memEntry
-	// reports is keyed by token, with "" holding the unattributed ones. Tokens
-	// are lowercase hex (see parseToken), so the empty key cannot collide with a
-	// real one.
-	//
-	// A separate map from entries on purpose: a report can arrive for a token
-	// whose observations have already expired — that is the normal case, since a
-	// resolver reports after it gives up — and folding the two together would
-	// make the report's retention depend on the visitor still being around.
-	reports map[string]*memReports
+	mu sync.Mutex
 }
 
 type memEntry struct {
@@ -475,7 +496,7 @@ func NewMemStore(ttl time.Duration, maxTokens, maxPerToken int) *MemStore {
 }
 
 // Record implements Store.
-func (s *MemStore) Record(obs Observation) (Observation, error) {
+func (s *MemStore) Record(obs *Observation) (Observation, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -493,7 +514,7 @@ func (s *MemStore) Record(obs Observation) (Observation, error) {
 		// for whoever is flooding us.
 		if len(s.entries) >= s.MaxTokens {
 			obs.Seen = 1
-			return obs, ErrStoreFull
+			return *obs, ErrStoreFull
 		}
 		e = &memEntry{first: now}
 		s.entries[obs.Token] = e
@@ -503,10 +524,10 @@ func (s *MemStore) Record(obs Observation) (Observation, error) {
 	if len(e.obs) >= s.MaxPerToken {
 		// Keep the count truthful even once we stop retaining detail — "seen
 		// 200 times" is itself the interesting finding.
-		return obs, nil
+		return *obs, nil
 	}
-	e.obs = append(e.obs, obs)
-	return obs, nil
+	e.obs = append(e.obs, *obs)
+	return *obs, nil
 }
 
 // Lookup implements Store.
@@ -525,7 +546,7 @@ func (s *MemStore) Lookup(token string) ([]Observation, error) {
 }
 
 // RecordReport implements Store.
-func (s *MemStore) RecordReport(rec ReportRecord) error {
+func (s *MemStore) RecordReport(rec *ReportRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -555,7 +576,7 @@ func (s *MemStore) RecordReport(rec ReportRecord) error {
 	if len(e.recs) >= limit {
 		return ErrStoreFull
 	}
-	e.recs = append(e.recs, rec)
+	e.recs = append(e.recs, *rec)
 	return nil
 }
 

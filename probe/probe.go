@@ -18,7 +18,7 @@
 // designed for this plugin rather than adapted from another codebase, so this
 // package carries no licence obligations beyond the repository's own MIT.
 //
-// Safety: this zone answers the public internet, synthesizes signed responses,
+// Safety: this zone answers the public internet, synthesises signed responses,
 // and has a modifier whose whole purpose is to emit a large answer. It must sit
 // behind response rate limiting (see docs/rrl-plugin.md) and must never share a
 // server block with a forwarder or a cache.
@@ -27,6 +27,7 @@ package probe
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/netip"
 	"strings"
@@ -37,59 +38,67 @@ import (
 	"github.com/miekg/dns"
 )
 
-var log = clog.NewWithPlugin("probe")
+// pluginName identifies this plugin to CoreDNS's own registration, logging and
+// error-wrapping conventions. Distinct from dnssdInstance in dnssd.go, which
+// happens to share the same value for an unrelated reason (the DNS-SD instance
+// name advertised in the probe zone).
+const pluginName = "probe"
+
+var log = clog.NewWithPlugin(pluginName)
 
 // Probe is the plugin handler.
 type Probe struct {
-	// Zone is the origin this plugin is authoritative for, normalised and
-	// fully qualified.
-	Zone string
-	// TTL applies to every synthesized record. Small by default: these answers
-	// describe one moment for one visitor and must not linger in caches, or a
-	// second visit reports the first visit's findings.
-	TTL uint32
-	// NSName is the nameserver name published at the apex.
-	NSName string
-	// Mbox is the SOA responsible-person mailbox.
-	Mbox string
+	// Store records observations. Never nil after setup.
+	Store Store
+
+	Next plugin.Handler
+
 	// Signer is optional. Without it the zone is unsigned and the
 	// signature-related modifiers become no-ops, which is worth saying out
 	// loud because it silently guts most of the point of the zone.
 	Signer *Signer
-	// Store records observations. Never nil after setup.
-	Store Store
+
+	// Zone is the origin this plugin is authoritative for, normalised and
+	// fully qualified.
+	Zone string
+	// NSName is the nameserver name published at the apex.
+	NSName string
+	// Mbox is the SOA responsible-person mailbox.
+	Mbox string
 	// AgentDomain is the RFC 9567 monitoring agent this zone advertises, and
 	// simultaneously the second zone this plugin serves. Empty disables error
 	// reporting entirely — both the advertisement and the receiver, because half
 	// of RFC 9567 is worse than none: advertising a channel nobody answers sends
 	// every reporting resolver into a failed lookup.
 	//
-	// setup enforces that it shares no ancestry with Zone. See agent.go.
+	// Setup enforces that it shares no ancestry with Zone. See agent.go.
 	AgentDomain string
-	// AgentTTL applies to agent-zone answers. Deliberately NOT TTL: that one is
-	// tiny because a probe answer describes one moment, whereas this one is a
-	// rate limit on inbound reports (RFC 9567 §6.2) and wants to be large.
-	AgentTTL uint32
-	// BigSize is the payload size the `_big` modifier aims for, in bytes.
-	BigSize int
 	// ECHConfigList is the RFC 9848 `ech=` parameter served in HTTPS/SVCB
 	// answers. Built once at setup and never rotated, because the measurement
 	// compares the bytes that arrive against the bytes we serve — see
 	// echconfig.go for why this is a transport canary and NOT a usable ECH
 	// deployment.
 	ECHConfigList []byte
-
-	Next plugin.Handler
+	// BigSize is the payload size the `_big` modifier aims for, in bytes.
+	BigSize int
+	// TTL applies to every synthesised record. Small by default: these answers
+	// describe one moment for one visitor and must not linger in caches, or a
+	// second visit reports the first visit's findings.
+	TTL uint32
+	// AgentTTL applies to agent-zone answers. Deliberately NOT TTL: that one is
+	// tiny because a probe answer describes one moment, whereas this one is a
+	// rate limit on inbound reports (RFC 9567 §6.2) and wants to be large.
+	AgentTTL uint32
 }
 
 // Name implements plugin.Handler.
-func (p *Probe) Name() string { return "probe" }
+func (p *Probe) Name() string { return pluginName }
 
 // ServeDNS implements plugin.Handler.
 func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	state := request.Request{W: w, Req: r}
+	state := &request.Request{W: w, Req: r}
 
-	qname := state.Name() // normalised, lowercase
+	qname := state.Name() // Normalised, lowercase.
 
 	// The RFC 9567 agent domain is a second, entirely separate zone served by the
 	// same plugin instance — that is what lets a report be correlated to the
@@ -101,7 +110,11 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	}
 
 	if !plugin.Name(p.Zone).Matches(qname) {
-		return plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
+		next, err := plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
+		if err != nil {
+			return next, fmt.Errorf("call next plugin: %w", err)
+		}
+		return next, nil
 	}
 
 	// The raw question name, before CoreDNS normalises case, is itself a
@@ -162,6 +175,17 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return p.respond(state, w, r, dns.RcodeRefused, nil, nil, false)
 	}
 
+	obs := p.observeAndRecord(state, w, r, q, raw)
+
+	return p.respondForQuery(state, w, r, qname, q, &obs)
+}
+
+// observeAndRecord builds the Observation for one probe query, folds in the
+// RFC 8145 key-tag knowledge check, and records it — both in the per-token
+// store and in the aggregate metrics. Split out of ServeDNS because this
+// block is a self-contained pipeline stage (observe, annotate, record) with
+// no branching back into the caller's control flow.
+func (p *Probe) observeAndRecord(state *request.Request, w dns.ResponseWriter, r *dns.Msg, q Query, raw string) Observation {
 	transport, tlsInfo := transportFrom(w, state.Proto())
 	obs := Observe(q, raw, addrOf(state), transport, state.QType(), r)
 	obs.TLS = tlsInfo
@@ -180,9 +204,9 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	// ceiling is exactly when the population question ("who is hammering us,
 	// and with what") matters most, and metrics carry no per-visitor data, so
 	// there is no reason for them to share the store's fate.
-	recordMetrics(obs)
+	recordMetrics(&obs)
 
-	stored, err := p.Store.Record(obs)
+	stored, err := p.Store.Record(&obs)
 	if err != nil {
 		// Answer anyway. A full or unreachable store degrades the measurement;
 		// failing the query instead would turn a memory ceiling into an outage
@@ -190,8 +214,15 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		// deliberate failures it exists to serve.
 		log.Warningf("recording observation for token %s: %v", q.Token, err)
 	}
-	obs = stored
+	return stored
+}
 
+// respondForQuery builds and writes the final answer for one probe query, once
+// the observation has been recorded. Split out of ServeDNS because it is the
+// self-contained "turn a Query and an Observation into a wire response" step:
+// the modifier dispatch, synthesis and signing all belong together and none of
+// it needs anything ServeDNS computed above beyond its parameters.
+func (p *Probe) respondForQuery(state *request.Request, w dns.ResponseWriter, r *dns.Msg, qname string, q Query, obs *Observation) (int, error) {
 	switch {
 	case q.Mods.Has(ModServfail):
 		return p.respond(state, w, r, dns.RcodeServerFailure, nil, nil, false, edeFor(q.Mods))
@@ -239,13 +270,13 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 // A and AAAA return the RESOLVER's own address, not the visitor's. That is the
 // in-band version of the whole measurement: `dig <token>.<zone> A` tells you
 // which address your resolver egresses from, with no web page involved.
-func (p *Probe) synthesize(qname string, qtype uint16, obs Observation, mods Modifier) []dns.RR {
+func (p *Probe) synthesize(qname string, qtype uint16, obs *Observation, mods Modifier) []dns.RR {
 	hdr := dns.RR_Header{Name: qname, Class: dns.ClassINET, Ttl: p.TTL}
 
 	switch qtype {
 	case dns.TypeA:
 		if !obs.ResolverAddr.Is4() {
-			return nil // NODATA: resolver reached us over IPv6
+			return nil // NODATA: resolver reached us over IPv6.
 		}
 		h := hdr
 		h.Rrtype = dns.TypeA
@@ -253,7 +284,7 @@ func (p *Probe) synthesize(qname string, qtype uint16, obs Observation, mods Mod
 
 	case dns.TypeAAAA:
 		if !obs.ResolverAddr.Is6() {
-			return nil // NODATA: resolver reached us over IPv4
+			return nil // NODATA: resolver reached us over IPv4.
 		}
 		h := hdr
 		h.Rrtype = dns.TypeAAAA
@@ -269,7 +300,7 @@ func (p *Probe) synthesize(qname string, qtype uint16, obs Observation, mods Mod
 		// operator forces SNI back into the clear. Serving a known, deterministic
 		// value is what lets a mismatch be attributed to the path.
 		if len(p.ECHConfigList) == 0 {
-			return nil // NODATA rather than an HTTPS record with no ech= to measure
+			return nil // NODATA rather than an HTTPS record with no ech= to measure.
 		}
 		h := hdr
 		h.Rrtype = qtype
@@ -280,9 +311,9 @@ func (p *Probe) synthesize(qname string, qtype uint16, obs Observation, mods Mod
 			&dns.SVCBECHConfig{ECH: p.ECHConfigList},
 		}
 		if qtype == dns.TypeHTTPS {
-			return []dns.RR{&dns.HTTPS{SVCB: dns.SVCB{
+			return []dns.RR{&dns.HTTPS{
 				Hdr: h, Priority: 1, Target: ".", Value: params,
-			}}}
+			}}
 		}
 		return []dns.RR{&dns.SVCB{
 			Hdr: h, Priority: 1, Target: ".", Value: params,
@@ -303,7 +334,7 @@ func (p *Probe) synthesize(qname string, qtype uint16, obs Observation, mods Mod
 // serveApex answers the zone's own records. Kept separate from the probe path
 // because the apex is not a measurement — it is the delegation and trust anchor
 // that makes every measurement below it meaningful.
-func (p *Probe) serveApex(state request.Request, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (p *Probe) serveApex(state *request.Request, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	var answer []dns.RR
 	switch state.QType() {
 	case dns.TypeSOA:
@@ -341,12 +372,12 @@ func (p *Probe) serveApex(state request.Request, w dns.ResponseWriter, r *dns.Ms
 // the walk shows up in the observation sequence and the web tier can report which
 // levels a client reached. Recorded BEFORE answering, for the same reason the main
 // path does it: a store failure must degrade the measurement, not the answer.
-func (p *Probe) serveDNSSD(state request.Request, w dns.ResponseWriter, r *dns.Msg, kind dnssdKind, token string) (int, error) {
+func (p *Probe) serveDNSSD(state *request.Request, w dns.ResponseWriter, r *dns.Msg, kind dnssdKind, token string) (int, error) {
 	transport, tlsInfo := transportFrom(w, state.Proto())
 	obs := Observe(Query{Token: token}, state.Name(), addrOf(state), transport, state.QType(), r)
 	obs.TLS = tlsInfo
-	recordMetrics(obs)
-	if _, err := p.Store.Record(obs); err != nil {
+	recordMetrics(&obs)
+	if _, err := p.Store.Record(&obs); err != nil {
 		log.Warningf("recording DNS-SD observation for token %s: %v", token, err)
 	}
 
@@ -374,10 +405,10 @@ func (p *Probe) serveDNSSD(state request.Request, w dns.ResponseWriter, r *dns.M
 // records are a hint the client MAY use. Threading an unused slice through the
 // twelve other callsites would suggest it were general.
 //
-// Order matters. m.Extra is populated BEFORE SizeAndDo, which appends the response
+// Order matters. M.Extra is populated BEFORE SizeAndDo, which appends the response
 // OPT to the same slice — doing it the other way round would put the hint records
 // after the OPT, which some clients treat as the end of the message.
-func (p *Probe) respondDNSSD(state request.Request, w dns.ResponseWriter, r *dns.Msg,
+func (p *Probe) respondDNSSD(state *request.Request, w dns.ResponseWriter, r *dns.Msg,
 	answer, extra []dns.RR,
 ) (int, error) {
 	m := new(dns.Msg)
@@ -396,7 +427,7 @@ func (p *Probe) respondDNSSD(state request.Request, w dns.ResponseWriter, r *dns
 	m = state.Scrub(m)
 
 	if err := w.WriteMsg(m); err != nil {
-		return dns.RcodeServerFailure, err
+		return dns.RcodeServerFailure, fmt.Errorf("write dns response: %w", err)
 	}
 	return dns.RcodeSuccess, nil
 }
@@ -405,24 +436,24 @@ func (p *Probe) respondDNSSD(state request.Request, w dns.ResponseWriter, r *dns
 //
 // RFC 8145 §5.3: "A server does not need to have built-in logic that determines
 // the response to Key Tag queries: the response code is determined by whether the
-// data is in the zone file or covered by wildcards." This zone is synthesized and
+// data is in the zone file or covered by wildcards." This zone is synthesised and
 // has no `_ta-*` records, so the correct answer is NODATA — NOERROR with an empty
 // answer and the SOA in authority — NOT NXDOMAIN and certainly not REFUSED.
 //
 // There is no token in a Key Tag query, so it cannot be correlated to a visitor
 // and nothing is written to the per-token store. It is counted instead, which is
 // the honest place for a population-level signal with no individual attached.
-func (p *Probe) serveKeyTagQuery(state request.Request, w dns.ResponseWriter, r *dns.Msg, tags []uint16) (int, error) {
+func (p *Probe) serveKeyTagQuery(state *request.Request, w dns.ResponseWriter, r *dns.Msg, tags []uint16) (int, error) {
 	sorted := "unsorted"
 	if KeyTagsSorted(tags) {
 		sorted = "sorted"
 	}
 	probeKeyTagQueries.WithLabelValues(sorted).Inc()
 
-	knowsOurs := "unknown"
+	knowsOurs := labelUnknown
 	if p.Signer != nil {
 		if hasKeyTag(tags, p.Signer.DNSKEY().KeyTag()) {
-			knowsOurs = "yes"
+			knowsOurs = labelYes
 		} else {
 			knowsOurs = "no"
 		}
@@ -436,15 +467,24 @@ func (p *Probe) serveKeyTagQuery(state request.Request, w dns.ResponseWriter, r 
 	return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false)
 }
 
+// SOA timing fields for both zones this plugin serves. Neither zone is ever
+// transferred, so these bound how long a secondary would wait to notice that
+// before giving up, not anything this plugin itself acts on.
+const (
+	soaRefreshSeconds = 3600   // 1 hour.
+	soaRetrySeconds   = 900    // 15 minutes.
+	soaExpireSeconds  = 604800 // 1 week.
+)
+
 func (p *Probe) soa() *dns.SOA {
 	return &dns.SOA{
 		Hdr:     dns.RR_Header{Name: p.Zone, Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: p.TTL},
 		Ns:      p.NSName,
 		Mbox:    p.Mbox,
-		Serial:  1, // Nothing transfers this zone; it is synthesized per query.
-		Refresh: 3600,
-		Retry:   900,
-		Expire:  604800,
+		Serial:  1, // Nothing transfers this zone; it is synthesised per query.
+		Refresh: soaRefreshSeconds,
+		Retry:   soaRetrySeconds,
+		Expire:  soaExpireSeconds,
 		Minttl:  p.TTL,
 	}
 }
@@ -459,7 +499,7 @@ func (p *Probe) soa() *dns.SOA {
 //
 // The next-domain name is the "black lies" trick: one byte greater than this
 // name, so the NSEC covers nothing but itself and no real name becomes
-// enumerable. For a zone of unbounded synthesized names that is a requirement
+// enumerable. For a zone of unbounded synthesised names that is a requirement
 // rather than a bonus — the alternative is an enumerable chain that cannot
 // exist.
 //
@@ -476,10 +516,10 @@ func (p *Probe) nodataDenial(name string, mods Modifier, do bool) []dns.RR {
 //
 // Identical in shape to nodataDenial except that the type bitmap also carries
 // NXNAME (type 128, a meta-type that never appears as an actual record). That
-// single bit is the whole mechanism: a resolver that understands it synthesizes
+// single bit is the whole mechanism: a resolver that understands it synthesises
 // NXDOMAIN for its own client, while one that does not sees a perfectly valid
 // NODATA. Both outcomes are correct and provable, which is what the legacy
-// NXDOMAIN form cannot manage from a synthesized zone.
+// NXDOMAIN form cannot manage from a synthesised zone.
 //
 // RFC 9824 §3.1: the bitmap MUST carry only RRSIG, NSEC and NXNAME.
 func (p *Probe) compactDenial(name string, mods Modifier, do bool) []dns.RR {
@@ -517,7 +557,7 @@ func (p *Probe) sign(rrs []dns.RR, mods Modifier) dns.RR {
 	if p.Signer == nil {
 		return nil
 	}
-	sig, err := p.Signer.signRRset(rrs, mods)
+	sig, ok, err := p.Signer.signRRset(rrs, mods)
 	if err != nil {
 		// Log rather than fail: an unsigned answer is a worse measurement, but
 		// a SERVFAIL here would be indistinguishable from the deliberate
@@ -525,14 +565,14 @@ func (p *Probe) sign(rrs []dns.RR, mods Modifier) dns.RR {
 		log.Errorf("signing failed: %v", err)
 		return nil
 	}
-	if sig == nil {
+	if !ok {
 		return nil
 	}
 	return sig
 }
 
 // respond assembles and writes the reply.
-func (p *Probe) respond(state request.Request, w dns.ResponseWriter, r *dns.Msg,
+func (p *Probe) respond(state *request.Request, w dns.ResponseWriter, r *dns.Msg,
 	rcode int, answer, auth []dns.RR, truncate bool, extErr ...*dns.EDNS0_EDE,
 ) (int, error) {
 	// Read the ZONEVERSION request BEFORE SizeAndDo, which is not optional
@@ -596,13 +636,13 @@ func (p *Probe) respond(state request.Request, w dns.ResponseWriter, r *dns.Msg,
 	}
 
 	if err := w.WriteMsg(m); err != nil {
-		return dns.RcodeServerFailure, err
+		return dns.RcodeServerFailure, fmt.Errorf("write dns response: %w", err)
 	}
 	return dns.RcodeSuccess, nil
 }
 
 // addrOf extracts the source address as a netip.Addr.
-func addrOf(state request.Request) netip.Addr {
+func addrOf(state *request.Request) netip.Addr {
 	if addr, err := netip.ParseAddr(state.IP()); err == nil {
 		return addr.Unmap()
 	}
@@ -615,18 +655,18 @@ func addrOf(state request.Request) netip.Addr {
 // and DoH — which are TCP underneath — are not distinguished here. Recording
 // them separately needs the listener to pass that down, which is a change
 // outside this plugin.
-// chunk splits a payload into the 255-byte strings a TXT record is made of.
+// Chunk splits a payload into the 255-byte strings a TXT record is made of.
 func chunk(s string) []string {
-	const max = 255
-	if len(s) <= max {
+	const maxChunk = 255
+	if len(s) <= maxChunk {
 		return []string{s}
 	}
 	var out []string
-	for len(s) > max {
-		out = append(out, s[:max])
-		s = s[max:]
+	for len(s) > maxChunk {
+		out = append(out, s[:maxChunk])
+		s = s[maxChunk:]
 	}
-	if len(s) > 0 {
+	if s != "" {
 		out = append(out, s)
 	}
 	return out

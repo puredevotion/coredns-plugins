@@ -62,20 +62,20 @@ func TestParseKeyTagQueryRejectsHostileInput(t *testing.T) {
 	flood := "_ta-" + strings.TrimSuffix(strings.Repeat("0001-", maxKeyTagsPerQuery+4), "-")
 
 	for _, tc := range []struct {
+		wantErr error
 		name    string
 		in      string
-		wantErr error
 	}{
-		{"not a key tag name", "deadbeef", ErrNotKeyTagQuery},
-		{"prefix only", "_ta-", ErrBadKeyTagQuery},
-		{"bare prefix without hyphen", "_ta", ErrNotKeyTagQuery},
-		{"non-hex digits", "_ta-zzzz", ErrBadKeyTagQuery},
-		{"empty tag between hyphens", "_ta-0635--7aae", ErrBadKeyTagQuery},
-		{"trailing hyphen", "_ta-0635-", ErrBadKeyTagQuery},
-		{"tag flood", flood, ErrBadKeyTagQuery},
+		{name: "not a key tag name", in: testToken2, wantErr: ErrNotKeyTagQuery},
+		{name: "prefix only", in: "_ta-", wantErr: ErrBadKeyTagQuery},
+		{name: "bare prefix without hyphen", in: "_ta", wantErr: ErrNotKeyTagQuery},
+		{name: "non-hex digits", in: "_ta-zzzz", wantErr: ErrBadKeyTagQuery},
+		{name: "empty tag between hyphens", in: "_ta-0635--7aae", wantErr: ErrBadKeyTagQuery},
+		{name: "trailing hyphen", in: "_ta-0635-", wantErr: ErrBadKeyTagQuery},
+		{name: "tag flood", in: flood, wantErr: ErrBadKeyTagQuery},
 		// Key Tag queries go to the zone apex, so the prefix must be the only
 		// label. A deeper name is not one, and must not be mistaken for one.
-		{"deeper than the apex", "_ta-4444.something", ErrNotKeyTagQuery},
+		{name: "deeper than the apex", in: "_ta-4444.something", wantErr: ErrNotKeyTagQuery},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseKeyTagQuery(tc.in)
@@ -148,7 +148,7 @@ func TestParseEDNSKeyTags(t *testing.T) {
 	}
 }
 
-// TestObserveRecordsEDNSKeyTags wires option 14 through Observe. miekg/dns has no
+// TestObserveRecordsEDNSKeyTags wires option 14 through Observe. Miekg/dns has no
 // type for code 14, so it arrives as an EDNS0_LOCAL and must be picked out by
 // code rather than by type.
 func TestObserveRecordsEDNSKeyTags(t *testing.T) {
@@ -179,7 +179,7 @@ func TestObserveRecordsEDNSKeyTags(t *testing.T) {
 
 // TestKeyTagQueryAnsweredNODATA is the behaviour change that matters. Before this,
 // `_ta-*` fell through to ParseQuery and got REFUSED — wrong per RFC 8145 §5.3
-// (the response is whatever the zone content implies, and this synthesized zone
+// (the response is whatever the zone content implies, and this synthesised zone
 // has no `_ta-*` records, so NODATA) and a discarded measurement besides.
 func TestKeyTagQueryAnsweredNODATA(t *testing.T) {
 	p := newTestProbe(t, true)

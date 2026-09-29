@@ -1,4 +1,4 @@
-package sni_tls
+package snitls
 
 import (
 	"crypto/tls"
@@ -6,10 +6,10 @@ import (
 	"testing"
 )
 
-// --- digestPairs: change detection -------------------------------------------
+// --- digestPairs: change detection -------------------------------------------.
 
 func TestDigestPairs_StableWhenUnchanged(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 	pairs := [][2]string{{certPath, keyPath}}
 
 	a, b := digestPairs(pairs), digestPairs(pairs)
@@ -19,12 +19,12 @@ func TestDigestPairs_StableWhenUnchanged(t *testing.T) {
 }
 
 func TestDigestPairs_ChangesOnRotation(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 	pairs := [][2]string{{certPath, keyPath}}
 
 	before := digestPairs(pairs)
 
-	rotatedCertPath, rotatedKeyPath := writeTestCert(t, "rotated", "dns.example.com")
+	rotatedCertPath, rotatedKeyPath := writeTestCert(t, "rotated", testSNIPrimary)
 	//nolint:gosec // G304/G703: all four paths are t.TempDir() fixtures from writeTestCert, not external input.
 	certBytes, err := os.ReadFile(rotatedCertPath)
 	if err != nil {
@@ -54,13 +54,13 @@ func TestDigestPairs_MissingFileIsStableSentinel(t *testing.T) {
 	}
 }
 
-// --- liveStore.reloadOnce: swap-on-change, keep-old-on-error -----------------
+// --- liveStore.reloadOnce: swap-on-change, keep-old-on-error -----------------.
 
-// TestLiveStore_ReloadOnce_SwapsOnRotation is the core hot-reload behavior: a
+// TestLiveStore_ReloadOnce_SwapsOnRotation is the core hot-reload behaviour: a
 // cert rotated at the same path must be picked up on the next poll, no
 // CoreDNS restart needed.
 func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 
 	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
@@ -69,18 +69,18 @@ func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 	pairs := [][2]string{{certPath, keyPath}}
 	live := newLiveStore(pairs, false, store, digestPairs(pairs))
 
-	before, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: "dns.example.com"})
+	before, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIPrimary})
 	if err != nil {
 		t.Fatalf("GetCertificate before rotation: %v", err)
 	}
 
-	rotatedCertPath, rotatedKeyPath := writeTestCert(t, "rotated", "dns.example.com")
+	rotatedCertPath, rotatedKeyPath := writeTestCert(t, "rotated", testSNIPrimary)
 	overwrite(t, certPath, rotatedCertPath)
 	overwrite(t, keyPath, rotatedKeyPath)
 
 	live.reloadOnce()
 
-	after, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: "dns.example.com"})
+	after, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIPrimary})
 	if err != nil {
 		t.Fatalf("GetCertificate after rotation: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 // TestLiveStore_ReloadOnce_NoopWhenUnchanged: an unchanged poll tick must not
 // rebuild/swap — steady-state should be cheap and quiet.
 func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
@@ -113,7 +113,7 @@ func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 // caught mid-write (digest changed, but the new file is unloadable): the
 // listener must keep serving the last-good cert, not lose it.
 func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
@@ -123,8 +123,8 @@ func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 
 	before := live.current.Load()
 
-	if err := os.WriteFile(certPath, []byte("not a valid cert"), 0o600); err != nil {
-		t.Fatalf("corrupt cert file: %v", err)
+	if writeErr := os.WriteFile(certPath, []byte("not a valid cert"), 0o600); writeErr != nil {
+		t.Fatalf("corrupt cert file: %v", writeErr)
 	}
 
 	live.reloadOnce()
@@ -133,19 +133,19 @@ func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 		t.Fatal("reloadOnce must keep the previous store when the rebuild fails")
 	}
 
-	got, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: "dns.example.com"})
+	got, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIPrimary})
 	if err != nil || got == nil {
 		t.Fatalf("plugin must keep serving the last-good cert after a failed reload: got=%v err=%v", got, err)
 	}
 }
 
-// --- liveStore lifecycle: OnStartup/OnShutdown are safe to call repeatedly --
+// --- liveStore lifecycle: OnStartup/OnShutdown are safe to call repeatedly --.
 
 // TestLiveStore_Lifecycle_StartStopRestart mirrors the
 // OnStartup->OnRestart->OnRestartFailed sequence a Corefile reload can
 // produce; must not deadlock, panic, or leak the poll goroutine.
 func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
@@ -159,10 +159,10 @@ func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 	if err := live.OnShutdown(); err != nil {
 		t.Fatalf("OnShutdown (restart): %v", err)
 	}
-	if err := live.OnStartup(); err != nil { // OnRestartFailed path
+	if err := live.OnStartup(); err != nil { // OnRestartFailed path.
 		t.Fatalf("OnStartup (restart-failed resume): %v", err)
 	}
-	if err := live.OnShutdown(); err != nil { // OnFinalShutdown
+	if err := live.OnShutdown(); err != nil { // OnFinalShutdown.
 		t.Fatalf("OnShutdown (final): %v", err)
 	}
 }

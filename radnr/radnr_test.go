@@ -1,3 +1,4 @@
+//nolint:misspell // ADN throughout this file: RFC 9463 Authentication Domain Name, not a typo for AND
 package radnr
 
 import (
@@ -13,13 +14,13 @@ import (
 
 func TestName(t *testing.T) {
 	r := &RADNR{}
-	if r.Name() != "radnr" {
-		t.Fatalf("Name = %q, want radnr", r.Name())
+	if r.Name() != pluginName {
+		t.Fatalf("Name = %q, want %s", r.Name(), pluginName)
 	}
 }
 
 // fakeRunner records lifecycle calls; lets us test OnStartup/OnShutdown without
-// a real ICMPv6 socket. stopped is a channel (closed on Run return) to avoid a
+// a real ICMPv6 socket. Stopped is a channel (closed on Run return) to avoid a
 // data race between the runner goroutine and the test.
 type fakeRunner struct {
 	started chan struct{}
@@ -49,7 +50,7 @@ func TestOnStartup_LaunchesRunner(t *testing.T) {
 	}
 	select {
 	case <-fr.started:
-		// good — runner goroutine launched
+		// Good — runner goroutine launched.
 	case <-time.After(time.Second):
 		t.Fatal("runner did not start")
 	}
@@ -58,14 +59,14 @@ func TestOnStartup_LaunchesRunner(t *testing.T) {
 	}
 	select {
 	case <-fr.stopped:
-		// good — runner observed cancellation
+		// Good — runner observed cancellation.
 	case <-time.After(time.Second):
 		t.Fatal("runner was not stopped on shutdown")
 	}
 }
 
 func TestOnStartup_InvalidConfig(t *testing.T) {
-	r := &RADNR{Cfg: config.Config{}} // empty → invalid
+	r := &RADNR{Cfg: config.Config{}} // Empty, invalid.
 	if err := r.OnStartup(); err == nil {
 		t.Fatal("OnStartup must reject invalid config")
 	}
@@ -86,7 +87,9 @@ func TestOnStartup_RunnerErrorLogged(t *testing.T) {
 		t.Fatalf("OnStartup: %v", err)
 	}
 	<-fr.started
-	_ = r.OnShutdown()
+	if err := r.OnShutdown(); err != nil {
+		t.Fatalf("OnShutdown: %v", err)
+	}
 }
 
 func validCfg() config.Config {
@@ -109,19 +112,25 @@ func TestOnStartup_DryRunUsesNopConn(t *testing.T) {
 	if err := r.OnStartup(); err != nil {
 		t.Fatalf("dry-run OnStartup: %v", err)
 	}
-	defer func() { _ = r.OnShutdown() }()
-	time.Sleep(20 * time.Millisecond) // let the advertiser loop run once
+	defer func() {
+		if err := r.OnShutdown(); err != nil {
+			t.Errorf("OnShutdown: %v", err)
+		}
+	}()
+	time.Sleep(20 * time.Millisecond) // Let the advertiser loop run once.
 }
 
 func TestDial_DryRun(t *testing.T) {
-	c, err := dial(config.Config{DryRun: true})
+	c, err := dial(&config.Config{DryRun: true})
 	if err != nil {
 		t.Fatalf("dial dry-run: %v", err)
 	}
 	if c == nil {
 		t.Fatal("dial dry-run returned nil conn")
 	}
-	_ = c.Close()
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 }
 
 func TestDial_RealPath_Injected(t *testing.T) {
@@ -134,13 +143,13 @@ func TestDial_RealPath_Injected(t *testing.T) {
 	cfg.DryRun = false
 
 	listenFn = func(string) (advertiser.Conn, error) { return nopConn{}, nil }
-	c, err := dial(cfg)
+	c, err := dial(&cfg)
 	if err != nil || c == nil {
 		t.Fatalf("dial via injected listener: c=%v err=%v", c, err)
 	}
 
 	listenFn = func(string) (advertiser.Conn, error) { return nil, errBoom }
-	if _, err := dial(cfg); err == nil {
+	if _, err := dial(&cfg); err == nil {
 		t.Fatal("dial must propagate listener error")
 	}
 }
@@ -158,7 +167,7 @@ func TestNopConn_Methods(t *testing.T) {
 	// ReadFrom blocks forever by design; verify that in a goroutine that we cancel.
 	done := make(chan struct{})
 	go func() {
-		_, _, _, _ = c.ReadFrom()
+		_, _, _, _ = c.ReadFrom() //nolint:errcheck // nopConn.ReadFrom blocks forever by design; this call never returns, so there is no error to check.
 		close(done)
 	}()
 	select {

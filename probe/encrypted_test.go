@@ -70,13 +70,13 @@ func TestTransportFromDetectsEncryption(t *testing.T) {
 			want: TransportUDP, encrypted: false,
 		},
 		{
-			name: "plain tcp", w: &plainWriter{addr: tcpAddr()}, proto: "tcp",
+			name: "plain tcp", w: &plainWriter{addr: tcpAddr()}, proto: string(TransportTCP),
 			want: TransportTCP, encrypted: false,
 		},
 		{
 			// The whole point: TCP by address, TLS by connection state. The TLS
 			// check must win, or Proto() answers "tcp" and is believed.
-			name: "DoT", w: &tlsWriter{addr: tcpAddr(), state: tls13State("dot")}, proto: "tcp",
+			name: "DoT", w: &tlsWriter{addr: tcpAddr(), state: tls13State("dot")}, proto: string(TransportTCP),
 			want: TransportTLS, wantTLS: true, encrypted: true,
 		},
 		{
@@ -84,13 +84,13 @@ func TestTransportFromDetectsEncryption(t *testing.T) {
 			want: TransportQUIC, wantTLS: true, encrypted: true,
 		},
 		{
-			name: "DoH via ALPN h2", w: &tlsWriter{addr: tcpAddr(), state: tls13State("h2")}, proto: "tcp",
+			name: "DoH via ALPN h2", w: &tlsWriter{addr: tcpAddr(), state: tls13State("h2")}, proto: string(TransportTCP),
 			want: TransportHTTP, wantTLS: true, encrypted: true,
 		},
 		{
 			// No ALPN at all is the expected RFC 9539 case — an opportunistic
 			// prober has no name to authenticate and nothing to negotiate.
-			name: "DoT with no ALPN", w: &tlsWriter{addr: tcpAddr(), state: tls13State("")}, proto: "tcp",
+			name: "DoT with no ALPN", w: &tlsWriter{addr: tcpAddr(), state: tls13State("")}, proto: string(TransportTCP),
 			want: TransportTLS, wantTLS: true, encrypted: true,
 		},
 	} {
@@ -102,7 +102,8 @@ func TestTransportFromDetectsEncryption(t *testing.T) {
 			if (info != nil) != tc.wantTLS {
 				t.Errorf("TLSInfo present = %v, want %v", info != nil, tc.wantTLS)
 			}
-			if enc := (Observation{Transport: got}).Encrypted(); enc != tc.encrypted {
+			obs := Observation{Transport: got}
+			if enc := obs.Encrypted(); enc != tc.encrypted {
 				t.Errorf("Encrypted() = %v, want %v", enc, tc.encrypted)
 			}
 		})
@@ -118,14 +119,14 @@ func TestConnectionStateWalksWrappers(t *testing.T) {
 	doubleWrapped := &wrappingWriter{inner: wrapped}
 
 	for _, tc := range []struct {
-		name string
 		w    dns.ResponseWriter
+		name string
 		want bool
 	}{
-		{"direct", inner, true},
-		{"one wrapper", wrapped, true},
-		{"two wrappers", doubleWrapped, true},
-		{"no tls anywhere", &wrappingWriter{inner: &plainWriter{addr: tcpAddr()}}, false},
+		{name: "direct", w: inner, want: true},
+		{name: "one wrapper", w: wrapped, want: true},
+		{name: "two wrappers", w: doubleWrapped, want: true},
+		{name: "no tls anywhere", w: &wrappingWriter{inner: &plainWriter{addr: tcpAddr()}}, want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := connectionState(tc.w) != nil; got != tc.want {
@@ -141,7 +142,7 @@ func TestConnectionStateWalksWrappers(t *testing.T) {
 // query as encrypted, which is worse than missing one.
 func TestConnectionStateStopsAtAuthoritativeNo(t *testing.T) {
 	stale := &tlsWriter{addr: tcpAddr(), state: tls13State("dot")}
-	// Outer says "TLS? no." Inner would say yes if we kept walking.
+	// Outer claims no TLS; inner would say yes if we kept walking.
 	outer := &struct {
 		*tlsWriter
 		inner dns.ResponseWriter
@@ -162,7 +163,7 @@ func TestTLSInfoRecordsWhatMatters(t *testing.T) {
 	st.ServerName = ""
 	st.DidResume = false
 
-	_, info := transportFrom(&tlsWriter{addr: tcpAddr(), state: st}, "tcp")
+	_, info := transportFrom(&tlsWriter{addr: tcpAddr(), state: st}, string(TransportTCP))
 	if info == nil {
 		t.Fatal("no TLSInfo for a TLS connection")
 	}
@@ -185,12 +186,15 @@ func TestTLSInfoRecordsWhatMatters(t *testing.T) {
 
 	st2 := tls13State("dot")
 	st2.DidResume = true
-	st2.ServerName = "check.example.com"
-	_, info2 := transportFrom(&tlsWriter{addr: tcpAddr(), state: st2}, "tcp")
+	st2.ServerName = testPublicName
+	_, info2 := transportFrom(&tlsWriter{addr: tcpAddr(), state: st2}, string(TransportTCP))
+	if info2 == nil {
+		t.Fatal("no TLSInfo for a TLS connection")
+	}
 	if !info2.DidResume {
 		t.Error("DidResume not recorded")
 	}
-	if info2.ServerName != "check.example.com" {
+	if info2.ServerName != testPublicName {
 		t.Errorf("ServerName = %q", info2.ServerName)
 	}
 }

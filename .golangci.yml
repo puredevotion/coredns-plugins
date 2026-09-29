@@ -1,27 +1,164 @@
 # golangci-lint config, shared shape across every Go repo in this ecosystem
-# (dafs's ci/ module, homelab's ci/dagger + experiments/ra-dnr) — one
-# consistent lint/SAST bar regardless of which repo is public.
+# (dafs's ci/ module, homelab's ci/dagger + experiments/ra-dnr, kithl/backend,
+# cardwallet/server) — one consistent strict lint/SAST bar regardless of
+# which repo is public.
 #
-# v2 schema (migrated from v1 via `golangci-lint migrate` — no v1.x release
-# builds against Go 1.26, so staying on v1 stopped being an option once
-# go.mod's toolchain moved past 1.24, see ci.yml's golangci-lint step
-# comment). v2's default-enabled set already covers govet, staticcheck
-# (which absorbed gosimple/stylecheck) and errcheck, previously listed here
-# explicitly under v1 — only gosec still needs enabling, it's the one that
-# actually closes the Go-SAST gap (hardcoded credentials, weak crypto,
-# command injection via unsanitized exec.Command args, etc.) and isn't on
-# by default in either schema version.
+# v2 schema. Single root config picked up by golangci-lint walking up from
+# each plugin module's working directory (probe/, dynupdate/, radnr/,
+# sni_tls/ each have their own go.mod, no go.work) — see ci/main.go's
+# LintPlugin comment.
+#
+# nilaway needs the module-plugin build (golangci-lint custom / .custom-gcl.yml
+# at repo root) since it isn't a builtin linter — run ./custom-gcl, not a bare
+# golangci-lint, from within a plugin dir.
 version: "2"
+
+run:
+  timeout: 5m
+
 linters:
+  default: none
   enable:
+    # Homelab ecosystem baseline
+    - govet
+    - staticcheck
+    - errcheck
     - gosec
+    # Error handling: wrapped-error comparisons and exhaustive type switches
+    - errorlint
+    - exhaustive
+    - wrapcheck
+    # Correctness under concurrency and contexts
+    - contextcheck
+    - noctx
+    - bodyclose
+    - rowserrcheck
+    - sqlclosecheck
+    - unqueryvet
+    # API and package hygiene
+    - revive
+    - gocritic
+    - unconvert
+    - unparam
+    - prealloc
+    - copyloopvar
+    - nilerr
+    - nilnil
+    - forcetypeassert
+    - makezero
+    - ineffassign
+    - gocyclo
+    - gocognit
+    - cyclop
+    - funlen
+    - durationcheck
+    - asasalint
+    - goconst
+    - mnd
+    - unused
+    - reassign
+    - tparallel
+    - testableexamples
+    - thelper
+    - usetesting
+    - usestdlibvars
+    - promlinter
+    - nolintlint
+    # Style/consistency
+    - misspell
+    - whitespace
+    - godot
+    - godoclint
+    - asciicheck
+    - bidichk
+    - gosmopolitan
+    - modernize
+    - ginkgolinter
+    - nilaway
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+    staticcheck:
+      checks:
+        - all
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - performance
+        - style
+        - opinionated
+        - experimental
+    revive:
+      rules:
+        - name: exported
+          arguments: [checkPrivateReceivers]
+    exhaustive:
+      default-signifies-exhaustive: false
+    wrapcheck: {}
+    unparam:
+      check-exported: true
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: true
+    gocyclo:
+      min-complexity: 20
+    gocognit:
+      min-complexity: 20
+    cyclop:
+      max-complexity: 20
+      package-average: 10
+    funlen:
+      lines: 60
+      statements: 40
+    goconst:
+      min-occurrences: 3
+    mnd:
+      checks:
+        - argument
+        - case
+        - condition
+        - operation
+        - return
+        - assign
+    gosec:
+      severity: low
+      confidence: low
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
+    godot:
+      scope: all
+      capital: true
+    misspell:
+      locale: UK
+    custom:
+      nilaway:
+        type: module
+        description: Static analysis tool to detect potential nil panics in Go code.
+        settings:
+          # Scope analysis to our own packages, not third-party dependencies.
+          # Common prefix so it covers every plugin module under this repo.
+          include-pkgs: "github.com/puredevotion/coredns-plugins"
   exclusions:
     generated: lax
     paths:
       - third_party$
       - builtin$
       - examples$
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
 formatters:
+  enable:
+    - gofumpt
+    - goimports
   exclusions:
     generated: lax
     paths:

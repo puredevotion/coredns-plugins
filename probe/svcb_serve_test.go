@@ -12,7 +12,7 @@ import (
 func probeWithECH(t *testing.T) *Probe {
 	t.Helper()
 	p := newTestProbe(t, true)
-	list, err := BuildECHConfigList(echConfigID, testECHKey(), "check.example.com")
+	list, err := BuildECHConfigList(echConfigID, testECHKey(), testPublicName)
 	if err != nil {
 		t.Fatalf("BuildECHConfigList: %v", err)
 	}
@@ -47,39 +47,47 @@ func TestServesECHOverTheWire(t *testing.T) {
 
 	for _, qtype := range []uint16{dns.TypeHTTPS, dns.TypeSVCB} {
 		t.Run(dns.TypeToString[qtype], func(t *testing.T) {
-			m := query(t, p, "deadbeef."+testZone, qtype, true)
-			if m.Rcode != dns.RcodeSuccess {
-				t.Fatalf("Rcode = %s", dns.RcodeToString[m.Rcode])
-			}
-			if len(m.Answer) == 0 {
-				t.Fatal("no answer record")
-			}
-
-			// Round-trip through the wire, which is where param ordering is checked.
-			wire, err := m.Pack()
-			if err != nil {
-				t.Fatalf("Pack: %v — SvcParams are probably out of ascending key order", err)
-			}
-			var got dns.Msg
-			if err := got.Unpack(wire); err != nil {
-				t.Fatalf("Unpack: %v", err)
-			}
-			if len(got.Answer) == 0 {
-				t.Fatal("answer did not survive the round trip")
-			}
-
-			ech := echFromRR(got.Answer[0])
-			if ech == nil {
-				t.Fatal("no ech= parameter after the round trip")
-			}
-			if !bytes.Equal(ech, p.ECHConfigList) {
-				t.Error("ech= bytes changed across the wire round trip")
-			}
-			// And it must still parse as a config list, not merely match.
-			if _, _, _, err := ParseECHConfigList(ech); err != nil {
-				t.Errorf("served ech= does not parse: %v", err)
-			}
+			checkECHSurvivesWireRoundTrip(t, p, qtype)
 		})
+	}
+}
+
+// checkECHSurvivesWireRoundTrip runs one TestServesECHOverTheWire case. Split
+// out of that test purely to keep its cognitive complexity down; every
+// assertion is unchanged.
+func checkECHSurvivesWireRoundTrip(t *testing.T, p *Probe, qtype uint16) {
+	t.Helper()
+	m := query(t, p, "deadbeef."+testZone, qtype, true)
+	if m.Rcode != dns.RcodeSuccess {
+		t.Fatalf("Rcode = %s", dns.RcodeToString[m.Rcode])
+	}
+	if len(m.Answer) == 0 {
+		t.Fatal("no answer record")
+	}
+
+	// Round-trip through the wire, which is where param ordering is checked.
+	wire, err := m.Pack()
+	if err != nil {
+		t.Fatalf("Pack: %v — SvcParams are probably out of ascending key order", err)
+	}
+	var got dns.Msg
+	if err := got.Unpack(wire); err != nil {
+		t.Fatalf("Unpack: %v", err)
+	}
+	if len(got.Answer) == 0 {
+		t.Fatal("answer did not survive the round trip")
+	}
+
+	ech := echFromRR(got.Answer[0])
+	if ech == nil {
+		t.Fatal("no ech= parameter after the round trip")
+	}
+	if !bytes.Equal(ech, p.ECHConfigList) {
+		t.Error("ech= bytes changed across the wire round trip")
+	}
+	// And it must still parse as a config list, not merely match.
+	if _, _, _, err := ParseECHConfigList(ech); err != nil {
+		t.Errorf("served ech= does not parse: %v", err)
 	}
 }
 
@@ -87,7 +95,7 @@ func TestServesECHOverTheWire(t *testing.T) {
 // measurement nothing to compare, so NODATA is the honest answer rather than a
 // half-populated record.
 func TestNoECHRecordWithoutACanary(t *testing.T) {
-	p := newTestProbe(t, true) // ECHConfigList deliberately empty
+	p := newTestProbe(t, true) // ECHConfigList deliberately empty.
 	m := query(t, p, "deadbeef."+testZone, dns.TypeHTTPS, true)
 
 	if m.Rcode != dns.RcodeSuccess {
@@ -104,7 +112,7 @@ func TestECHRecordIsObservable(t *testing.T) {
 	p := probeWithECH(t)
 	query(t, p, "deadbeef."+testZone, dns.TypeHTTPS, true)
 
-	obs, err := p.Store.Lookup("deadbeef")
+	obs, err := p.Store.Lookup(testToken2)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}

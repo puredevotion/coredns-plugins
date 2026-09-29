@@ -66,10 +66,10 @@ func TestReportChannelAdvertised(t *testing.T) {
 func TestReportChannelOnSuccessfulAnswers(t *testing.T) {
 	p := newTestAgentProbe(t, true)
 	for _, name := range []string{
-		"a1b2c3d4." + testZone,           // plain success
-		"_badsig.a1b2c3d4." + testZone,   // deliberate failure
-		"_servfail.a1b2c3d4." + testZone, // deliberate SERVFAIL
-		testZone,                         // apex
+		"a1b2c3d4." + testZone,           // Plain success.
+		"_badsig.a1b2c3d4." + testZone,   // Deliberate failure.
+		"_servfail.a1b2c3d4." + testZone, // Deliberate SERVFAIL.
+		testZone,                         // Apex.
 	} {
 		m := query(t, p, name, dns.TypeTXT, true)
 		if reportChannelOf(m) == nil {
@@ -131,7 +131,7 @@ func TestReportCorrelatesToToken(t *testing.T) {
 		t.Fatalf("answer is %T, want *dns.TXT (RFC 9567 §6.2)", m.Answer[0])
 	}
 
-	recs, err := p.Store.LookupReports("a1b2c3d4")
+	recs, err := p.Store.LookupReports(testToken)
 	if err != nil {
 		t.Fatalf("LookupReports: %v", err)
 	}
@@ -183,11 +183,11 @@ func TestAgentNeverReturnsNXDOMAIN(t *testing.T) {
 	p := newTestAgentProbe(t, false)
 	for _, name := range []string{
 		"nonsense." + testAgent,
-		"_er.notanumber.name.7._er." + testAgent, // shaped like a report, bad qtype label
-		"_er.1.name.999999._er." + testAgent,     // EDE label out of uint16 range
-		"_er.1._er." + testAgent,                 // no reported name at all
-		"_er.1.name.7." + testAgent,              // missing the trailing _er
-		"a.b.c.d.e.f.g.h.i.j.k." + testAgent,     // plain junk
+		"_er.notanumber.name.7._er." + testAgent, // Shaped like a report, bad qtype label.
+		"_er.1.name.999999._er." + testAgent,     // EDE label out of uint16 range.
+		"_er.1._er." + testAgent,                 // No reported name at all.
+		"_er.1.name.7." + testAgent,              // Missing the trailing _er.
+		"a.b.c.d.e.f.g.h.i.j.k." + testAgent,     // Plain junk.
 	} {
 		m := query(t, p, name, dns.TypeTXT, true)
 		if m.Rcode != dns.RcodeSuccess {
@@ -226,7 +226,7 @@ func TestAgentRejectsNonTXTReportQuery(t *testing.T) {
 	if len(m.Answer) != 0 {
 		t.Errorf("got %d answers for a non-TXT report query, want NODATA", len(m.Answer))
 	}
-	recs, err := p.Store.LookupReports("a1b2c3d4")
+	recs, err := p.Store.LookupReports(testToken)
 	if err != nil {
 		t.Fatalf("LookupReports: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestAgentRejectsNonTXTReportQuery(t *testing.T) {
 // report. RFC 9567 §7 recommends against signing the agent domain; here it is
 // closer to mandatory.
 func TestAgentZoneIsNeverSigned(t *testing.T) {
-	p := newTestAgentProbe(t, true) // signer present for the probe zone
+	p := newTestAgentProbe(t, true) // Signer present for the probe zone.
 	if p.Signer == nil {
 		t.Fatal("test setup: expected a signer")
 	}
@@ -310,14 +310,14 @@ func TestAgentDomainDoesNotShadowProbeZone(t *testing.T) {
 // otherwise anyone can grow the metric without bound by walking 0..65535.
 func TestReportMetricsLabelBounds(t *testing.T) {
 	for _, tc := range []struct {
-		code uint16
 		want string
+		code uint16
 	}{
-		{0, "0"},
-		{6, "6"}, // DNSSEC Bogus
-		{7, "7"}, // Signature Expired
-		{65535, "other"},
-		{4242, "other"},
+		{code: 0, want: "0"},
+		{code: 6, want: "6"}, // DNSSEC Bogus.
+		{code: 7, want: "7"}, // Signature Expired.
+		{code: 65535, want: labelOther},
+		{code: 4242, want: labelOther},
 	} {
 		if got := edeLabel(tc.code); got != tc.want {
 			t.Errorf("edeLabel(%d) = %q, want %q", tc.code, got, tc.want)
@@ -350,8 +350,8 @@ func TestReportCounterSeparatesRejects(t *testing.T) {
 func TestMemStoreReportCaps(t *testing.T) {
 	s := NewMemStore(time.Minute, 100, 2)
 
-	for i := uint16(0); i < 5; i++ {
-		err := s.RecordReport(ReportRecord{Token: "a1b2c3d4", EDE: i})
+	for i := range uint16(5) {
+		err := s.RecordReport(&ReportRecord{Token: testToken, EDE: i})
 		if i < 2 && err != nil {
 			t.Fatalf("RecordReport %d: %v", i, err)
 		}
@@ -359,15 +359,26 @@ func TestMemStoreReportCaps(t *testing.T) {
 			t.Errorf("RecordReport %d succeeded past the per-token cap", i)
 		}
 	}
-	recs, _ := s.LookupReports("a1b2c3d4")
+	recs, err := s.LookupReports(testToken)
+	if err != nil {
+		t.Fatalf("LookupReports: %v", err)
+	}
 	if len(recs) != 2 {
 		t.Errorf("retained %d reports, want the cap of 2", len(recs))
 	}
 
-	for i := 0; i < maxUnattributedReports+5; i++ {
-		_ = s.RecordReport(ReportRecord{})
+	// Deliberately overflows the cap: some of these calls are expected to be
+	// rejected once the unattributed list is full, which is exactly what this
+	// test is checking, so a per-call error is not itself a failure.
+	for range maxUnattributedReports + 5 {
+		if recErr := s.RecordReport(&ReportRecord{}); recErr != nil {
+			t.Logf("RecordReport: %v", recErr)
+		}
 	}
-	unattributed, _ := s.LookupReports("")
+	unattributed, err := s.LookupReports("")
+	if err != nil {
+		t.Fatalf("LookupReports: %v", err)
+	}
 	if len(unattributed) != maxUnattributedReports {
 		t.Errorf("retained %d unattributed reports, want the cap of %d",
 			len(unattributed), maxUnattributedReports)
@@ -378,11 +389,11 @@ func TestMemStoreReportCaps(t *testing.T) {
 // someone else's network, same as observations, and must not outlive the TTL.
 func TestMemStoreReportsExpire(t *testing.T) {
 	s := NewMemStore(10*time.Millisecond, 100, 8)
-	if err := s.RecordReport(ReportRecord{Token: "a1b2c3d4", At: time.Now().UTC()}); err != nil {
+	if err := s.RecordReport(&ReportRecord{Token: testToken, At: time.Now().UTC()}); err != nil {
 		t.Fatalf("RecordReport: %v", err)
 	}
 	time.Sleep(20 * time.Millisecond)
-	recs, err := s.LookupReports("a1b2c3d4")
+	recs, err := s.LookupReports(testToken)
 	if err != nil {
 		t.Fatalf("LookupReports: %v", err)
 	}
@@ -397,19 +408,19 @@ func TestMemStoreReportsExpire(t *testing.T) {
 // dropped because the visitor's observations are already gone.
 func TestReportOutlivesObservations(t *testing.T) {
 	s := NewMemStore(time.Minute, 100, 8)
-	if err := s.RecordReport(ReportRecord{Token: "deadbeef", EDE: 7}); err != nil {
+	if err := s.RecordReport(&ReportRecord{Token: testToken2, EDE: 7}); err != nil {
 		t.Fatalf("RecordReport: %v", err)
 	}
 	// No Record() call for this token at all — the visitor never existed as far
 	// as the observation store is concerned.
-	obs, err := s.Lookup("deadbeef")
+	obs, err := s.Lookup(testToken2)
 	if err != nil {
 		t.Fatalf("Lookup: %v", err)
 	}
 	if len(obs) != 0 {
 		t.Fatalf("got %d observations, want none", len(obs))
 	}
-	recs, err := s.LookupReports("deadbeef")
+	recs, err := s.LookupReports(testToken2)
 	if err != nil {
 		t.Fatalf("LookupReports: %v", err)
 	}

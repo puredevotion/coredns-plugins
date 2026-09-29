@@ -1,3 +1,4 @@
+//nolint:misspell // "Transferer" below names coredns's actual transfer.Transferer interface, not a typo
 package dynupdate
 
 import (
@@ -9,6 +10,9 @@ import (
 
 	"github.com/miekg/dns"
 )
+
+// testZone is the origin used across every test in this package.
+const testZone = "example.org."
 
 const seedZone = `$ORIGIN example.org.
 $TTL 300
@@ -51,12 +55,12 @@ func newTestPlugin(t *testing.T, mutable map[uint16]bool) *DynUpdate {
 		t.Fatal(err)
 	}
 
-	rrs, err := readZone(path, "example.org.")
+	rrs, err := readZone(path, testZone)
 	if err != nil {
 		t.Fatalf("readZone: %v", err)
 	}
 
-	d := &DynUpdate{Zone: "example.org.", rrs: rrs, mutable: mutable}
+	d := &DynUpdate{Zone: testZone, rrs: rrs, mutable: mutable}
 	if err := d.swap(rrs); err != nil {
 		t.Fatalf("swap: %v", err)
 	}
@@ -67,7 +71,7 @@ func newTestPlugin(t *testing.T, mutable map[uint16]bool) *DynUpdate {
 // plugin asks the writer whether verification succeeded, it does not verify.
 func newUpdate(prereqs, updates []dns.RR) *dns.Msg {
 	m := new(dns.Msg)
-	m.SetUpdate("example.org.")
+	m.SetUpdate(testZone)
 	m.Answer = prereqs
 	m.Ns = updates
 	m.SetTsig("key.example.org.", dns.HmacSHA256, 300, 0)
@@ -143,10 +147,10 @@ func TestUnsignedUpdateIsRefused(t *testing.T) {
 	d := newTestPlugin(t, nil)
 
 	m := new(dns.Msg)
-	m.SetUpdate("example.org.")
+	m.SetUpdate(testZone)
 	m.Ns = []dns.RR{rr(t, "new.example.org. 300 IN A 192.0.2.50")}
 
-	w := &testWriter{tsigOK: true} // writer would verify, but there is no TSIG
+	w := &testWriter{tsigOK: true} // Writer would verify, but there is no TSIG.
 	if _, err := d.ServeDNS(context.Background(), w, m); err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +166,10 @@ func TestFailedTsigIsRefused(t *testing.T) {
 	d := newTestPlugin(t, nil)
 
 	m := newUpdate(nil, []dns.RR{rr(t, "new.example.org. 300 IN A 192.0.2.50")})
-	wire, _ := m.Pack()
+	wire, err := m.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
 	got := new(dns.Msg)
 	if err := got.Unpack(wire); err != nil {
 		t.Fatal(err)
@@ -234,7 +241,7 @@ func TestTransferIncludesDynamicRecords(t *testing.T) {
 		t.Fatalf("add: %s", dns.RcodeToString[got])
 	}
 
-	ch, err := d.Transfer("example.org.", 0)
+	ch, err := d.Transfer(testZone, 0)
 	if err != nil {
 		t.Fatalf("Transfer: %v", err)
 	}
@@ -303,7 +310,7 @@ func TestApexSOAAndLastNSSurviveDeletion(t *testing.T) {
 	d := newTestPlugin(t, nil)
 
 	wipe := &dns.ANY{Hdr: dns.RR_Header{
-		Name: "example.org.", Rrtype: dns.TypeANY, Class: dns.ClassANY, Ttl: 0,
+		Name: testZone, Rrtype: dns.TypeANY, Class: dns.ClassANY, Ttl: 0,
 	}}
 	if got := send(t, d, newUpdate(nil, []dns.RR{wipe})); got != dns.RcodeSuccess {
 		t.Fatalf("rcode = %s", dns.RcodeToString[got])
@@ -311,7 +318,7 @@ func TestApexSOAAndLastNSSurviveDeletion(t *testing.T) {
 	if soaOf(d.rrs) == nil {
 		t.Error("delete-all at the apex removed the SOA")
 	}
-	if countRRset(d.rrs, "example.org.", dns.TypeNS) != 2 {
+	if countRRset(d.rrs, testZone, dns.TypeNS) != 2 {
 		t.Error("delete-all at the apex removed the NS set")
 	}
 
@@ -324,82 +331,96 @@ func TestApexSOAAndLastNSSurviveDeletion(t *testing.T) {
 			t.Fatalf("delete NS: %s", dns.RcodeToString[got])
 		}
 	}
-	if n := countRRset(d.rrs, "example.org.", dns.TypeNS); n != 1 {
+	if n := countRRset(d.rrs, testZone, dns.TypeNS); n != 1 {
 		t.Errorf("apex NS count = %d, want 1 — the last NS must survive", n)
 	}
 }
 
+// prereqNameInUse and prereqRRsetPresence build the ANY-class prerequisite
+// RRs §3.2.2/§3.2.4 use to assert "name in use" and "rrset exists" (and, with
+// ClassNONE, their negations).
+func prereqNameInUse(name string, class uint16) dns.RR {
+	return &dns.ANY{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeANY, Class: class}}
+}
+
+func prereqRRsetPresence(rrtype, class uint16) dns.RR {
+	return &dns.ANY{Hdr: dns.RR_Header{Name: "www.example.org.", Rrtype: rrtype, Class: class}}
+}
+
+// prerequisiteCases exercises every prerequisite form checkPrereqs supports.
+var prerequisiteCases = []struct {
+	prereq func(t *testing.T) dns.RR
+	name   string
+	want   int
+}{
+	{name: "name in use, and it is", want: dns.RcodeSuccess, prereq: func(*testing.T) dns.RR {
+		return prereqNameInUse("www.example.org.", dns.ClassANY)
+	}},
+	{name: "name in use, but it is not", want: dns.RcodeNameError, prereq: func(*testing.T) dns.RR {
+		return prereqNameInUse("absent.example.org.", dns.ClassANY)
+	}},
+	{name: "name not in use, and it is not", want: dns.RcodeSuccess, prereq: func(*testing.T) dns.RR {
+		return prereqNameInUse("absent.example.org.", dns.ClassNONE)
+	}},
+	{name: "name not in use, but it is", want: dns.RcodeYXDomain, prereq: func(*testing.T) dns.RR {
+		return prereqNameInUse("www.example.org.", dns.ClassNONE)
+	}},
+	{name: "rrset exists, and it does", want: dns.RcodeSuccess, prereq: func(*testing.T) dns.RR {
+		return prereqRRsetPresence(dns.TypeA, dns.ClassANY)
+	}},
+	{name: "rrset exists, but it does not", want: dns.RcodeNXRrset, prereq: func(*testing.T) dns.RR {
+		return prereqRRsetPresence(dns.TypeMX, dns.ClassANY)
+	}},
+	{name: "rrset does not exist, and it does not", want: dns.RcodeSuccess, prereq: func(*testing.T) dns.RR {
+		return prereqRRsetPresence(dns.TypeMX, dns.ClassNONE)
+	}},
+	{name: "rrset does not exist, but it does", want: dns.RcodeYXRrset, prereq: func(*testing.T) dns.RR {
+		return prereqRRsetPresence(dns.TypeA, dns.ClassNONE)
+	}},
+	{name: "value-dependent match", want: dns.RcodeSuccess, prereq: func(t *testing.T) dns.RR {
+		t.Helper()
+		r := rr(t, "www.example.org. 0 IN A 192.0.2.10")
+		r.Header().Ttl = 0
+		return r
+	}},
+	{name: "value-dependent mismatch", want: dns.RcodeNXRrset, prereq: func(t *testing.T) dns.RR {
+		t.Helper()
+		r := rr(t, "www.example.org. 0 IN A 198.51.100.1")
+		r.Header().Ttl = 0
+		return r
+	}},
+	{name: "prerequisite with a non-zero TTL is a format error", want: dns.RcodeFormatError, prereq: func(t *testing.T) dns.RR {
+		t.Helper()
+		return rr(t, "www.example.org. 300 IN A 192.0.2.10")
+	}},
+	{name: "prerequisite outside the zone", want: dns.RcodeNotZone, prereq: func(*testing.T) dns.RR {
+		return prereqNameInUse("www.other.test.", dns.ClassANY)
+	}},
+}
+
 func TestPrerequisites(t *testing.T) {
-	nameInUse := func(name string, class uint16) dns.RR {
-		return &dns.ANY{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeANY, Class: class}}
-	}
-	rrsetPresence := func(name string, rrtype, class uint16) dns.RR {
-		return &dns.ANY{Hdr: dns.RR_Header{Name: name, Rrtype: rrtype, Class: class}}
-	}
-
-	cases := []struct {
-		name   string
-		prereq func(t *testing.T) dns.RR
-		want   int
-	}{
-		{"name in use, and it is", func(*testing.T) dns.RR {
-			return nameInUse("www.example.org.", dns.ClassANY)
-		}, dns.RcodeSuccess},
-		{"name in use, but it is not", func(*testing.T) dns.RR {
-			return nameInUse("absent.example.org.", dns.ClassANY)
-		}, dns.RcodeNameError},
-		{"name not in use, and it is not", func(*testing.T) dns.RR {
-			return nameInUse("absent.example.org.", dns.ClassNONE)
-		}, dns.RcodeSuccess},
-		{"name not in use, but it is", func(*testing.T) dns.RR {
-			return nameInUse("www.example.org.", dns.ClassNONE)
-		}, dns.RcodeYXDomain},
-		{"rrset exists, and it does", func(*testing.T) dns.RR {
-			return rrsetPresence("www.example.org.", dns.TypeA, dns.ClassANY)
-		}, dns.RcodeSuccess},
-		{"rrset exists, but it does not", func(*testing.T) dns.RR {
-			return rrsetPresence("www.example.org.", dns.TypeMX, dns.ClassANY)
-		}, dns.RcodeNXRrset},
-		{"rrset does not exist, and it does not", func(*testing.T) dns.RR {
-			return rrsetPresence("www.example.org.", dns.TypeMX, dns.ClassNONE)
-		}, dns.RcodeSuccess},
-		{"rrset does not exist, but it does", func(*testing.T) dns.RR {
-			return rrsetPresence("www.example.org.", dns.TypeA, dns.ClassNONE)
-		}, dns.RcodeYXRrset},
-		{"value-dependent match", func(t *testing.T) dns.RR {
-			r := rr(t, "www.example.org. 0 IN A 192.0.2.10")
-			r.Header().Ttl = 0
-			return r
-		}, dns.RcodeSuccess},
-		{"value-dependent mismatch", func(t *testing.T) dns.RR {
-			r := rr(t, "www.example.org. 0 IN A 198.51.100.1")
-			r.Header().Ttl = 0
-			return r
-		}, dns.RcodeNXRrset},
-		{"prerequisite with a non-zero TTL is a format error", func(t *testing.T) dns.RR {
-			return rr(t, "www.example.org. 300 IN A 192.0.2.10")
-		}, dns.RcodeFormatError},
-		{"prerequisite outside the zone", func(*testing.T) dns.RR {
-			return nameInUse("www.other.test.", dns.ClassANY)
-		}, dns.RcodeNotZone},
-	}
-
-	for _, tc := range cases {
+	for _, tc := range prerequisiteCases {
 		t.Run(tc.name, func(t *testing.T) {
-			d := newTestPlugin(t, nil)
-			add := rr(t, "gate.example.org. 300 IN A 192.0.2.77")
-			got := send(t, d, newUpdate([]dns.RR{tc.prereq(t)}, []dns.RR{add}))
-			if got != tc.want {
-				t.Errorf("rcode = %s, want %s", dns.RcodeToString[got], dns.RcodeToString[tc.want])
-			}
-			// Whatever the verdict, the update must have been applied only on
-			// success — a prerequisite that fails must leave nothing behind.
-			applied := d.rrsetExists("gate.example.org.", dns.TypeA)
-			if applied != (tc.want == dns.RcodeSuccess) {
-				t.Errorf("update applied = %v, but rcode was %s",
-					applied, dns.RcodeToString[got])
-			}
+			checkPrerequisiteCase(t, tc.prereq, tc.want)
 		})
+	}
+}
+
+// checkPrerequisiteCase runs one UPDATE gated by tc.prereq and checks both
+// the rcode and that the gated add landed only on success — a prerequisite
+// that fails must leave nothing behind.
+func checkPrerequisiteCase(t *testing.T, prereq func(t *testing.T) dns.RR, want int) {
+	t.Helper()
+
+	d := newTestPlugin(t, nil)
+	add := rr(t, "gate.example.org. 300 IN A 192.0.2.77")
+	got := send(t, d, newUpdate([]dns.RR{prereq(t)}, []dns.RR{add}))
+	if got != want {
+		t.Errorf("rcode = %s, want %s", dns.RcodeToString[got], dns.RcodeToString[want])
+	}
+	applied := d.rrsetExists("gate.example.org.", dns.TypeA)
+	if applied != (want == dns.RcodeSuccess) {
+		t.Errorf("update applied = %v, but rcode was %s", applied, dns.RcodeToString[got])
 	}
 }
 
@@ -410,7 +431,7 @@ func TestRejectedUpdateIsAllOrNothing(t *testing.T) {
 	before := serialOf(t, d)
 
 	good := rr(t, "first.example.org. 300 IN A 192.0.2.60")
-	bad := rr(t, "second.other.test. 300 IN A 192.0.2.61") // out of zone
+	bad := rr(t, "second.other.test. 300 IN A 192.0.2.61") // Out of zone.
 
 	if got := send(t, d, newUpdate(nil, []dns.RR{good, bad})); got != dns.RcodeNotZone {
 		t.Fatalf("rcode = %s, want NOTZONE", dns.RcodeToString[got])
@@ -437,7 +458,11 @@ func TestMutableTypePolicy(t *testing.T) {
 	}
 	// And the refusal must not have partially applied.
 	for _, r := range d.rrsetOf("www.example.org.", dns.TypeA) {
-		if r.(*dns.A).A.String() == "198.51.100.9" {
+		aRec, ok := r.(*dns.A)
+		if !ok {
+			t.Fatalf("rrsetOf(dns.TypeA) returned %T, want *dns.A", r)
+		}
+		if aRec.A.String() == "198.51.100.9" {
 			t.Error("a policy-refused record was applied anyway")
 		}
 	}
@@ -446,7 +471,7 @@ func TestMutableTypePolicy(t *testing.T) {
 func TestCNAMEExclusivity(t *testing.T) {
 	d := newTestPlugin(t, nil)
 
-	// alias already has a CNAME; adding an A there must be ignored.
+	// Alias already has a CNAME; adding an A there must be ignored.
 	if got := send(t, d, newUpdate(nil, []dns.RR{rr(t, "alias.example.org. 300 IN A 192.0.2.80")})); got != dns.RcodeSuccess {
 		t.Fatalf("rcode = %s", dns.RcodeToString[got])
 	}
@@ -454,7 +479,7 @@ func TestCNAMEExclusivity(t *testing.T) {
 		t.Error("an A was added alongside an existing CNAME")
 	}
 
-	// www already has an A; adding a CNAME there must be ignored.
+	// Www already has an A; adding a CNAME there must be ignored.
 	if got := send(t, d, newUpdate(nil, []dns.RR{rr(t, "www.example.org. 300 IN CNAME elsewhere.example.org.")})); got != dns.RcodeSuccess {
 		t.Fatalf("rcode = %s", dns.RcodeToString[got])
 	}
@@ -484,9 +509,9 @@ func TestSerialGreaterWrapsPerRFC1982(t *testing.T) {
 		{2, 1, true},
 		{1, 2, false},
 		{1, 1, false},
-		{0, 4294967295, true},  // wrapped forward
-		{4294967295, 0, false}, // the same comparison, the other way
-		{1 << 31, 0, false},    // exactly half the space: undefined, so not greater
+		{0, 4294967295, true},  // Wrapped forward.
+		{4294967295, 0, false}, // The same comparison, the other way.
+		{1 << 31, 0, false},    // Exactly half the space: undefined, so not greater.
 	}
 	for _, tc := range cases {
 		if got := serialGreater(tc.a, tc.b); got != tc.want {

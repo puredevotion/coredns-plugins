@@ -60,7 +60,7 @@ const (
 	//
 	// That proof is deliberately incomplete: proving non-existence the
 	// traditional way needs an NSEC chain, which a zone of unbounded
-	// synthesized names cannot have. A strict validator should therefore judge
+	// synthesised names cannot have. A strict validator should therefore judge
 	// this response bogus rather than authenticated-denial, and finding out
 	// which resolvers do is the experiment. Use ModNXNAME for the form that is
 	// actually provable.
@@ -71,7 +71,7 @@ const (
 	// ModNXNAME answers with compact denial of existence (RFC 9824): NOERROR
 	// with an empty answer section, plus an NSEC whose type bitmap carries the
 	// NXNAME meta-type to signal that the name genuinely does not exist. A
-	// resolver that understands NXNAME synthesizes NXDOMAIN for its own client
+	// resolver that understands NXNAME synthesises NXDOMAIN for its own client
 	// from that; one that does not sees an ordinary NODATA.
 	//
 	// This is the provable counterpart to ModNXDOMAIN, and comparing the two is
@@ -83,19 +83,32 @@ const (
 	ModBig
 )
 
+// Modifier wire-label names, factored out since each is repeated across the
+// parser, the String() renderer, and the test tables that pin both.
+const (
+	modLabelUnsigned = "unsigned"
+	modLabelBadSig   = "badsig"
+	modLabelTruncate = "truncate"
+	modLabelNXDOMAIN = "nxdomain"
+	modLabelNXNAME   = "nxname"
+	modLabelServfail = "servfail"
+	modLabelBig      = "big"
+	modLabelNone     = "none"
+)
+
 // modifierNames maps the wire label (without its leading underscore) to the
 // modifier. Keep this the single source of truth: String() and the parser both
 // derive from it, so adding a modifier means touching one place.
 var modifierNames = map[string]Modifier{
-	"unsigned":   ModUnsigned,
-	"badsig":     ModBadSig,
-	"expiredsig": ModExpiredSig,
-	"futuresig":  ModFutureSig,
-	"truncate":   ModTruncate,
-	"nxdomain":   ModNXDOMAIN,
-	"nxname":     ModNXNAME,
-	"servfail":   ModServfail,
-	"big":        ModBig,
+	modLabelUnsigned: ModUnsigned,
+	modLabelBadSig:   ModBadSig,
+	"expiredsig":     ModExpiredSig,
+	"futuresig":      ModFutureSig,
+	modLabelTruncate: ModTruncate,
+	modLabelNXDOMAIN: ModNXDOMAIN,
+	modLabelNXNAME:   ModNXNAME,
+	modLabelServfail: ModServfail,
+	modLabelBig:      ModBig,
 }
 
 // Has reports whether m includes every modifier in want.
@@ -104,7 +117,7 @@ func (m Modifier) Has(want Modifier) bool { return m&want == want }
 // String renders the set in a stable order for logging and tests.
 func (m Modifier) String() string {
 	if m == 0 {
-		return "none"
+		return modLabelNone
 	}
 	// Iterate the ordered slice rather than the map so output is deterministic.
 	var set []string
@@ -116,10 +129,10 @@ func (m Modifier) String() string {
 	return strings.Join(set, ",")
 }
 
-// modifierOrder fixes String()'s output order (map iteration is randomized).
+// modifierOrder fixes String()'s output order (map iteration is randomised).
 var modifierOrder = []string{
-	"unsigned", "badsig", "expiredsig", "futuresig",
-	"truncate", "nxdomain", "nxname", "servfail", "big",
+	modLabelUnsigned, modLabelBadSig, "expiredsig", "futuresig",
+	modLabelTruncate, modLabelNXDOMAIN, modLabelNXNAME, modLabelServfail, modLabelBig,
 }
 
 // conflicts lists modifier pairs that cannot both apply to one answer, so a
@@ -185,14 +198,14 @@ func ParseQuery(sub string) (Query, bool) {
 			return Query{}, false
 		}
 		if mods.Has(m) {
-			return Query{}, false // repeated
+			return Query{}, false // Repeated.
 		}
 		mods |= m
 	}
 
 	for _, group := range conflicts {
 		if bits := mods & group; bits != 0 && bits != bits&-bits {
-			return Query{}, false // more than one bit from a mutually exclusive group
+			return Query{}, false // More than one bit from a mutually exclusive group.
 		}
 	}
 
@@ -200,7 +213,7 @@ func ParseQuery(sub string) (Query, bool) {
 }
 
 // parseToken validates the correlation label: hex only, bounded length. Hex
-// keeps it case-insensitive in a zone where queries arrive with randomized case
+// keeps it case-insensitive in a zone where queries arrive with randomised case
 // (0x20 encoding), and bounded length keeps an attacker from using this zone's
 // correlation store as free memory.
 func parseToken(l string) (string, bool) {

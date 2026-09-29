@@ -1,3 +1,4 @@
+//nolint:misspell // adn throughout this file: RFC 9463 Authentication Domain Name, not a typo for and
 package radnr
 
 import (
@@ -80,7 +81,7 @@ func TestSetup_ParseErrors(t *testing.T) {
 			adn dns.example.com
 			addr fde3:6ad1:6501::240
 			advertise-prefix fde3:6ad1:6501::/64 }`},
-		{"bare directive (no block, missing required)", `radnr`},
+		{"bare directive (no block, missing required)", pluginName},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -122,7 +123,7 @@ func TestSetup_ArgErrorsPerProperty(t *testing.T) {
 		`radnr { unicast }`,
 		`radnr { router-lifetime }`,
 		`radnr { advertise-prefix }`,
-		// flags that take NO arg must error when given one
+		// Flags that take NO arg must error when given one.
 		`radnr { rdnss extra }`,
 		`radnr { dry-run extra }`,
 		`radnr { allow-default-router extra }`,

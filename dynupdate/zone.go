@@ -1,6 +1,7 @@
 package dynupdate
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -100,7 +101,7 @@ func sameRRset(have, want []dns.RR) bool {
 }
 
 func deleteWhere(rrs []dns.RR, changed bool, match func(dns.RR) bool) ([]dns.RR, bool) {
-	out := rrs[:0:0]
+	out := make([]dns.RR, 0, len(rrs))
 	for _, rr := range rrs {
 		if match(rr) {
 			changed = true
@@ -189,7 +190,7 @@ func (d *DynUpdate) reply(w dns.ResponseWriter, r *dns.Msg, rcode int) (int, err
 	m.Authoritative = true
 
 	if err := w.WriteMsg(m); err != nil {
-		return dns.RcodeServerFailure, err
+		return dns.RcodeServerFailure, fmt.Errorf("write dns response: %w", err)
 	}
 	// The message is already written, so the chain must not write another.
 	return dns.RcodeSuccess, nil

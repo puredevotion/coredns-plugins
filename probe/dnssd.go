@@ -38,25 +38,25 @@ import (
 // mangling the ECH canary looks for, one layer up.
 
 const (
-	// dnssdBrowseLabels is RFC 6763 §9's meta-query prefix, split for matching.
+	// DnssdBrowseLabels is RFC 6763 §9's meta-query prefix, split for matching.
 	dnssdMetaService = "_services"
 	dnssdMetaDNSSD   = "_dns-sd"
 	dnssdMetaUDP     = "_udp"
 
-	// dnssdServiceType and dnssdProto are the single service type advertised.
+	// DnssdServiceType and dnssdProto are the single service type advertised.
 	// One type, deliberately: this exists to observe a walk, not to model a real
 	// service catalogue, and every extra type is another name to keep consistent
 	// across three levels for no additional measurement.
 	dnssdServiceType = "_probe"
 	dnssdProto       = "_tcp"
 
-	// dnssdInstance is the instance name. RFC 6763 §4.1.1 allows arbitrary UTF-8
+	// DnssdInstance is the instance name. RFC 6763 §4.1.1 allows arbitrary UTF-8
 	// here; a plain ASCII label is used because an escaped or spaced instance name
 	// would test the client's name parser rather than its DNS-SD walk, which is a
 	// different experiment and would muddy this one.
 	dnssdInstance = "probe"
 
-	// dnssdPort is advertised in the SRV record. Nothing listens: this zone serves
+	// DnssdPort is advertised in the SRV record. Nothing listens: this zone serves
 	// DNS, not the advertised service. Stated here because an SRV record is a
 	// promise a naive client will try to keep.
 	dnssdPort = 443
@@ -67,11 +67,11 @@ type dnssdKind int
 
 const (
 	dnssdNone dnssdKind = iota
-	// dnssdBrowse is `_services._dns-sd._udp.<token>` — "what types are here?"
+	// DnssdBrowse is `_services._dns-sd._udp.<token>` — "what types are here?".
 	dnssdBrowse
-	// dnssdEnumerate is `_probe._tcp.<token>` — "what instances of this type?"
+	// DnssdEnumerate is `_probe._tcp.<token>` — "what instances of this type?".
 	dnssdEnumerate
-	// dnssdInstanceName is `probe._probe._tcp.<token>` — the instance itself.
+	// DnssdInstanceName is `probe._probe._tcp.<token>` — the instance itself.
 	dnssdInstanceName
 )
 
@@ -82,9 +82,18 @@ const (
 // convention ParseQuery uses. Case-insensitive: DNS-SD labels are DNS labels, and a
 // resolver doing 0x20 randomization will send them mixed-case — rejecting those
 // would drop precisely the most careful clients.
-func parseDNSSD(sub string) (dnssdKind, string) {
+// DNS-SD prefix lengths, in labels, ahead of the token: the three-label
+// `_services._dns-sd._udp` / `probe._probe._tcp` forms, and the two-label
+// `_probe._tcp` form.
+const (
+	dnssdMinLabels  = 2 // At least one prefix label plus the token.
+	dnssdPrefixLen3 = 3
+	dnssdPrefixLen2 = 2
+)
+
+func parseDNSSD(sub string) (kind dnssdKind, token string) {
 	labels := strings.Split(strings.TrimSuffix(sub, "."), ".")
-	if len(labels) < 2 {
+	if len(labels) < dnssdMinLabels {
 		return dnssdNone, ""
 	}
 
@@ -98,14 +107,14 @@ func parseDNSSD(sub string) (dnssdKind, string) {
 	}
 
 	switch len(prefix) {
-	case 3:
+	case dnssdPrefixLen3:
 		if prefix[0] == dnssdMetaService && prefix[1] == dnssdMetaDNSSD && prefix[2] == dnssdMetaUDP {
 			return dnssdBrowse, token
 		}
 		if prefix[0] == dnssdInstance && prefix[1] == dnssdServiceType && prefix[2] == dnssdProto {
 			return dnssdInstanceName, token
 		}
-	case 2:
+	case dnssdPrefixLen2:
 		if prefix[0] == dnssdServiceType && prefix[1] == dnssdProto {
 			return dnssdEnumerate, token
 		}
@@ -145,6 +154,10 @@ func (p *Probe) synthesizeDNSSD(kind dnssdKind, token string, qtype uint16) (ans
 	txt := &dns.TXT{Hdr: hdr(instance, dns.TypeTXT), Txt: []string{"txtvers=1", "token=" + token}}
 
 	switch kind {
+	case dnssdNone:
+		// Not reachable: callers only invoke this after parseDNSSD has already
+		// ruled out dnssdNone. Listed explicitly so the switch stays exhaustive.
+		return nil, nil
 	case dnssdBrowse:
 		// §9: the meta-query is answered with PTRs naming each service type.
 		if qtype != dns.TypePTR && qtype != dns.TypeANY {

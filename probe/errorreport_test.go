@@ -17,7 +17,7 @@ const (
 // the spec's own worked example rather than one of our own construction is the
 // point: it is the only case where a disagreement is unambiguously our bug.
 func TestParseReportRFCExample(t *testing.T) {
-	// _er.1.broken.test.7._er.a01.agent-domain.example
+	// _er.1.broken.test.7._er.a01.agent-domain.example.
 	const agent = "a01.agent-domain.example."
 	r, err := ParseReport("_er.1.broken.test.7._er.a01.agent-domain.example.", agent, "")
 	if err != nil {
@@ -50,14 +50,14 @@ func TestParseReportCorrelatesToken(t *testing.T) {
 		{
 			name:      "bare token",
 			qname:     "_er.16.deadbeef.check.example.com.7._er." + erTestAgent,
-			wantToken: "deadbeef",
+			wantToken: testToken2,
 		},
 		{
 			// The modifier that provoked the failure is part of the reported
 			// name, and the token is still the label nearest the zone.
 			name:      "modifier present",
 			qname:     "_er.16._badsig.deadbeef.check.example.com.6._er." + erTestAgent,
-			wantToken: "deadbeef",
+			wantToken: testToken2,
 		},
 		{
 			// A report about a name outside our zone is still a valid report; it
@@ -93,29 +93,30 @@ func TestParseReportRejectsHostileInput(t *testing.T) {
 	long := strings.Repeat("a.", maxReportLabels+5)
 
 	for _, tc := range []struct {
-		name, qname string
-		wantErr     error
+		wantErr error
+		name    string
+		qname   string
 	}{
-		{"not under agent domain", "_er.1.broken.test.7._er.evil.example.", nil},
-		{"no _er sentinels", "just.a.name." + erTestAgent, ErrNotReport},
-		{"leading sentinel only", "_er.1.broken.test.7." + erTestAgent, ErrNotReport},
-		{"trailing sentinel only", "1.broken.test.7._er." + erTestAgent, ErrNotReport},
-		{"too few labels", "_er.1.7._er." + erTestAgent, ErrNotReport},
-		{"nothing but the agent domain", erTestAgent, ErrNotReport},
+		{name: "not under agent domain", qname: "_er.1.broken.test.7._er.evil.example.", wantErr: nil},
+		{name: "no _er sentinels", qname: "just.a.name." + erTestAgent, wantErr: ErrNotReport},
+		{name: "leading sentinel only", qname: "_er.1.broken.test.7." + erTestAgent, wantErr: ErrNotReport},
+		{name: "trailing sentinel only", qname: "1.broken.test.7._er." + erTestAgent, wantErr: ErrNotReport},
+		{name: "too few labels", qname: "_er.1.7._er." + erTestAgent, wantErr: ErrNotReport},
+		{name: "nothing but the agent domain", qname: erTestAgent, wantErr: ErrNotReport},
 
 		// Bounded before per-label work, so a name built purely to make us walk
 		// it is cheap to refuse.
-		{"label flood", "_er.1." + long + "7._er." + erTestAgent, ErrBadReport},
+		{name: "label flood", qname: "_er.1." + long + "7._er." + erTestAgent, wantErr: ErrBadReport},
 
-		// strconv would accept several of these; a report is not a place to be
+		// Strconv would accept several of these; a report is not a place to be
 		// liberal about input.
-		{"qtype not numeric", "_er.A.broken.test.7._er." + erTestAgent, ErrBadReport},
-		{"qtype signed", "_er.+1.broken.test.7._er." + erTestAgent, ErrBadReport},
-		{"qtype overflows uint16", "_er.65536.broken.test.7._er." + erTestAgent, ErrBadReport},
-		{"qtype too many digits", "_er.000001.broken.test.7._er." + erTestAgent, ErrBadReport},
-		{"ede not numeric", "_er.1.broken.test.abc._er." + erTestAgent, ErrBadReport},
-		{"ede negative", "_er.1.broken.test.-1._er." + erTestAgent, ErrBadReport},
-		{"ede overflows uint16", "_er.1.broken.test.70000._er." + erTestAgent, ErrBadReport},
+		{name: "qtype not numeric", qname: "_er.A.broken.test.7._er." + erTestAgent, wantErr: ErrBadReport},
+		{name: "qtype signed", qname: "_er.+1.broken.test.7._er." + erTestAgent, wantErr: ErrBadReport},
+		{name: "qtype overflows uint16", qname: "_er.65536.broken.test.7._er." + erTestAgent, wantErr: ErrBadReport},
+		{name: "qtype too many digits", qname: "_er.000001.broken.test.7._er." + erTestAgent, wantErr: ErrBadReport},
+		{name: "ede not numeric", qname: "_er.1.broken.test.abc._er." + erTestAgent, wantErr: ErrBadReport},
+		{name: "ede negative", qname: "_er.1.broken.test.-1._er." + erTestAgent, wantErr: ErrBadReport},
+		{name: "ede overflows uint16", qname: "_er.1.broken.test.70000._er." + erTestAgent, wantErr: ErrBadReport},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseReport(tc.qname, erTestAgent, erTestZone)
@@ -166,7 +167,7 @@ func TestParseReportCaseInsensitive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseReport: %v", err)
 	}
-	if r.Token != "deadbeef" {
+	if r.Token != testToken2 {
 		t.Errorf("Token = %q, want deadbeef", r.Token)
 	}
 	if r.Qname != "deadbeef.check.example.com." {

@@ -19,21 +19,33 @@ func writeSeed(t *testing.T, body string) string {
 	return path
 }
 
-func TestParse(t *testing.T) {
-	seed := writeSeed(t, seedZone)
-	noSOA := writeSeed(t, "www.example.org. 300 IN A 192.0.2.10\n")
+// parseTestCase is one TestParse case: input is fed to parse(), and either
+// wantErr must appear in the resulting error, or (on success) check runs
+// against the parsed plugin.
+type parseTestCase struct {
+	check   func(*testing.T, *DynUpdate)
+	name    string
+	input   string
+	wantErr string // Substring; empty means success.
+}
 
-	cases := []struct {
-		name    string
-		input   string
-		wantErr string // substring; empty means success
-		check   func(*testing.T, *DynUpdate)
-	}{
+// parseTestCases builds every TestParse case. The seed and noSOA arguments
+// are paths to zone files writeSeed already wrote for this test run.
+func parseTestCases(seed, noSOA string) []parseTestCase {
+	cases := parseSuccessCases(seed)
+	return append(cases, parseErrorCases(seed, noSOA)...)
+}
+
+// parseSuccessCases covers inputs parse() must accept, each with a check
+// against the resulting plugin.
+func parseSuccessCases(seed string) []parseTestCase {
+	return []parseTestCase{
 		{
 			name:  "zone from the server block",
 			input: "dynupdate {\nfile " + seed + "\n}",
 			check: func(t *testing.T, d *DynUpdate) {
-				if d.Zone != "example.org." {
+				t.Helper()
+				if d.Zone != testZone {
 					t.Errorf("zone = %q, want example.org.", d.Zone)
 				}
 				if d.mutable != nil {
@@ -45,7 +57,8 @@ func TestParse(t *testing.T) {
 			name:  "explicit zone is canonicalised",
 			input: "dynupdate EXAMPLE.ORG {\nfile " + seed + "\n}",
 			check: func(t *testing.T, d *DynUpdate) {
-				if d.Zone != "example.org." {
+				t.Helper()
+				if d.Zone != testZone {
 					t.Errorf("zone = %q, want example.org.", d.Zone)
 				}
 			},
@@ -54,6 +67,7 @@ func TestParse(t *testing.T) {
 			name:  "mutable type list",
 			input: "dynupdate {\nfile " + seed + "\nmutable TXT AAAA\n}",
 			check: func(t *testing.T, d *DynUpdate) {
+				t.Helper()
 				if !d.mutable[dns.TypeTXT] || !d.mutable[dns.TypeAAAA] {
 					t.Errorf("mutable = %v, want TXT and AAAA", d.mutable)
 				}
@@ -62,6 +76,13 @@ func TestParse(t *testing.T) {
 				}
 			},
 		},
+	}
+}
+
+// parseErrorCases covers inputs parse() must reject, each asserting a
+// substring of the resulting error.
+func parseErrorCases(seed, noSOA string) []parseTestCase {
+	return []parseTestCase{
 		{
 			// The failure this guards against is silent: with no SOA the
 			// serial cannot advance, so every secondary keeps serving the old
@@ -96,29 +117,40 @@ func TestParse(t *testing.T) {
 			wantErr: "opening zone directory",
 		},
 	}
+}
 
-	for _, tc := range cases {
+func TestParse(t *testing.T) {
+	seed := writeSeed(t, seedZone)
+	noSOA := writeSeed(t, "www.example.org. 300 IN A 192.0.2.10\n")
+
+	for _, tc := range parseTestCases(seed, noSOA) {
 		t.Run(tc.name, func(t *testing.T) {
-			c := caddy.NewTestController("dns", tc.input)
-			c.ServerBlockKeys = []string{"example.org."}
-
-			d, err := parse(c)
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("parse succeeded, want error containing %q", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			if tc.check != nil {
-				tc.check(t, d)
-			}
+			runParseTestCase(t, tc)
 		})
+	}
+}
+
+func runParseTestCase(t *testing.T, tc parseTestCase) {
+	t.Helper()
+
+	c := caddy.NewTestController("dns", tc.input)
+	c.ServerBlockKeys = []string{testZone}
+
+	d, err := parse(c)
+	if tc.wantErr != "" {
+		if err == nil {
+			t.Fatalf("parse succeeded, want error containing %q", tc.wantErr)
+		}
+		if !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("error = %v, want it to contain %q", err, tc.wantErr)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if tc.check != nil {
+		tc.check(t, d)
 	}
 }
 
@@ -134,7 +166,7 @@ func TestSeedCannotEscapeItsDirectory(t *testing.T) {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
 
-	if _, err := readZone(link, "example.org."); err == nil {
+	if _, err := readZone(link, testZone); err == nil {
 		t.Error("a symlink out of the zone directory was followed")
 	}
 }

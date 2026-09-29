@@ -17,16 +17,16 @@ import (
 func TestLabelHelpersAreThreeValued(t *testing.T) {
 	t.Run("deleg", func(t *testing.T) {
 		for _, tc := range []struct {
-			obs  Observation
 			want string
+			obs  Observation
 		}{
-			{Observation{EDNS: false}, "unknown"},
+			{obs: Observation{EDNS: false}, want: labelUnknown},
 			// Inconsistent input must not claim awareness.
-			{Observation{EDNS: false, DELEGAware: true}, "unknown"},
-			{Observation{EDNS: true, DELEGAware: false}, "unaware"},
-			{Observation{EDNS: true, DELEGAware: true}, "aware"},
+			{obs: Observation{EDNS: false, DELEGAware: true}, want: labelUnknown},
+			{obs: Observation{EDNS: true, DELEGAware: false}, want: "unaware"},
+			{obs: Observation{EDNS: true, DELEGAware: true}, want: "aware"},
 		} {
-			if got := delegLabel(tc.obs); got != tc.want {
+			if got := delegLabel(&tc.obs); got != tc.want {
 				t.Errorf("delegLabel(%+v) = %q, want %q", tc.obs, got, tc.want)
 			}
 		}
@@ -34,14 +34,14 @@ func TestLabelHelpersAreThreeValued(t *testing.T) {
 
 	t.Run("ecs", func(t *testing.T) {
 		for _, tc := range []struct {
-			obs  Observation
 			want string
+			obs  Observation
 		}{
-			{Observation{ECS: false}, "silent"},
-			{Observation{ECS: true, ECSScope: 0}, "declined"},
-			{Observation{ECS: true, ECSScope: 24}, "disclosed"},
+			{obs: Observation{ECS: false}, want: "silent"},
+			{obs: Observation{ECS: true, ECSScope: 0}, want: "declined"},
+			{obs: Observation{ECS: true, ECSScope: 24}, want: "disclosed"},
 		} {
-			if got := ecsLabel(tc.obs); got != tc.want {
+			if got := ecsLabel(&tc.obs); got != tc.want {
 				t.Errorf("ecsLabel(%+v) = %q, want %q", tc.obs, got, tc.want)
 			}
 		}
@@ -50,14 +50,14 @@ func TestLabelHelpersAreThreeValued(t *testing.T) {
 	t.Run("ecs family is bounded", func(t *testing.T) {
 		// A resolver picks this value, so anything outside the two real families
 		// must collapse to one bucket rather than minting a series per value.
-		if got := ecsFamilyLabel(1); got != "inet" {
+		if got := ecsFamilyLabel(1); got != labelInet {
 			t.Errorf("ecsFamilyLabel(1) = %q, want inet", got)
 		}
-		if got := ecsFamilyLabel(2); got != "inet6" {
+		if got := ecsFamilyLabel(2); got != labelInet6 {
 			t.Errorf("ecsFamilyLabel(2) = %q, want inet6", got)
 		}
 		for _, bogus := range []uint16{0, 3, 65535} {
-			if got := ecsFamilyLabel(bogus); got != "other" {
+			if got := ecsFamilyLabel(bogus); got != labelOther {
 				t.Errorf("ecsFamilyLabel(%d) = %q, want other", bogus, got)
 			}
 		}
@@ -71,17 +71,17 @@ func TestLabelHelpersAreThreeValued(t *testing.T) {
 func TestECSHistogramExcludesDeclined(t *testing.T) {
 	before := testutil.CollectAndCount(probeECSPrefixBits)
 
-	recordMetrics(Observation{Transport: TransportUDP, EDNS: true, ECS: true, ECSScope: 0, ECSFamily: 1})
+	recordMetrics(&Observation{Transport: TransportUDP, EDNS: true, ECS: true, ECSScope: 0, ECSFamily: 1})
 	if got := testutil.CollectAndCount(probeECSPrefixBits); got != before {
 		t.Errorf("declined disclosure created a histogram series: count %d -> %d", before, got)
 	}
 
-	recordMetrics(Observation{Transport: TransportUDP, EDNS: true, ECS: false})
+	recordMetrics(&Observation{Transport: TransportUDP, EDNS: true, ECS: false})
 	if got := testutil.CollectAndCount(probeECSPrefixBits); got != before {
 		t.Errorf("silent resolver created a histogram series: count %d -> %d", before, got)
 	}
 
-	recordMetrics(Observation{Transport: TransportUDP, EDNS: true, ECS: true, ECSScope: 24, ECSFamily: 1})
+	recordMetrics(&Observation{Transport: TransportUDP, EDNS: true, ECS: true, ECSScope: 24, ECSFamily: 1})
 	if got := testutil.CollectAndCount(probeECSPrefixBits); got <= before {
 		t.Errorf("a real disclosure was not recorded: count %d -> %d", before, got)
 	}
@@ -91,7 +91,7 @@ func TestECSHistogramExcludesDeclined(t *testing.T) {
 // the helpers produce, through the real collector rather than by inspecting the
 // helpers again.
 func TestObservationsCounterLabels(t *testing.T) {
-	recordMetrics(Observation{
+	recordMetrics(&Observation{
 		Transport: TransportTLS, IPv6: true, EDNS: true,
 		DO: true, CompactAware: true, DELEGAware: true,
 		ECS: true, ECSScope: 56, ECSFamily: 2,
@@ -124,7 +124,7 @@ func TestNoHighCardinalityLabels(t *testing.T) {
 		probeToken   = "deadbeefcafe"
 	)
 
-	recordMetrics(Observation{
+	recordMetrics(&Observation{
 		Transport: TransportUDP, EDNS: true,
 		ResolverAddr:   mustAddr(resolverAddr),
 		ResolverPrefix: mustPrefix(resolverCIDR),

@@ -1,4 +1,4 @@
-package sni_tls
+package snitls
 
 import (
 	"crypto/tls"
@@ -22,13 +22,13 @@ func FuzzLoadCert(f *testing.F) {
 	// here since testing.F seeds must be added before any subtest forking,
 	// and f.TempDir()-based *_test.go helpers taking *testing.T don't apply
 	// to *testing.F directly).
-	seedCert, seedKey := generateSeedCertPEM("dns.example.com")
+	seedCert, seedKey := generateSeedCertPEM(testSNIPrimary)
 	f.Add(seedCert, seedKey)
 	f.Add([]byte(""), []byte(""))
 	f.Add([]byte("not a cert"), []byte("not a key"))
-	f.Add(seedCert, []byte("")) // valid cert, empty key
-	f.Add([]byte(""), seedKey)  // empty cert, valid key
-	f.Add(seedCert, seedCert)   // cert reused as "key"
+	f.Add(seedCert, []byte("")) // Valid cert, empty key.
+	f.Add([]byte(""), seedKey)  // Empty cert, valid key.
+	f.Add(seedCert, seedCert)   // Cert reused as "key".
 
 	f.Fuzz(func(t *testing.T, certBytes, keyBytes []byte) {
 		if err := os.WriteFile(certPath, certBytes, 0o600); err != nil {
@@ -73,15 +73,15 @@ func FuzzGetCertificate(f *testing.F) {
 	secondary := &tls.Certificate{Certificate: [][]byte{{2}}}
 	store := &certStore{
 		byName: map[string]*tls.Certificate{
-			"dns.example.com":      primary,
-			"dns.internal.example": secondary,
+			testSNIPrimary:   primary,
+			testSNISecondary: secondary,
 		},
 		fallback: primary,
 	}
 
 	for _, s := range []string{
-		"", "dns.example.com", "DNS.EXAMPLE.COM", "dns.internal.example",
-		"unknown.example.org", "dns.example.com\x00evil", strRepeat("a", 300),
+		"", testSNIPrimary, "DNS.EXAMPLE.COM", testSNISecondary,
+		testSNIUnknown, testSNIPrimary + "\x00evil", strRepeat("a", 300),
 		"..", "*.example.com", "dns.example.com.", "\xff\xfe\xfd",
 	} {
 		f.Add(s)
@@ -103,7 +103,7 @@ func FuzzGetCertificate(f *testing.F) {
 
 func strRepeat(s string, n int) string {
 	out := make([]byte, 0, len(s)*n)
-	for i := 0; i < n; i++ {
+	for range n {
 		out = append(out, s...)
 	}
 	return string(out)

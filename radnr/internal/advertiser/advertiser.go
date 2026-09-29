@@ -6,6 +6,7 @@ package advertiser
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math/rand" // nosemgrep: go.lang.security.audit.crypto.math-random-used -- RFC 4861 timing jitter (nextInterval), not a security-sensitive value
 	"net/netip"
@@ -19,6 +20,10 @@ import (
 )
 
 var allNodes = netip.MustParseAddr("ff02::1")
+
+// defaultLifetime is the DNR option Lifetime field, in seconds, advertised
+// alongside the encrypted-DNS resolver information.
+const defaultLifetime = 3600
 
 // minDelayBetweenRAs is RFC 4861 §6.2.6's MIN_DELAY_BETWEEN_RAS: a solicited RA
 // must not be sent less than this long after the previous RA (solicited or
@@ -41,9 +46,9 @@ type Advertiser struct {
 }
 
 // BuildRA constructs the Router Advertisement for the given config.
-func BuildRA(c config.Config) (*ndp.RouterAdvertisement, error) {
+func BuildRA(c *config.Config) (*ndp.RouterAdvertisement, error) {
 	if err := c.Validate(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validate config: %w", err)
 	}
 
 	sp, err := svcparams.Encode(svcparams.Params{
@@ -52,7 +57,7 @@ func BuildRA(c config.Config) (*ndp.RouterAdvertisement, error) {
 		DohPath: c.DohPath,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("encode svcparams: %w", err)
 	}
 
 	var addrs []netip.Addr
@@ -62,13 +67,13 @@ func BuildRA(c config.Config) (*ndp.RouterAdvertisement, error) {
 
 	raw, err := dnr.EncryptedDNS{
 		ServicePriority: 1,
-		Lifetime:        3600,
-		ADN:             c.ADN,
+		Lifetime:        defaultLifetime,
+		ADN:             c.ADN, //nolint:misspell // ADN: RFC 9463 Authentication Domain Name, not a typo for AND
 		Addrs:           addrs,
 		SvcParams:       sp,
 	}.Marshal()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("marshal encrypted-dns option: %w", err)
 	}
 
 	ra := &ndp.RouterAdvertisement{
@@ -79,8 +84,8 @@ func BuildRA(c config.Config) (*ndp.RouterAdvertisement, error) {
 		Options: []ndp.Option{
 			&ndp.RawOption{
 				Type:   dnr.OptionType,
-				Length: raw[1],  // units of 8 octets, as Marshal computed
-				Value:  raw[2:], // option body (everything after Type+Length)
+				Length: raw[1],  // Units of 8 octets, as Marshal computed.
+				Value:  raw[2:], // Option body (everything after Type+Length).
 			},
 		},
 	}
@@ -94,33 +99,55 @@ func BuildRA(c config.Config) (*ndp.RouterAdvertisement, error) {
 	return ra, nil
 }
 
-// nextInterval picks a randomized periodic-RA delay per RFC 4861 §6.2.1: the
+// minIntervalRatioDivisor implements RFC 4861 §6.2.1's default ratio for
+// deriving MinRtrAdvInterval from MaxRtrAdvInterval (Min = 0.33*Max).
+const minIntervalRatioDivisor = 3
+
+// nextInterval picks a randomised periodic-RA delay per RFC 4861 §6.2.1: the
 // actual interval MUST be a uniform random value between MinRtrAdvInterval and
 // MaxRtrAdvInterval, not a fixed period, so multiple advertisers on a link
-// don't stay synchronized. a.Interval is treated as MaxRtrAdvInterval; Min is
-// derived using the RFC's default ratio (Min = 0.33*Max), floored at 3s (the
-// RFC's absolute minimum for MinRtrAdvInterval).
+// don't stay synchronised; a.Interval is treated as MaxRtrAdvInterval, and Min
+// is derived using the RFC's default ratio, floored at 3s (the RFC's
+// absolute minimum for MinRtrAdvInterval).
 func (a *Advertiser) nextInterval() time.Duration {
-	max := a.Interval
-	min := max / 3
-	if min < minDelayBetweenRAs {
-		min = minDelayBetweenRAs
-	}
-	if min >= max {
-		return max
+	maxInterval := a.Interval
+	minInterval := max(maxInterval/minIntervalRatioDivisor, minDelayBetweenRAs)
+	if minInterval >= maxInterval {
+		return maxInterval
 	}
 	//nolint:gosec // G404: RFC 4861 timing jitter, not a security-sensitive value; crypto/rand is the wrong tool here, not a safer one.
-	return min + time.Duration(rand.Int63n(int64(max-min)))
+	return minInterval + time.Duration(rand.Int63n(int64(maxInterval-minInterval)))
 }
 
-// Run advertises until ctx is cancelled: periodically (at a randomized
+// readSolicitations runs the inline Router-Solicitation reader loop: it reads
+// from a.Conn until the connection is closed or ctx is cancelled, forwarding
+// each Router Solicitation's source address on rs, and closes rsDone on exit.
+func (a *Advertiser) readSolicitations(ctx context.Context, rs chan<- netip.Addr, rsDone chan<- struct{}) {
+	defer close(rsDone)
+	for {
+		m, _, from, err := a.Conn.ReadFrom()
+		if err != nil {
+			return // Conn closed or ctx cancelled elsewhere.
+		}
+		if _, ok := m.(*ndp.RouterSolicitation); !ok {
+			continue
+		}
+		select {
+		case rs <- from:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// Run advertises until ctx is cancelled: periodically (at a randomised
 // interval per RFC 4861 §6.2.1) and solicited (in response to a Router
 // Solicitation per §6.2.6, rate-limited to at most one send per
 // minDelayBetweenRAs regardless of trigger). Send errors are logged, not
 // fatal. Reads for Router Solicitations run inline in this goroutine — RAs are
 // too latency-insensitive here to need a separate reader goroutine.
 func (a *Advertiser) Run(ctx context.Context) error {
-	ra, err := BuildRA(a.Cfg)
+	ra, err := BuildRA(&a.Cfg)
 	if err != nil {
 		return err
 	}
@@ -134,7 +161,7 @@ func (a *Advertiser) Run(ctx context.Context) error {
 	send := func() {
 		lastSent = time.Now()
 		if a.Cfg.DryRun {
-			log.Printf("ra-dnr: [dry-run] would send RA to %s (ADN=%s)", dst, a.Cfg.ADN)
+			log.Printf("ra-dnr: [dry-run] would send RA to %s (ADN=%s)", dst, a.Cfg.ADN) //nolint:misspell // ADN: RFC 9463 Authentication Domain Name, not a typo for AND
 			return
 		}
 		if err := a.Conn.WriteTo(ra, nil, dst); err != nil {
@@ -144,40 +171,28 @@ func (a *Advertiser) Run(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		_ = a.Conn.Close()
-		return ctx.Err()
+		if err := a.Conn.Close(); err != nil {
+			log.Printf("ra-dnr: close conn: %v", err)
+		}
+		return fmt.Errorf("advertiser run: %w", ctx.Err())
 	default:
 	}
-	send() // initial advertisement
+	send() // Initial advertisement.
 
 	rs := make(chan netip.Addr)
 	rsDone := make(chan struct{})
-	go func() {
-		defer close(rsDone)
-		for {
-			m, _, from, err := a.Conn.ReadFrom()
-			if err != nil {
-				return // conn closed or ctx cancelled elsewhere
-			}
-			if _, ok := m.(*ndp.RouterSolicitation); !ok {
-				continue
-			}
-			select {
-			case rs <- from:
-			case <-ctx.Done():
-				return
-			}
-		}
-	}()
+	go a.readSolicitations(ctx, rs, rsDone)
 
 	t := time.NewTimer(a.nextInterval())
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			_ = a.Conn.Close() // unblock the RS-reader goroutine's ReadFrom
+			if err := a.Conn.Close(); err != nil { // Unblock the RS-reader goroutine's ReadFrom.
+				log.Printf("ra-dnr: close conn: %v", err)
+			}
 			<-rsDone
-			return ctx.Err()
+			return fmt.Errorf("advertiser run: %w", ctx.Err())
 		case <-t.C:
 			send()
 			t.Reset(a.nextInterval())

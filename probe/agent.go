@@ -2,6 +2,7 @@ package probe
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
@@ -52,7 +53,7 @@ import (
 const agentTXT = "report received"
 
 // serveReport answers a query under the agent domain.
-func (p *Probe) serveReport(state request.Request, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (p *Probe) serveReport(state *request.Request, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	qname := state.Name()
 
 	if qname == p.AgentDomain {
@@ -88,13 +89,13 @@ func (p *Probe) serveReport(state request.Request, w dns.ResponseWriter, r *dns.
 
 	correlated := "no"
 	if rep.Token != "" {
-		correlated = "yes"
+		correlated = labelYes
 	}
 	probeReports.WithLabelValues(edeLabel(rep.EDE), correlated).Inc()
 
 	transport, _ := transportFrom(w, state.Proto())
 	rec := NewReportRecord(rep, addrOf(state), transport)
-	if err := p.Store.RecordReport(rec); err != nil {
+	if err := p.Store.RecordReport(&rec); err != nil {
 		// Answered anyway, for the same reason the observation path does: a full
 		// or unreachable store must degrade the measurement rather than make the
 		// reporting channel itself look broken to the resolver using it.
@@ -119,7 +120,7 @@ func (p *Probe) serveReport(state request.Request, w dns.ResponseWriter, r *dns.
 // RFC 9567 agent" marker, but the apex is also what a resolver hits when it
 // truncates a report name it could not fit, and answering positively there would
 // make that failure invisible.
-func (p *Probe) serveAgentApex(state request.Request, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+func (p *Probe) serveAgentApex(state *request.Request, w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	var answer []dns.RR
 	switch state.QType() {
 	case dns.TypeSOA:
@@ -145,7 +146,7 @@ func (p *Probe) serveAgentApex(state request.Request, w dns.ResponseWriter, r *d
 //     channel and, since the agent domain is its own agent, loop,
 //   - no NSEC in the authority section, since an unsigned zone proving denial
 //     with a bare NSEC would be noise a validator has to discard anyway.
-func (p *Probe) respondAgent(state request.Request, w dns.ResponseWriter, r *dns.Msg, answer []dns.RR) (int, error) {
+func (p *Probe) respondAgent(state *request.Request, w dns.ResponseWriter, r *dns.Msg, answer []dns.RR) (int, error) {
 	m := new(dns.Msg)
 	m.SetRcode(r, dns.RcodeSuccess)
 	m.Authoritative = true
@@ -160,7 +161,7 @@ func (p *Probe) respondAgent(state request.Request, w dns.ResponseWriter, r *dns
 	m = state.Scrub(m)
 
 	if err := w.WriteMsg(m); err != nil {
-		return dns.RcodeServerFailure, err
+		return dns.RcodeServerFailure, fmt.Errorf("write dns response: %w", err)
 	}
 	return dns.RcodeSuccess, nil
 }
@@ -178,10 +179,10 @@ func (p *Probe) agentSOA() *dns.SOA {
 		},
 		Ns:      p.NSName,
 		Mbox:    p.Mbox,
-		Serial:  1, // Synthesized per query; nothing transfers this zone.
-		Refresh: 3600,
-		Retry:   900,
-		Expire:  604800,
+		Serial:  1, // Synthesised per query; nothing transfers this zone.
+		Refresh: soaRefreshSeconds,
+		Retry:   soaRetrySeconds,
+		Expire:  soaExpireSeconds,
 		Minttl:  p.AgentTTL,
 	}
 }

@@ -1,17 +1,30 @@
-package sni_tls
+package snitls
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	ctls "crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+)
+
+// Shared SNI hostnames reused across this package's tests, extracted to
+// named constants (goconst) rather than repeating the same string literals
+// at every call site.
+const (
+	testSNIPrimary   = "dns.example.com"
+	testSNISecondary = "dns.internal.example"
+	testSNIUnknown   = "unknown.example.org"
 )
 
 // generateSeedCertPEM builds a self-signed ECDSA cert/key pair with the given
@@ -78,5 +91,49 @@ func writeTestCert(t *testing.T, cn string, sans ...string) (certPath, keyPath s
 // SANs, so such a cert should be rejected by loadCert.
 func writeNoSANCert(t *testing.T) (certPath, keyPath string) {
 	t.Helper()
-	return writeTestCert(t, "no-san-cn") // DNSNames left empty
+	return writeTestCert(t, "no-san-cn") // DNSNames left empty.
+}
+
+// acceptAndHandshakeOnce accepts a single connection on ln and completes the
+// server-side TLS handshake, discarding the outcome. Shared by the real-TLS
+// end-to-end tests' background accept goroutines, where the accept/handshake
+// error genuinely doesn't affect the test's assertions (the client side is
+// what's being checked) and logging from a background goroutine after the
+// test may have already completed would be unsafe.
+func acceptAndHandshakeOnce(ln net.Listener) {
+	conn, acceptErr := ln.Accept()
+	if acceptErr != nil {
+		return
+	}
+	defer func() {
+		_ = conn.Close() //nolint:errcheck // best-effort close of a test-only connection in a background goroutine; logging after the test may complete is unsafe
+	}()
+	tlsConn, ok := conn.(*ctls.Conn)
+	if !ok {
+		return
+	}
+	_ = tlsConn.HandshakeContext(context.Background()) //nolint:errcheck // handshake error from a background goroutine is expected on early conn close; can't safely log after the test completes
+}
+
+// acceptAndHandshakeReporting accepts a single connection on ln, completes
+// the server-side TLS handshake, and reports the outcome — including an
+// accept failure or a non-*tls.Conn accepted conn, which should never happen
+// against a *tls.Config-armed listener — on acceptErr. Shared by the
+// strict-mode end-to-end tests' background accept goroutines, which (unlike
+// acceptAndHandshakeOnce) need the real handshake error to assert on.
+func acceptAndHandshakeReporting(ln net.Listener, acceptErr chan<- error) {
+	conn, connErr := ln.Accept()
+	if connErr != nil {
+		acceptErr <- connErr
+		return
+	}
+	defer func() {
+		_ = conn.Close() //nolint:errcheck // best-effort close of a test-only connection in a background goroutine; logging after the test may complete is unsafe
+	}()
+	tlsConn, ok := conn.(*ctls.Conn)
+	if !ok {
+		acceptErr <- fmt.Errorf("accepted conn is not *tls.Conn: %T", conn)
+		return
+	}
+	acceptErr <- tlsConn.HandshakeContext(context.Background())
 }

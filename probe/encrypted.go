@@ -94,7 +94,7 @@ func transportFrom(w dns.ResponseWriter, proto string) (Transport, *TLSInfo) {
 	}
 
 	switch proto {
-	case "tcp":
+	case string(TransportTCP):
 		return TransportTCP, nil
 	default:
 		return TransportUDP, nil
@@ -133,10 +133,12 @@ func connectionState(w dns.ResponseWriter) *tls.ConnectionState {
 
 // Encrypted reports whether the query arrived over an encrypted transport. This
 // is the RFC 9539 measurement in one bit; TLSInfo carries the detail.
-func (o Observation) Encrypted() bool {
+func (o *Observation) Encrypted() bool {
 	switch o.Transport {
 	case TransportTLS, TransportQUIC, TransportHTTP:
 		return true
+	case TransportUDP, TransportTCP:
+		return false
 	default:
 		return false
 	}

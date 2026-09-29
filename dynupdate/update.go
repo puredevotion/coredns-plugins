@@ -73,9 +73,9 @@ func (d *DynUpdate) serveUpdate(w dns.ResponseWriter, r *dns.Msg) (int, error) {
 }
 
 // tsigVerified reports whether the request carried a TSIG that the server
-// validated. w is wrapped by CoreDNS (ScrubWriter, and the tsig plugin's own
-// writer), so the status is reached through an interface assertion rather than
-// off the concrete type.
+// validated. The writer w is wrapped by CoreDNS (ScrubWriter, and the tsig
+// plugin's own writer), so the status is reached through an interface
+// assertion rather than off the concrete type.
 func tsigVerified(w dns.ResponseWriter, r *dns.Msg) bool {
 	if r.IsTsig() == nil {
 		return false
@@ -103,27 +103,13 @@ func (d *DynUpdate) checkPrereqs(prereqs []dns.RR) int {
 
 		switch h.Class {
 		case dns.ClassANY:
-			if h.Rdlength != 0 {
-				return dns.RcodeFormatError
-			}
-			if h.Rrtype == dns.TypeANY {
-				if !d.nameInUse(h.Name) {
-					return dns.RcodeNameError // NXDOMAIN
-				}
-			} else if !d.rrsetExists(h.Name, h.Rrtype) {
-				return dns.RcodeNXRrset
+			if rcode := d.checkPrereqExists(h); rcode != rcodeNoVerdict {
+				return rcode
 			}
 
 		case dns.ClassNONE:
-			if h.Rdlength != 0 {
-				return dns.RcodeFormatError
-			}
-			if h.Rrtype == dns.TypeANY {
-				if d.nameInUse(h.Name) {
-					return dns.RcodeYXDomain
-				}
-			} else if d.rrsetExists(h.Name, h.Rrtype) {
-				return dns.RcodeYXRrset
+			if rcode := d.checkPrereqAbsent(h); rcode != rcodeNoVerdict {
+				return rcode
 			}
 
 		case dns.ClassINET:
@@ -144,135 +130,203 @@ func (d *DynUpdate) checkPrereqs(prereqs []dns.RR) int {
 	return dns.RcodeSuccess
 }
 
+// rcodeNoVerdict marks a prerequisite check as passed with nothing more to
+// say about that record — as opposed to dns.RcodeSuccess, which is 0 and
+// therefore cannot double as a sentinel.
+const rcodeNoVerdict = -1
+
+// checkPrereqExists implements the §3.2.2/§3.2.4 ClassANY forms: "name is in
+// use" (TypeANY) or "this RRset exists" (any other type).
+func (d *DynUpdate) checkPrereqExists(h *dns.RR_Header) int {
+	if h.Rdlength != 0 {
+		return dns.RcodeFormatError
+	}
+	if h.Rrtype == dns.TypeANY {
+		if !d.nameInUse(h.Name) {
+			return dns.RcodeNameError // NXDOMAIN.
+		}
+		return rcodeNoVerdict
+	}
+	if !d.rrsetExists(h.Name, h.Rrtype) {
+		return dns.RcodeNXRrset
+	}
+	return rcodeNoVerdict
+}
+
+// checkPrereqAbsent implements the §3.2.1/§3.2.5 ClassNONE forms: "name is
+// not in use" (TypeANY) or "this RRset does not exist" (any other type).
+func (d *DynUpdate) checkPrereqAbsent(h *dns.RR_Header) int {
+	if h.Rdlength != 0 {
+		return dns.RcodeFormatError
+	}
+	if h.Rrtype == dns.TypeANY {
+		if d.nameInUse(h.Name) {
+			return dns.RcodeYXDomain
+		}
+		return rcodeNoVerdict
+	}
+	if d.rrsetExists(h.Name, h.Rrtype) {
+		return dns.RcodeYXRrset
+	}
+	return rcodeNoVerdict
+}
+
 // prescan implements §3.4.1: reject the entire update if any single record in
 // it is malformed, out of zone, or against policy. Nothing has been applied at
 // this point, which is the whole reason the RFC separates the two passes.
 func (d *DynUpdate) prescan(updates []dns.RR) int {
 	for _, rr := range updates {
-		h := rr.Header()
-		if !d.inZone(h.Name) {
-			return dns.RcodeNotZone
-		}
-		// Meta-types are queries, not records; none of them can appear in an
-		// update section in any class.
-		deleteEverythingAtName := h.Class == dns.ClassANY && h.Rrtype == dns.TypeANY
-		if isMetaType(h.Rrtype) && !deleteEverythingAtName {
-			return dns.RcodeFormatError
-		}
-
-		switch h.Class {
-		case dns.ClassINET:
-			if h.Rrtype == dns.TypeANY {
-				return dns.RcodeFormatError
-			}
-		case dns.ClassANY:
-			if h.Ttl != 0 || h.Rdlength != 0 {
-				return dns.RcodeFormatError
-			}
-		case dns.ClassNONE:
-			if h.Ttl != 0 || h.Rrtype == dns.TypeANY {
-				return dns.RcodeFormatError
-			}
-		default:
-			return dns.RcodeFormatError
-		}
-
-		// Type policy is checked here, in the prescan, so a disallowed type
-		// rejects the whole update rather than letting part of it land. An
-		// UPDATE key that only needs to publish ACME challenges should not be
-		// able to repoint an A record, and TSIG cannot express that.
-		if d.mutable != nil && h.Rrtype != dns.TypeANY && !d.mutable[h.Rrtype] {
-			log.Warningf("UPDATE for %s rejected: type %s is not in the mutable set",
-				h.Name, dns.TypeToString[h.Rrtype])
-			return dns.RcodeRefused
+		if rcode := d.prescanRecord(rr.Header()); rcode != dns.RcodeSuccess {
+			return rcode
 		}
 	}
+	return dns.RcodeSuccess
+}
+
+// prescanRecord applies §3.4.1 to a single update record.
+func (d *DynUpdate) prescanRecord(h *dns.RR_Header) int {
+	if !d.inZone(h.Name) {
+		return dns.RcodeNotZone
+	}
+	// Meta-types are queries, not records; none of them can appear in an
+	// update section in any class.
+	deleteEverythingAtName := h.Class == dns.ClassANY && h.Rrtype == dns.TypeANY
+	if isMetaType(h.Rrtype) && !deleteEverythingAtName {
+		return dns.RcodeFormatError
+	}
+
+	switch h.Class {
+	case dns.ClassINET:
+		if h.Rrtype == dns.TypeANY {
+			return dns.RcodeFormatError
+		}
+	case dns.ClassANY:
+		if h.Ttl != 0 || h.Rdlength != 0 {
+			return dns.RcodeFormatError
+		}
+	case dns.ClassNONE:
+		if h.Ttl != 0 || h.Rrtype == dns.TypeANY {
+			return dns.RcodeFormatError
+		}
+	default:
+		return dns.RcodeFormatError
+	}
+
+	// Type policy is checked here, in the prescan, so a disallowed type
+	// rejects the whole update rather than letting part of it land. An
+	// UPDATE key that only needs to publish ACME challenges should not be
+	// able to repoint an A record, and TSIG cannot express that.
+	if d.mutable != nil && h.Rrtype != dns.TypeANY && !d.mutable[h.Rrtype] {
+		log.Warningf("UPDATE for %s rejected: type %s is not in the mutable set",
+			h.Name, dns.TypeToString[h.Rrtype])
+		return dns.RcodeRefused
+	}
+
 	return dns.RcodeSuccess
 }
 
 // apply implements §3.4.2 against a copy, returning the new record set and
 // whether anything actually changed.
 func (d *DynUpdate) apply(updates []dns.RR) ([]dns.RR, bool) {
-	out := make([]dns.RR, len(d.rrs))
-	copy(out, d.rrs)
+	out := make([]dns.RR, 0, len(d.rrs))
+	out = append(out, d.rrs...)
 	changed := false
 
 	for _, rr := range updates {
+		if out == nil {
+			// DeleteWhere never actually returns nil, but out is indexed
+			// below and nilaway cannot see that across the reassignment.
+			out = []dns.RR{}
+		}
+
 		h := rr.Header()
 		name := strings.ToLower(dns.CanonicalName(h.Name))
 		apex := name == d.Zone
 
 		switch h.Class {
 		case dns.ClassINET:
-			// §3.4.2.3. SOA is special: an added SOA only takes effect if its
-			// serial is greater than the current one, so a stale updater
-			// cannot wind the zone backwards.
-			if h.Rrtype == dns.TypeSOA {
-				cur := soaOf(out)
-				new, ok := rr.(*dns.SOA)
-				if !ok || cur == nil || !serialGreater(new.Serial, cur.Serial) {
-					continue
-				}
-			}
-			// CNAME exclusivity, both directions. Silently ignored rather than
-			// rejected, per §3.4.2.3.
-			if h.Rrtype == dns.TypeCNAME && hasNonCNAME(out, name) {
-				continue
-			}
-			if h.Rrtype != dns.TypeCNAME && h.Rrtype != dns.TypeSOA && hasCNAME(out, name) {
-				continue
-			}
-
-			if i := indexOfRR(out, rr); i >= 0 {
-				// Identical record already present: only the TTL is updated.
-				if out[i].Header().Ttl != h.Ttl {
-					out[i].Header().Ttl = h.Ttl
-					changed = true
-				}
-				continue
-			}
-			out = append(out, dns.Copy(rr))
-			changed = true
-
+			out, changed = applyAdd(out, changed, rr, h, name)
 		case dns.ClassANY:
-			if h.Rrtype == dns.TypeANY {
-				// Delete every RRset at the name. At the apex, SOA and NS
-				// survive: a zone without them is not a zone, and §3.4.2.3
-				// says to leave them rather than to fail.
-				out, changed = deleteWhere(out, changed, func(x dns.RR) bool {
-					if !sameName(x, name) {
-						return false
-					}
-					if apex && (x.Header().Rrtype == dns.TypeSOA || x.Header().Rrtype == dns.TypeNS) {
-						return false
-					}
-					return true
-				})
-				continue
-			}
-			if apex && (h.Rrtype == dns.TypeSOA || h.Rrtype == dns.TypeNS) {
-				continue
-			}
-			out, changed = deleteWhere(out, changed, func(x dns.RR) bool {
-				return sameName(x, name) && x.Header().Rrtype == h.Rrtype
-			})
-
+			out, changed = applyDeleteRRset(out, changed, h, name, apex)
 		case dns.ClassNONE:
-			// §3.4.2.4 — delete one specific record. The apex SOA is never
-			// deletable, and the last apex NS is kept for the same reason as
-			// above.
-			if apex && h.Rrtype == dns.TypeSOA {
-				continue
-			}
-			if apex && h.Rrtype == dns.TypeNS && countRRset(out, name, dns.TypeNS) <= 1 {
-				continue
-			}
-			if i := indexOfRR(out, rr); i >= 0 {
-				out = append(out[:i], out[i+1:]...)
-				changed = true
-			}
+			out, changed = applyDeleteRecord(out, changed, rr, h, name, apex)
 		}
 	}
 
+	return out, changed
+}
+
+// applyAdd implements the ClassINET (add) form of §3.4.2.3: SOA serial
+// gating, CNAME exclusivity in both directions, and TTL-only update of an
+// already-present record.
+func applyAdd(out []dns.RR, changed bool, rr dns.RR, h *dns.RR_Header, name string) ([]dns.RR, bool) {
+	// SOA is special: an added SOA only takes effect if its serial is
+	// greater than the current one, so a stale updater cannot wind the
+	// zone backwards.
+	if h.Rrtype == dns.TypeSOA {
+		cur := soaOf(out)
+		newSOA, ok := rr.(*dns.SOA)
+		if !ok || cur == nil || !serialGreater(newSOA.Serial, cur.Serial) {
+			return out, changed
+		}
+	}
+	// CNAME exclusivity, both directions. Silently ignored rather than
+	// rejected, per §3.4.2.3.
+	if h.Rrtype == dns.TypeCNAME && hasNonCNAME(out, name) {
+		return out, changed
+	}
+	if h.Rrtype != dns.TypeCNAME && h.Rrtype != dns.TypeSOA && hasCNAME(out, name) {
+		return out, changed
+	}
+
+	if i := indexOfRR(out, rr); i >= 0 {
+		// Identical record already present: only the TTL is updated.
+		if out[i].Header().Ttl != h.Ttl {
+			out[i].Header().Ttl = h.Ttl
+			changed = true
+		}
+		return out, changed
+	}
+
+	return append(out, dns.Copy(rr)), true
+}
+
+// applyDeleteRRset implements the ClassANY (delete RRset, or every RRset at
+// the name) form of §3.4.2.3. At the apex, SOA and NS survive a
+// delete-everything: a zone without them is not a zone.
+func applyDeleteRRset(out []dns.RR, changed bool, h *dns.RR_Header, name string, apex bool) ([]dns.RR, bool) {
+	if h.Rrtype == dns.TypeANY {
+		return deleteWhere(out, changed, func(x dns.RR) bool {
+			if !sameName(x, name) {
+				return false
+			}
+			if apex && (x.Header().Rrtype == dns.TypeSOA || x.Header().Rrtype == dns.TypeNS) {
+				return false
+			}
+			return true
+		})
+	}
+	if apex && (h.Rrtype == dns.TypeSOA || h.Rrtype == dns.TypeNS) {
+		return out, changed
+	}
+	return deleteWhere(out, changed, func(x dns.RR) bool {
+		return sameName(x, name) && x.Header().Rrtype == h.Rrtype
+	})
+}
+
+// applyDeleteRecord implements the ClassNONE (delete one specific record)
+// form of §3.4.2.4. The apex SOA is never deletable, and the last apex NS is
+// kept for the same reason applyDeleteRRset keeps it.
+func applyDeleteRecord(out []dns.RR, changed bool, rr dns.RR, h *dns.RR_Header, name string, apex bool) ([]dns.RR, bool) {
+	if apex && h.Rrtype == dns.TypeSOA {
+		return out, changed
+	}
+	if apex && h.Rrtype == dns.TypeNS && countRRset(out, name, dns.TypeNS) <= 1 {
+		return out, changed
+	}
+	if i := indexOfRR(out, rr); i >= 0 {
+		out = append(out[:i], out[i+1:]...)
+		changed = true
+	}
 	return out, changed
 }

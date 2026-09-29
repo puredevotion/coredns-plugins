@@ -35,10 +35,13 @@
 // and atomicity are worth far more than update throughput. A zone taking
 // thousands of updates per second wants a different design, and should say so
 // loudly rather than discover it.
+//
+//nolint:misspell // "Transferer" throughout this file names coredns's actual transfer.Transferer interface, not a typo
 package dynupdate
 
 import (
 	"context"
+	"fmt"
 	"sync"
 
 	"github.com/coredns/coredns/plugin"
@@ -54,11 +57,12 @@ var log = clog.NewWithPlugin(pluginName)
 const pluginName = "dynupdate"
 
 // DynUpdate serves one zone and accepts RFC 2136 UPDATE messages for it.
+//
+// Field order here is chosen for fieldalignment (pointer-shaped fields
+// first), not for readability — see the comments on each field for what it
+// does.
 type DynUpdate struct {
 	Next plugin.Handler
-
-	// Zone is the canonical origin, always fully qualified and lower case.
-	Zone string
 
 	// Xfer, when the `transfer` plugin is configured in the same server
 	// block, is used to send a NOTIFY after a change. Without it a secondary
@@ -66,16 +70,21 @@ type DynUpdate struct {
 	// challenge is indistinguishable from the update never happening.
 	Xfer *transfer.Transfer
 
-	// mutable, when non-nil, is the set of RR types this plugin will let an
-	// UPDATE touch. nil means "no type policy" — RFC 2136's own rules still
-	// apply. The point of an allowlist is that an UPDATE key which only needs
-	// to publish TXT challenges should not also be able to repoint an A
-	// record, and TSIG alone cannot express that.
+	// The mutable field, when non-nil, is the set of RR types this plugin
+	// will let an UPDATE touch. Nil means "no type policy" — RFC 2136's own
+	// rules still apply. The point of an allowlist is that an UPDATE key
+	// which only needs to publish TXT challenges should not also be able to
+	// repoint an A record, and TSIG alone cannot express that.
 	mutable map[uint16]bool
 
-	mu   sync.RWMutex
-	rrs  []dns.RR   // authoritative content; the source of truth
-	view *file.File // rebuilt from rrs on every change, serves reads and AXFR
+	view *file.File // Rebuilt from rrs on every change, serves reads and AXFR.
+
+	// Zone is the canonical origin, always fully qualified and lower case.
+	Zone string
+
+	rrs []dns.RR // Authoritative content; the source of truth.
+
+	mu sync.RWMutex
 }
 
 // ServeDNS routes UPDATE to the RFC 2136 machinery and everything else to the
@@ -95,7 +104,11 @@ func (d *DynUpdate) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 	view := d.view
 	d.mu.RUnlock()
 
-	return view.ServeDNS(ctx, w, r)
+	rcode, err := view.ServeDNS(ctx, w, r)
+	if err != nil {
+		return rcode, fmt.Errorf("serve file view: %w", err)
+	}
+	return rcode, nil
 }
 
 // Transfer implements transfer.Transferer so AXFR of this zone includes
@@ -106,7 +119,11 @@ func (d *DynUpdate) Transfer(zone string, serial uint32) (<-chan []dns.RR, error
 	view := d.view
 	d.mu.RUnlock()
 
-	return view.Transfer(zone, serial)
+	ch, err := view.Transfer(zone, serial)
+	if err != nil {
+		return ch, fmt.Errorf("transfer %s: %w", zone, err)
+	}
+	return ch, nil
 }
 
 // Name implements plugin.Handler.
@@ -121,16 +138,14 @@ func (d *DynUpdate) build(rrs []dns.RR) (*file.File, error) {
 		// names), so hand it a copy — d.rrs is shared with readers of the
 		// previous view until the swap completes.
 		if err := z.Insert(dns.Copy(rr)); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("insert record into zone: %w", err)
 		}
 	}
 
 	return &file.File{
-		Next: d.Next,
-		Zones: file.Zones{
-			Z:     map[string]*file.Zone{d.Zone: z},
-			Names: []string{d.Zone},
-		},
+		Next:  d.Next,
+		Z:     map[string]*file.Zone{d.Zone: z},
+		Names: []string{d.Zone},
 	}, nil
 }
 

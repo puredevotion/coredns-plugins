@@ -1,4 +1,4 @@
-package sni_tls
+package snitls
 
 import (
 	ctls "crypto/tls"
@@ -10,8 +10,8 @@ import (
 )
 
 func TestSetup(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
-	cert2Path, key2Path := writeTestCert(t, "secondary", "dns.internal.example")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
+	cert2Path, key2Path := writeTestCert(t, "secondary", testSNISecondary)
 
 	tests := []struct {
 		input     string
@@ -19,9 +19,9 @@ func TestSetup(t *testing.T) {
 	}{
 		{fmt.Sprintf("sni_tls %s %s", certPath, keyPath), false},
 		{fmt.Sprintf("sni_tls %s %s\nsni_tls %s %s", certPath, keyPath, cert2Path, key2Path), false},
-		{fmt.Sprintf("sni_tls %s", certPath), true}, // missing key arg
-		{"sni_tls", true}, // missing both args
-		{fmt.Sprintf("sni_tls %s %s c", certPath, keyPath), true}, // too many args
+		{fmt.Sprintf("sni_tls %s", certPath), true}, // Missing key arg.
+		{"sni_tls", true}, // Missing both args.
+		{fmt.Sprintf("sni_tls %s %s c", certPath, keyPath), true}, // Too many args.
 	}
 
 	for i, tc := range tests {
@@ -52,8 +52,8 @@ func TestSetup_MissingCertFile(t *testing.T) {
 // through the plugin's own certStore logic, end-to-end from Corefile text to
 // a working TLS callback.
 func TestSetup_WiresTLSConfig(t *testing.T) {
-	primaryCert, primaryKey := writeTestCert(t, "primary", "dns.example.com")
-	secondaryCert, secondaryKey := writeTestCert(t, "secondary", "dns.internal.example")
+	primaryCert, primaryKey := writeTestCert(t, "primary", testSNIPrimary)
+	secondaryCert, secondaryKey := writeTestCert(t, "secondary", testSNISecondary)
 
 	input := fmt.Sprintf("sni_tls %s %s\nsni_tls %s %s", primaryCert, primaryKey, secondaryCert, secondaryKey)
 	c := caddy.NewTestController("dns", input)
@@ -78,11 +78,11 @@ func TestSetup_WiresTLSConfig(t *testing.T) {
 		t.Fatalf("TLSConfig.Certificates must be empty when GetCertificate is used, got %d entries", len(tlsConfig.Certificates))
 	}
 
-	primary, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: "dns.example.com"})
+	primary, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: testSNIPrimary})
 	if err != nil {
 		t.Fatalf("GetCertificate(dns.example.com): %v", err)
 	}
-	secondary, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: "dns.internal.example"})
+	secondary, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: testSNISecondary})
 	if err != nil {
 		t.Fatalf("GetCertificate(dns.internal.example): %v", err)
 	}
@@ -104,7 +104,7 @@ func TestSetup_WiresTLSConfig(t *testing.T) {
 // reject unknown option tokens, and reject a bare block with nothing in it
 // the same way a bare `sni_tls` with no args already does.
 func TestSetup_StrictBlock(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 
 	tests := []struct {
 		name      string
@@ -149,7 +149,7 @@ func TestSetup_StrictBlock(t *testing.T) {
 // option actually reaches the installed TLSConfig's GetCertificate, end to
 // end from Corefile text -- not just that setup() accepts the syntax.
 func TestSetup_StrictBlock_RejectsUnmatchedSNI(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 	input := fmt.Sprintf("sni_tls %s %s\nsni_tls {\n  strict\n}", certPath, keyPath)
 	c := caddy.NewTestController("dns", input)
 	if err := setup(c); err != nil {
@@ -160,7 +160,7 @@ func TestSetup_StrictBlock_RejectsUnmatchedSNI(t *testing.T) {
 	if _, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: "unmatched.example.org"}); err == nil {
 		t.Fatal("strict mode: expected unmatched SNI to be rejected, got a cert with no error")
 	}
-	got, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: "dns.example.com"})
+	got, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: testSNIPrimary})
 	if err != nil || got == nil {
 		t.Fatalf("strict mode: configured SNI must still resolve: got=%v err=%v", got, err)
 	}
@@ -171,7 +171,7 @@ func TestSetup_StrictBlock_RejectsUnmatchedSNI(t *testing.T) {
 // — sni_tls must refuse to silently overwrite an existing TLSConfig set by an
 // earlier tls/sni_tls directive in the same server block.
 func TestSetup_RejectsDoubleTLSConfig(t *testing.T) {
-	certPath, keyPath := writeTestCert(t, "primary", "dns.example.com")
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 	c := caddy.NewTestController("dns", fmt.Sprintf("sni_tls %s %s", certPath, keyPath))
 	dnsserver.GetConfig(c).TLSConfig = &ctls.Config{}
 

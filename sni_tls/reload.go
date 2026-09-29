@@ -1,4 +1,4 @@
-package sni_tls
+package snitls
 
 import (
 	"context"
@@ -28,11 +28,11 @@ const reloadInterval = 30 * time.Second
 // changes that hash and reload never restarts the server. Rotation has to be
 // polled in-process instead.
 type liveStore struct {
-	pairs   [][2]string
-	strict  bool
 	current atomic.Pointer[certStore]
 	digest  atomic.Pointer[[32]byte]
 	cancel  context.CancelFunc
+	pairs   [][2]string
+	strict  bool
 }
 
 // newLiveStore wraps an already-loaded certStore for polling; setup() still
