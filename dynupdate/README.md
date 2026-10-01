@@ -54,9 +54,10 @@ All five prerequisite forms of §3.2, the prescan/apply split of §3.4.1–2, an
 | Prerequisites | NXDOMAIN / YXDOMAIN / NXRRSET / YXRRSET, including value-dependent RRset equality |
 | Out-of-zone name | NOTZONE — a distinct answer from NXDOMAIN; the name may exist, just not here |
 | Wrong zone | NOTAUTH — "wrong server", not "wrong credentials" |
-| Apex SOA | never deleted; an added SOA applies only if its serial is greater (RFC 1982 arithmetic) |
+| Apex SOA | never deleted; an added SOA **replaces** it, and only if its serial is greater (RFC 1982 arithmetic); an SOA for any other name is ignored |
 | Last apex NS | never deleted |
 | CNAME exclusivity | enforced both ways, silently ignored rather than rejected, per §3.4.2.3 |
+| CNAME re-pointed | an added CNAME **replaces** the name's existing CNAME, per §3.4.2.2 |
 | Identical record re-added | TTL updated, no serial bump, NOERROR |
 | Serial | incremented on any real change, so a secondary's serial comparison sees it |
 | NOTIFY | sent after a change when *transfer* is configured in the block |

@@ -501,6 +501,119 @@ func TestSOAAddOnlyMovesForward(t *testing.T) {
 	}
 }
 
+// An accepted SOA replaces the zone's, per RFC 2136 §3.4.2.2. Appending it
+// instead left two SOAs: the view served the last one while bumpSerial
+// advanced the first, so the served serial froze and no later change ever
+// reached a secondary.
+func TestSOAAddReplacesAndSerialKeepsMoving(t *testing.T) {
+	d := newTestPlugin(t, nil)
+
+	newer := rr(t, "example.org. 300 IN SOA ns.example.org. admin.example.org. 500 3600 900 86400 300")
+	if got := send(t, d, newUpdate(nil, []dns.RR{newer})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	if n := countSOAs(d); n != 1 {
+		t.Fatalf("zone has %d SOAs after an SOA update, want 1", n)
+	}
+	// The update itself is a change, so the serial is bumped past it.
+	if got := servedSerial(t, d); got != 501 {
+		t.Fatalf("served serial = %d, want 501", got)
+	}
+
+	txt := rr(t, `later.example.org. 60 IN TXT "x"`)
+	if got := send(t, d, newUpdate(nil, []dns.RR{txt})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	if got := servedSerial(t, d); got != 502 {
+		t.Errorf("served serial = %d after a further change, want 502", got)
+	}
+}
+
+// A zone's SOA is its apex's. One sent for a name below the apex has
+// nothing to replace and must not become the zone's SOA.
+func TestSOABelowApexIsIgnored(t *testing.T) {
+	d := newTestPlugin(t, nil)
+
+	below := rr(t, "www.example.org. 300 IN SOA ns.example.org. admin.example.org. 500 3600 900 86400 300")
+	if got := send(t, d, newUpdate(nil, []dns.RR{below})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	if n := countSOAs(d); n != 1 {
+		t.Errorf("zone has %d SOAs, want 1", n)
+	}
+	if got := servedSerial(t, d); got != 100 {
+		t.Errorf("served serial = %d, want 100 (nothing changed)", got)
+	}
+}
+
+// RFC 2136 §3.4.2.2: "otherwise replace the CNAME Zone RR with the CNAME
+// Update RR". A name has at most one CNAME.
+func TestCNAMEAddReplacesExistingCNAME(t *testing.T) {
+	d := newTestPlugin(t, nil)
+
+	repoint := rr(t, "alias.example.org. 300 IN CNAME ns.example.org.")
+	if got := send(t, d, newUpdate(nil, []dns.RR{repoint})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	got := d.rrsetOf("alias.example.org.", dns.TypeCNAME)
+	if len(got) != 1 {
+		t.Fatalf("CNAME RRset = %v, want exactly one CNAME", got)
+	}
+	if c, ok := got[0].(*dns.CNAME); !ok || c.Target != "ns.example.org." {
+		t.Errorf("CNAME = %v, want the new target", got[0])
+	}
+}
+
+// RFC 2136 §3.4.2.1: an update is all or nothing. A rebuild failure
+// (file.Zone refuses NSEC3) must leave the zone untouched, including the
+// TTL refreshed and the serial bumped earlier in the same UPDATE — both used
+// to be written through records shared with the live zone.
+func TestFailedRebuildLeavesZoneUntouched(t *testing.T) {
+	d := newTestPlugin(t, nil)
+	before := serialOf(t, d)
+
+	refresh := rr(t, "www.example.org. 9999 IN A 192.0.2.10")
+	nsec3 := rr(t, "abc.example.org. 300 IN NSEC3 1 0 10 AABB 2T7B4G4VSA5SMI47K61MV5BV1A22BOJR A")
+	if got := send(t, d, newUpdate(nil, []dns.RR{refresh, nsec3})); got != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %s, want SERVFAIL", dns.RcodeToString[got])
+	}
+	if after := serialOf(t, d); after != before {
+		t.Errorf("serial moved %d -> %d on a failed UPDATE", before, after)
+	}
+	www := d.rrsetOf("www.example.org.", dns.TypeA)
+	if len(www) != 1 {
+		t.Fatalf("www A RRset = %v, want one record", www)
+	}
+	if ttl := www[0].Header().Ttl; ttl != 300 {
+		t.Errorf("www TTL = %d after a failed UPDATE, want 300", ttl)
+	}
+}
+
+func countSOAs(d *DynUpdate) int {
+	n := 0
+	for _, r := range d.rrs {
+		if r.Header().Rrtype == dns.TypeSOA {
+			n++
+		}
+	}
+	return n
+}
+
+// servedSerial is the serial a secondary sees: the one the view answers
+// with, not whichever SOA happens to be first in d.rrs.
+func servedSerial(t *testing.T, d *DynUpdate) uint32 {
+	t.Helper()
+	resp := query(t, d, testZone, dns.TypeSOA)
+	if len(resp.Answer) != 1 {
+		t.Fatalf("SOA query answered %v, want one SOA", resp.Answer)
+	}
+	soa, ok := resp.Answer[0].(*dns.SOA)
+	if !ok {
+		t.Fatalf("SOA query answered %v", resp.Answer[0])
+	}
+	return soa.Serial
+}
+
 func TestSerialGreaterWrapsPerRFC1982(t *testing.T) {
 	cases := []struct {
 		a, b uint32

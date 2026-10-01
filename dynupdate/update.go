@@ -245,7 +245,7 @@ func (d *DynUpdate) apply(updates []dns.RR) ([]dns.RR, bool) {
 
 		switch h.Class {
 		case dns.ClassINET:
-			out, changed = applyAdd(out, changed, rr, h, name)
+			out, changed = applyAdd(out, changed, rr, h, name, apex)
 		case dns.ClassANY:
 			out, changed = applyDeleteRRset(out, changed, h, name, apex)
 		case dns.ClassNONE:
@@ -259,35 +259,55 @@ func (d *DynUpdate) apply(updates []dns.RR) ([]dns.RR, bool) {
 // applyAdd implements the ClassINET (add) form of §3.4.2.3: SOA serial
 // gating, CNAME exclusivity in both directions, and TTL-only update of an
 // already-present record.
-func applyAdd(out []dns.RR, changed bool, rr dns.RR, h *dns.RR_Header, name string) ([]dns.RR, bool) {
+//
+// SOA and CNAME are singletons, and §3.4.2.2 says so: an accepted SOA or
+// CNAME update REPLACES the zone's, it does not join it. Appending instead
+// left two SOAs (the view serves the last one inserted while bumpSerial
+// advances the first, so the served serial froze and secondaries stopped
+// transferring) or two CNAMEs at one name. See
+// verification/lean/CorednsPlugins/DynUpdate.lean.
+func applyAdd(out []dns.RR, changed bool, rr dns.RR, h *dns.RR_Header, name string, apex bool) ([]dns.RR, bool) {
 	// SOA is special: an added SOA only takes effect if its serial is
 	// greater than the current one, so a stale updater cannot wind the
-	// zone backwards.
+	// zone backwards. A zone has one SOA, at its apex; one sent for any
+	// other name has nothing to replace.
 	if h.Rrtype == dns.TypeSOA {
 		cur := soaOf(out)
 		newSOA, ok := rr.(*dns.SOA)
-		if !ok || cur == nil || !serialGreater(newSOA.Serial, cur.Serial) {
+		if !ok || !apex || cur == nil || !serialGreater(newSOA.Serial, cur.Serial) {
 			return out, changed
 		}
+		out, _ = deleteWhere(out, changed, func(x dns.RR) bool { return x.Header().Rrtype == dns.TypeSOA })
+		return append(out, dns.Copy(rr)), true
 	}
 	// CNAME exclusivity, both directions. Silently ignored rather than
 	// rejected, per §3.4.2.3.
 	if h.Rrtype == dns.TypeCNAME && hasNonCNAME(out, name) {
 		return out, changed
 	}
-	if h.Rrtype != dns.TypeCNAME && h.Rrtype != dns.TypeSOA && hasCNAME(out, name) {
+	if h.Rrtype != dns.TypeCNAME && hasCNAME(out, name) {
 		return out, changed
 	}
 
 	if i := indexOfRR(out, rr); i >= 0 {
-		// Identical record already present: only the TTL is updated.
+		// Identical record already present: only the TTL is updated. On a
+		// copy: out shares its records with d.rrs, and a write through
+		// out[i] would land in the live zone even if the rebuild below
+		// then fails and the client is told SERVFAIL.
 		if out[i].Header().Ttl != h.Ttl {
+			out[i] = dns.Copy(out[i])
 			out[i].Header().Ttl = h.Ttl
 			changed = true
 		}
 		return out, changed
 	}
 
+	if h.Rrtype == dns.TypeCNAME {
+		// "otherwise replace the CNAME Zone RR with the CNAME Update RR".
+		out, _ = deleteWhere(out, changed, func(x dns.RR) bool {
+			return sameName(x, name) && x.Header().Rrtype == dns.TypeCNAME
+		})
+	}
 	return append(out, dns.Copy(rr)), true
 }
 

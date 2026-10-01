@@ -164,9 +164,18 @@ func serialGreater(a, b uint32) bool {
 // bumpSerial advances the SOA after a successful change. RFC 2136 §3.6 leaves
 // this to the server; not doing it means a secondary compares serials, sees no
 // difference, and never transfers the change it was just NOTIFYed about.
+//
+// The SOA is replaced by an incremented copy rather than incremented in
+// place: rrs is a fresh slice, but its records are still d.rrs's, and an
+// in-place ++ would survive a failed rebuild.
 func bumpSerial(rrs []dns.RR) {
-	if soa := soaOf(rrs); soa != nil {
-		soa.Serial++
+	for i, rr := range rrs {
+		if soa, ok := rr.(*dns.SOA); ok {
+			next := *soa
+			next.Serial++
+			rrs[i] = &next
+			return
+		}
 	}
 }
 
