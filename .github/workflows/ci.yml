@@ -136,6 +136,13 @@ jobs:
           echo "$RUNNER_TEMP/lean-${LEAN_VERSION}-linux/bin" >> "$GITHUB_PATH"
       - name: Check toolchain pin matches
         run: test "$(cat verification/lean/lean-toolchain)" = "leanprover/lean4:v${LEAN_VERSION}"
+      - name: Use the runner's JDK 21
+        # Apalache 0.62 is built for Java 21; the image's default java is 17.
+        # The image ships 21 alongside it, so no extra action to pin.
+        run: |
+          test -n "${JAVA_HOME_21_X64:-}" || { echo "::error::runner image has no JDK 21"; exit 1; }
+          echo "JAVA_HOME=$JAVA_HOME_21_X64" >> "$GITHUB_ENV"
+          echo "$JAVA_HOME_21_X64/bin" >> "$GITHUB_PATH"
       - name: SANY (parse and level-check TLA+ specs)
         run: verification/run.sh sany
       - name: TLC (explicit-state model checking)

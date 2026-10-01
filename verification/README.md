@@ -7,7 +7,7 @@ semantics).
 
 ```sh
 verification/run.sh            # everything
-verification/run.sh tla        # sany + tlc + apalache (java 17+)
+verification/run.sh tla        # sany + tlc + apalache (java 21+; 17 is enough without apalache)
 verification/run.sh sany       # parse and level-check every spec
 verification/run.sh tlc        # explicit-state model checking
 verification/run.sh apalache   # type checking, bounded model checking, inductive proofs

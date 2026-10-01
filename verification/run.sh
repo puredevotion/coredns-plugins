@@ -16,7 +16,7 @@
 # `\* expect: refuted`. The run fails if any tool disagrees with what a
 # config declares.
 #
-# Tools: java 17+; tla2tools.jar and Apalache are fetched at pinned,
+# Tools: java 17+ (21+ for Apalache); tla2tools.jar and Apalache are fetched at pinned,
 # checksummed versions unless TLA2TOOLS (the jar) or APALACHE (the
 # apalache-mc launcher) point at local copies; lake/lean on PATH for the
 # proofs (lean/lean-toolchain pins the version). APALACHE_SLOW=1 also runs
@@ -129,6 +129,12 @@ apalache_check() { # spec cfg-file init inv length
 }
 
 check_apalache() {
+  local major
+  major=$(java -XshowSettings:properties -version 2>&1 | sed -n 's/^ *java.specification.version = //p')
+  if (( ${major:-0} < 21 )); then
+    echo "FAIL  Apalache $APALACHE_VERSION needs Java 21+, found ${major:-none}" >&2
+    return 1
+  fi
   fetch_apalache
   local failed=0 spec cfg line len inv expect got want tmp step init props
   cd "$here/tla"
