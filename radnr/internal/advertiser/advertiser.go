@@ -140,12 +140,65 @@ func (a *Advertiser) readSolicitations(ctx context.Context, rs chan<- netip.Addr
 	}
 }
 
+// raSchedule is Run's single send timer. Periodic and solicited RAs both go
+// through it, so the MIN_DELAY_BETWEEN_RAS rate limit holds for each.
+type raSchedule struct {
+	timer    *time.Timer
+	next     time.Time // When timer fires.
+	lastSent time.Time
+}
+
+// at re-arms the timer for when.
+func (s *raSchedule) at(when time.Time) {
+	s.next = when
+	s.timer.Reset(time.Until(when))
+}
+
+// held reports whether the rate limit forbids an RA now, and until when.
+func (s *raSchedule) held() (time.Time, bool) {
+	earliest := s.lastSent.Add(minDelayBetweenRAs)
+	return earliest, time.Now().Before(earliest)
+}
+
+// onTimer handles the timer firing: a periodic RA, unless one went out less
+// than minDelayBetweenRAs ago, in which case it waits out the window.
+func (s *raSchedule) onTimer(send func(), interval time.Duration) {
+	if earliest, held := s.held(); held {
+		s.at(earliest)
+		return
+	}
+	send()
+	s.at(time.Now().Add(interval))
+}
+
+// onSolicitation handles a Router Solicitation: answered now, or, inside
+// the window, at its end by pulling the timer in.
+func (s *raSchedule) onSolicitation(from netip.Addr, send func()) {
+	earliest, held := s.held()
+	if !held {
+		log.Printf("ra-dnr: solicited RA for RS from %s", from)
+		send()
+		return
+	}
+	log.Printf("ra-dnr: RS from %s deferred (%v since last RA)", from, time.Since(s.lastSent))
+	if earliest.Before(s.next) {
+		s.at(earliest)
+	}
+}
+
 // Run advertises until ctx is cancelled: periodically (at a randomised
 // interval per RFC 4861 §6.2.1) and solicited (in response to a Router
 // Solicitation per §6.2.6, rate-limited to at most one send per
 // minDelayBetweenRAs regardless of trigger). Send errors are logged, not
 // fatal. Reads for Router Solicitations run inline in this goroutine — RAs are
 // too latency-insensitive here to need a separate reader goroutine.
+//
+// Both triggers go through the one timer, so the rate limit holds for each:
+// a periodic tick inside the window is pushed to its end, and an RS inside
+// the window pulls the timer in to that same instant. §6.2.6 asks for the
+// RS to be answered then, not dropped; dropping it left the host waiting
+// for its own RS retransmission or the next periodic RA. See
+// verification/tla/RadnrRA.tla, which checks both properties.
 func (a *Advertiser) Run(ctx context.Context) error {
 	ra, err := BuildRA(&a.Cfg)
 	if err != nil {
@@ -157,9 +210,9 @@ func (a *Advertiser) Run(ctx context.Context) error {
 		dst = netip.MustParseAddr(a.Cfg.UnicastTarget)
 	}
 
-	var lastSent time.Time
+	s := &raSchedule{}
 	send := func() {
-		lastSent = time.Now()
+		s.lastSent = time.Now()
 		if a.Cfg.DryRun {
 			log.Printf("ra-dnr: [dry-run] would send RA to %s (ADN=%s)", dst, a.Cfg.ADN) //nolint:misspell // ADN: RFC 9463 Authentication Domain Name, not a typo for AND
 			return
@@ -183,8 +236,9 @@ func (a *Advertiser) Run(ctx context.Context) error {
 	rsDone := make(chan struct{})
 	go a.readSolicitations(ctx, rs, rsDone)
 
-	t := time.NewTimer(a.nextInterval())
-	defer t.Stop()
+	s.next = time.Now().Add(a.nextInterval())
+	s.timer = time.NewTimer(time.Until(s.next))
+	defer s.timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -193,16 +247,10 @@ func (a *Advertiser) Run(ctx context.Context) error {
 			}
 			<-rsDone
 			return fmt.Errorf("advertiser run: %w", ctx.Err())
-		case <-t.C:
-			send()
-			t.Reset(a.nextInterval())
+		case <-s.timer.C:
+			s.onTimer(send, a.nextInterval())
 		case from := <-rs:
-			if since := time.Since(lastSent); since < minDelayBetweenRAs {
-				log.Printf("ra-dnr: RS from %s rate-limited (%v since last RA)", from, since)
-				continue
-			}
-			log.Printf("ra-dnr: solicited RA for RS from %s", from)
-			send()
+			s.onSolicitation(from, send)
 		}
 	}
 }

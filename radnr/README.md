@@ -18,7 +18,8 @@ Advertisements are both periodic (interval randomized per RFC 4861 §6.2.1, so
 multiple advertisers on a link don't stay synchronized) and solicited: a valid
 incoming Router Solicitation triggers an immediate RA, rate-limited to at most
 one send per 3s (`MIN_DELAY_BETWEEN_RAS`, RFC 4861 §6.2.6) regardless of
-trigger.
+trigger. A solicitation arriving inside that window is answered when it
+closes, not dropped, and a periodic RA due inside it waits too.
 
 **SAFETY:** a second RA sender can disrupt LAN IPv6. *radnr* defaults to a
 non-default-router RA (RouterLifetime=0) and refuses to advertise prefixes. Use

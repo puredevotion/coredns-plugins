@@ -65,6 +65,48 @@ func TestOnStartup_LaunchesRunner(t *testing.T) {
 	}
 }
 
+// ctxRunner records the context of every Run call, so a test can tell
+// whether an earlier advertiser was cancelled.
+type ctxRunner struct{ ctxs chan context.Context }
+
+func (c *ctxRunner) Run(ctx context.Context) error {
+	c.ctxs <- ctx
+	<-ctx.Done()
+	return nil
+}
+
+// TestOnStartup_RestartFailedWithoutRestart is what caddy does when a plugin
+// registered before radnr fails its OnRestart: radnr's OnRestart never runs,
+// its OnRestartFailed (OnStartup) does. The advertiser already running must
+// be stopped, not orphaned beside a second one.
+func TestOnStartup_RestartFailedWithoutRestart(t *testing.T) {
+	cr := &ctxRunner{ctxs: make(chan context.Context, 2)}
+	r := &RADNR{Cfg: validCfg(), runner: cr}
+
+	if err := r.OnStartup(); err != nil {
+		t.Fatalf("OnStartup: %v", err)
+	}
+	first := <-cr.ctxs
+	if err := r.OnStartup(); err != nil { // OnRestartFailed, no OnRestart before it.
+		t.Fatalf("OnStartup (restart-failed): %v", err)
+	}
+	second := <-cr.ctxs
+
+	select {
+	case <-first.Done():
+	case <-time.After(time.Second):
+		t.Fatal("first advertiser still running after OnStartup started a second")
+	}
+	if err := r.OnShutdown(); err != nil {
+		t.Fatalf("OnShutdown: %v", err)
+	}
+	select {
+	case <-second.Done():
+	case <-time.After(time.Second):
+		t.Fatal("second advertiser not stopped by OnShutdown")
+	}
+}
+
 func TestOnStartup_InvalidConfig(t *testing.T) {
 	r := &RADNR{Cfg: config.Config{}} // Empty, invalid.
 	if err := r.OnStartup(); err == nil {

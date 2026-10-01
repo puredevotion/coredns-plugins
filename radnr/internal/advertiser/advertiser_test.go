@@ -21,6 +21,7 @@ type fakeConn struct {
 }
 
 type sent struct {
+	at  time.Time
 	msg ndp.Message
 	to  netip.Addr
 }
@@ -29,7 +30,7 @@ func (f *fakeConn) WriteTo(m ndp.Message, _ *ipv6.ControlMessage, dst netip.Addr
 	if f.sendErr != nil {
 		return f.sendErr
 	}
-	f.sent = append(f.sent, sent{msg: m, to: dst})
+	f.sent = append(f.sent, sent{at: time.Now(), msg: m, to: dst})
 	return nil
 }
 
@@ -281,6 +282,81 @@ func TestAdvertise_RouterSolicitationRateLimited(t *testing.T) {
 	<-done
 	if len(fc.sent) != 1 {
 		t.Fatalf("rate limiting failed: expected exactly 1 RA (initial), got %d", len(fc.sent))
+	}
+}
+
+// TestAdvertise_RateLimitedRSIsDeferred covers RFC 4861 §6.2.6's other half:
+// an RS inside the rate-limit window is answered when the window closes,
+// not dropped (which left the host waiting for its own retransmission or
+// the next periodic RA, up to Interval later).
+func TestAdvertise_RateLimitedRSIsDeferred(t *testing.T) {
+	withShrunkRateLimit(t, 50*time.Millisecond)
+	fc := &fakeConn{rsCh: make(chan struct{}, 1)}
+	a := &Advertiser{Conn: fc, Cfg: baseCfg(), Interval: time.Hour}
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() { expectRunDoneAsync(t, a.Run(ctx)); close(done) }()
+
+	time.Sleep(5 * time.Millisecond) // Inside the window opened by the initial RA.
+	fc.rsCh <- struct{}{}
+
+	<-done
+	if len(fc.sent) != 2 {
+		t.Fatalf("expected initial RA + one deferred solicited RA, got %d sends", len(fc.sent))
+	}
+	if gap := fc.sent[1].at.Sub(fc.sent[0].at); gap < 50*time.Millisecond {
+		t.Errorf("deferred RA sent %v after the previous one, inside the %v window", gap, 50*time.Millisecond)
+	}
+}
+
+// TestAdvertise_RateLimitCoversPeriodicRAs: §6.2.6's MIN_DELAY_BETWEEN_RAS
+// applies to every multicast RA, so a periodic tick landing just after a
+// solicited RA must wait out the window too. RSes are injected
+// continuously so solicited and periodic sends keep colliding.
+func TestAdvertise_RateLimitCoversPeriodicRAs(t *testing.T) {
+	const minDelay = 30 * time.Millisecond
+	withShrunkRateLimit(t, minDelay)
+	fc := &fakeConn{rsCh: make(chan struct{}, 1)}
+	// With a 45ms Interval, nextInterval() is in [30ms, 45ms): periodic and
+	// solicited RAs both land every few tens of milliseconds.
+	a := &Advertiser{Conn: fc, Cfg: baseCfg(), Interval: 45 * time.Millisecond}
+	ctx, cancel := context.WithTimeout(context.Background(), 600*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() { expectRunDoneAsync(t, a.Run(ctx)); close(done) }()
+
+	// Stop injecting well before Run's deadline: fakeConn.Close closes rsCh,
+	// and a send racing it would be a test bug, not an advertiser one.
+	tick := time.NewTicker(3 * time.Millisecond)
+	defer tick.Stop()
+	stop := time.After(450 * time.Millisecond)
+inject:
+	for {
+		select {
+		case <-stop:
+			break inject
+		case <-tick.C:
+			select {
+			case fc.rsCh <- struct{}{}:
+			default:
+			}
+		}
+	}
+	<-done
+
+	if len(fc.sent) < 5 {
+		t.Fatalf("only %d RAs sent; the test did not exercise the timer", len(fc.sent))
+	}
+	// Timestamps are taken in WriteTo, a moment after the scheduling
+	// decision, so allow for scheduler jitter below the window.
+	const slack = 10 * time.Millisecond
+	for i := 1; i < len(fc.sent); i++ {
+		if gap := fc.sent[i].at.Sub(fc.sent[i-1].at); gap < minDelay-slack {
+			t.Errorf("RAs %d and %d sent %v apart, want >= %v", i-1, i, gap, minDelay)
+		}
 	}
 }
 

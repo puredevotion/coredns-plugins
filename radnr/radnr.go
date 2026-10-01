@@ -68,6 +68,16 @@ func (r *RADNR) OnStartup() error {
 		run = &advertiser.Advertiser{Conn: conn, Cfg: r.Cfg, Interval: advInterval}
 	}
 
+	// An advertiser may already be running. When another plugin's OnRestart
+	// fails, caddy runs every plugin's OnRestartFailed — this — including
+	// ones whose OnRestart (OnShutdown) never ran. Overwriting r.cancel
+	// would orphan that advertiser: its raw socket and its RAs would
+	// outlive every later reload and shutdown. Stopped only now, once the
+	// replacement's socket is open, so a failed dial leaves the old one
+	// advertising. See verification/tla/PluginLifecycle.tla.
+	if r.cancel != nil {
+		r.cancel()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 
