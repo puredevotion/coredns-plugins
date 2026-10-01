@@ -3,7 +3,9 @@ package snitls
 import (
 	"crypto/tls"
 	"os"
+	"runtime"
 	"testing"
+	"time"
 )
 
 // --- digestPairs: change detection -------------------------------------------.
@@ -164,6 +166,41 @@ func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 	}
 	if err := live.OnShutdown(); err != nil { // OnFinalShutdown.
 		t.Fatalf("OnShutdown (final): %v", err)
+	}
+}
+
+// TestLiveStore_Lifecycle_RestartFailedWithoutRestart is the sequence caddy
+// produces when a plugin registered before sni_tls fails its OnRestart: our
+// OnRestart never runs, but OnRestartFailed (OnStartup) still does. The
+// first poll loop must not be orphaned — after the final shutdown, no poll
+// goroutine may be left running.
+func TestLiveStore_Lifecycle_RestartFailedWithoutRestart(t *testing.T) {
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
+	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	if err != nil {
+		t.Fatalf("buildCertStore: %v", err)
+	}
+	pairs := [][2]string{{certPath, keyPath}}
+	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+
+	baseline := runtime.NumGoroutine()
+	if err := live.OnStartup(); err != nil {
+		t.Fatalf("OnStartup: %v", err)
+	}
+	if err := live.OnStartup(); err != nil { // OnRestartFailed, no OnRestart before it.
+		t.Fatalf("OnStartup (restart-failed): %v", err)
+	}
+	if err := live.OnShutdown(); err != nil { // OnFinalShutdown.
+		t.Fatalf("OnShutdown (final): %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutine(s) still running after final shutdown; a poll loop was orphaned",
+				runtime.NumGoroutine()-baseline)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,12 +28,22 @@ const reloadInterval = 30 * time.Second
 // rotated at the same path (the k8s Secret symlink-swap pattern) never
 // changes that hash and reload never restarts the server. Rotation has to be
 // polled in-process instead.
+//
+// The reloadMu field serialises reloadOnce. The current and digest fields
+// are two separate stores, so two concurrent reloads can interleave them and
+// leave an older certificate installed beside a newer digest; since the
+// digest then matches the files on disk, no later poll ever replaces it. One
+// poll loop per liveStore is what OnStartup aims for, but caddy can call it
+// twice (see OnStartup), and the outgoing loop may still be mid-reload when
+// its replacement starts. See verification/tla/SniTlsReload.tla, which
+// checks both the failure and this fix.
 type liveStore struct {
-	current atomic.Pointer[certStore]
-	digest  atomic.Pointer[[32]byte]
-	cancel  context.CancelFunc
-	pairs   [][2]string
-	strict  bool
+	current  atomic.Pointer[certStore]
+	digest   atomic.Pointer[[32]byte]
+	cancel   context.CancelFunc
+	pairs    [][2]string
+	reloadMu sync.Mutex
+	strict   bool
 }
 
 // newLiveStore wraps an already-loaded certStore for polling; setup() still
@@ -54,7 +65,16 @@ func (l *liveStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 // an unrelated Corefile change fails to restart the server, this resumes
 // polling on the still-live old instance, matching radnr's lifecycle
 // convention.
+//
+// A loop may already be running. When another plugin's OnRestart fails,
+// caddy runs every plugin's OnRestartFailed, including those whose
+// OnRestart (our OnShutdown) never ran. Overwriting l.cancel there would
+// orphan the running loop with no way to stop it, and leave two loops
+// writing one store. See verification/tla/PluginLifecycle.tla.
 func (l *liveStore) OnStartup() error {
+	if l.cancel != nil {
+		l.cancel()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	l.cancel = cancel
 	go l.run(ctx)
@@ -90,6 +110,9 @@ func (l *liveStore) run(ctx context.Context) {
 // (e.g. caught mid-rotation) is logged and the previous store kept — a
 // transient reload error must never blank an already-running TLS listener.
 func (l *liveStore) reloadOnce() {
+	l.reloadMu.Lock()
+	defer l.reloadMu.Unlock()
+
 	newDigest := digestPairs(l.pairs)
 	if newDigest == *l.digest.Load() {
 		return
