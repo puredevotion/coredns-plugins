@@ -115,6 +115,12 @@ and interval jitter (§6.2.1).
 
 Everything runs offline — `GOPROXY=off go test ./...` passes in both modules.
 
+[`verification/`](verification/) holds TLA+ models of the lifecycle and
+concurrency paths (cert reload, caddy restart hooks, RA scheduling, update
+atomicity) and Lean proofs of the pure parts (the RFC 9463 option codec,
+SNI wildcard selection, RFC 1982 serials, RFC 2136 update rules). CI runs
+both: `verification/run.sh`.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

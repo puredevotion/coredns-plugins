@@ -1,0 +1,7 @@
+# TLC: counterexample trace specs and the state directory
+*_TTrace_*
+states/
+# Lean build output
+lean/.lake/
+# Downloaded by run.sh
+.tools/

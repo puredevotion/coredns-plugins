@@ -1,0 +1,7 @@
+name = "coredns-plugins-proofs"
+defaultTargets = ["CorednsPlugins"]
+
+# Core Lean only, no Mathlib: the proofs must check offline from a bare
+# toolchain, the same hermeticity rule the Go modules follow.
+[[lean_lib]]
+name = "CorednsPlugins"
