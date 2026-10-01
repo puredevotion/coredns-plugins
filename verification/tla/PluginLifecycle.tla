@@ -43,8 +43,11 @@
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
+    \* @type: Int;
     MaxRestarts,  \* bound on reloads explored
+    \* @type: Bool;
     XFirst,       \* the failing plugin's callbacks run before ours
+    \* @type: Str;
     Variant       \* "original" | "idempotent" | "registry"
 
 MaxInst == MaxRestarts + 1
@@ -54,14 +57,23 @@ Insts   == 1..MaxInst
 Gs      == 1..(2 * MaxInst)
 
 VARIABLES
+    \* @type: Int;
     live,      \* the instance caddy is serving with
+    \* @type: Int;
     nInst,     \* instances created so far
+    \* @type: Int -> Int;
     cancel,    \* cancel[i]: goroutine instance i's plugin can cancel, or 0
+    \* @type: Set(Int);
     running,   \* goroutines that are running
+    \* @type: Int -> Int;
     owner,     \* owner[g]: instance whose OnStartup started g
+    \* @type: Int;
     nextG,     \* next unused goroutine id
+    \* @type: Int;
     slot,      \* "registry" variant: the process-wide current goroutine, or 0
+    \* @type: Int;
     restarts,  \* reloads attempted
+    \* @type: Str;
     phase      \* "serving" | "done"
 
 vars == <<live, nInst, cancel, running, owner, nextG, slot, restarts, phase>>
@@ -80,8 +92,14 @@ TypeOK ==
 (* The plugin's callbacks, as state transformers on                        *)
 (* s = [cancel, running, owner, nextG, slot].                             *)
 
+\* The plugin-visible state, as one record. (Apalache type alias.)
+\* @typeAlias: st = { cancel: Int -> Int, running: Set(Int), owner: Int -> Int, nextG: Int, slot: Int };
+PluginLifecycle_typedefs == TRUE
+
+\* @type: ($st, Int) => $st;
 Stop(s, g) == [s EXCEPT !.running = @ \ {g}]
 
+\* @type: ($st, Int) => $st;
 OnStartup(s, i) ==
     LET g  == s.nextG
         s1 == IF Variant # "original" /\ s.cancel[i] # 0
@@ -94,6 +112,7 @@ OnStartup(s, i) ==
                   !.nextG   = @ + 1,
                   !.slot    = IF Variant = "registry" THEN g ELSE @]
 
+\* @type: ($st, Int) => $st;
 OnShutdown(s, i) ==
     IF s.cancel[i] = 0 THEN s
     ELSE LET g == s.cancel[i] IN
@@ -103,6 +122,7 @@ OnShutdown(s, i) ==
 St == [cancel |-> cancel, running |-> running, owner |-> owner,
        nextG |-> nextG, slot |-> slot]
 
+\* @type: ($st) => Bool;
 SetSt(s) ==
     /\ cancel' = s.cancel /\ running' = s.running /\ owner' = s.owner
     /\ nextG' = s.nextG /\ slot' = s.slot
@@ -208,5 +228,29 @@ OneInProcess == Cardinality(running) <= 1
 
 \* Nothing survives final shutdown.
 CleanShutdown == phase = "done" => running = {}
+
+-----------------------------------------------------------------------------
+(* Inductive invariant for the "registry" variant, checked by Apalache in  *)
+(* inductive/ for many more restarts than TLC explores: while serving,     *)
+(* exactly one goroutine runs, it is the one in the handover slot, and the *)
+(* live instance owns it and holds its cancel func.                        *)
+
+IndInv ==
+    /\ live \in Insts /\ nInst \in Insts
+    /\ cancel \in [Insts -> Gs \cup {0}]
+    /\ running \in SUBSET Gs
+    /\ owner \in [Gs -> Insts \cup {0}]
+    /\ nextG \in 1..(2 * MaxInst + 1)
+    /\ slot \in Gs \cup {0}
+    /\ restarts \in 0..MaxRestarts
+    /\ phase \in {"serving", "done"}
+    \* Fresh ids: instances and goroutines are numbered in creation order.
+    /\ live <= nInst /\ nInst <= restarts + 1
+    /\ nextG <= 2 + 2 * restarts
+    /\ phase = "serving" =>
+         /\ slot # 0 /\ slot < nextG
+         /\ running = {slot}
+         /\ owner[slot] = live /\ cancel[live] = slot
+    /\ phase = "done" => running = {}
 
 =============================================================================

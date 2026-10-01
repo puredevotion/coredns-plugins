@@ -41,9 +41,9 @@ env:
   # newly-allowed promoted-field keyed composite literals. v1.8.0 vendors
   # x/tools v0.50.0 (fix landed in v0.45.0) and scans clean on go1.27.1.
   GOVULNCHECK_VERSION: "v1.8.0"
-  # Must match verification/lean/lean-toolchain. The tla2tools.jar pin and
-  # its checksum live in verification/run.sh, so a local run checks the
-  # same models with the same checker.
+  # Must match verification/lean/lean-toolchain. The tla2tools.jar and
+  # Apalache pins and checksums live in verification/run.sh, so a local run
+  # checks the same models with the same checkers.
   LEAN_VERSION: "4.22.0"
   LEAN_SHA256: "85097a4d659fe388193a5efb0c413b880e101f1290cc41d00eb60847b18f064e"
 
@@ -115,11 +115,14 @@ jobs:
           path: sni_tls/testdata/fuzz/
 
   formal-verification:
-    # TLA+ models of the lifecycle and concurrency paths (TLC), and Lean
-    # proofs of the pure codecs and update rules. Every model declares the
-    # outcome it must have, including the ones that reproduce a pre-fix bug,
-    # so a regression in either direction fails here. See
-    # verification/README.md.
+    # TLA+ models of the lifecycle and concurrency paths, checked three ways
+    # (SANY parses and level-checks them, TLC model-checks them explicitly,
+    # Apalache type-checks them, model-checks them symbolically and proves
+    # their inductive invariants), and Lean proofs of the pure codecs and
+    # update rules. Every model declares the outcome it must have, including
+    # the ones that reproduce a pre-fix bug, so a regression in either
+    # direction fails here. tla2tools.jar and Apalache are pinned and
+    # checksummed in verification/run.sh. See verification/README.md.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -133,8 +136,12 @@ jobs:
           echo "$RUNNER_TEMP/lean-${LEAN_VERSION}-linux/bin" >> "$GITHUB_PATH"
       - name: Check toolchain pin matches
         run: test "$(cat verification/lean/lean-toolchain)" = "leanprover/lean4:v${LEAN_VERSION}"
-      - name: Model-check TLA+ specs
-        run: verification/run.sh tla
+      - name: SANY (parse and level-check TLA+ specs)
+        run: verification/run.sh sany
+      - name: TLC (explicit-state model checking)
+        run: verification/run.sh tlc
+      - name: Apalache (type checking, bounded model checking, inductive invariants)
+        run: verification/run.sh apalache
       - name: Check Lean proofs
         run: verification/run.sh lean
 

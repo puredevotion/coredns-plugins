@@ -26,10 +26,15 @@
 EXTENDS Naturals
 
 CONSTANTS
+    \* @type: Int;
     MinDelay,     \* MIN_DELAY_BETWEEN_RAS (3s)
+    \* @type: Int;
     MinInterval,  \* nextInterval() lower bound
+    \* @type: Int;
     MaxInterval,  \* nextInterval() upper bound (a.Interval)
+    \* @type: Int;
     Horizon,      \* how far time is explored
+    \* @type: Bool;
     Fixed
 
 ASSUME MinInterval >= MinDelay /\ MaxInterval >= MinInterval
@@ -37,10 +42,15 @@ ASSUME MinInterval >= MinDelay /\ MaxInterval >= MinInterval
 NoRS == Horizon + MaxInterval + MinDelay + 1  \* "no RS outstanding"
 
 VARIABLES
+    \* @type: Int;
     now,       \* current time
+    \* @type: Int;
     lastSent,  \* time of the previous RA
+    \* @type: Int;
     timerAt,   \* when the periodic timer fires
+    \* @type: Int;
     pendingRS, \* arrival time of the oldest unanswered RS, or NoRS
+    \* @type: Bool;
     gapOK      \* history: every pair of consecutive RAs was >= MinDelay apart
 
 vars == <<now, lastSent, timerAt, pendingRS, gapOK>>
@@ -103,11 +113,34 @@ MinGapBetweenRAs == gapOK
 \* up to MaxInterval, or until the host's own RS retransmission.)
 SolicitationAnswered == now - pendingRS <= MinDelay
 
-\* Sanity: the model can actually reach a send from each trigger.
+\* Types and ranges.
 TypeOK ==
     /\ now \in 0..Horizon
     /\ lastSent \in 0..Horizon
     /\ timerAt \in 0..(Horizon + MaxInterval)
     /\ gapOK \in BOOLEAN
+
+-----------------------------------------------------------------------------
+(* Inductive invariant (Fixed = TRUE), checked by Apalache in              *)
+(* inductive/: it holds initially, every step preserves it, and it         *)
+(* implies the properties above. That covers every reachable state of    *)
+(* the instance checked, which can be far too large for TLC to enumerate. *)
+(*                                                                         *)
+(* The argument: the timer is never set past lastSent + MaxInterval and    *)
+(* never left behind `now`; while an RS waits, the timer is at most        *)
+(* lastSent + MinDelay, and the RS arrived after lastSent.                 *)
+
+IndInv ==
+    /\ now \in Nat /\ lastSent \in Nat /\ timerAt \in Nat /\ pendingRS \in Nat
+    /\ gapOK \in BOOLEAN
+    /\ now <= Horizon
+    /\ lastSent <= now
+    /\ now <= timerAt
+    /\ timerAt <= lastSent + MaxInterval
+    /\ gapOK
+    /\ \/ pendingRS = NoRS
+       \/ /\ lastSent <= pendingRS /\ pendingRS <= now
+          /\ pendingRS < lastSent + MinDelay
+          /\ timerAt <= lastSent + MinDelay
 
 =============================================================================

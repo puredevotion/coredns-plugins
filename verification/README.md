@@ -1,16 +1,22 @@
 # Formal verification
 
 TLA+ models of the parts of these plugins that are about **interleavings and
-lifecycles**, checked with TLC, and Lean 4 proofs about the parts that are
-**pure functions** (codecs, matching rules, update semantics).
+lifecycles**, checked with SANY, TLC and Apalache, and Lean 4 proofs about
+the parts that are **pure functions** (codecs, matching rules, update
+semantics).
 
 ```sh
-verification/run.sh          # everything; fetches a checksummed tla2tools.jar
-verification/run.sh tla      # TLC only (java 17+)
-verification/run.sh lean     # Lean only (lake on PATH, toolchain in lean/lean-toolchain)
+verification/run.sh            # everything
+verification/run.sh tla        # sany + tlc + apalache (java 17+)
+verification/run.sh sany       # parse and level-check every spec
+verification/run.sh tlc        # explicit-state model checking
+verification/run.sh apalache   # type checking, bounded model checking, inductive proofs
+verification/run.sh lean       # Lean (lake on PATH, toolchain in lean/lean-toolchain)
 ```
 
-CI runs both in the `formal-verification` job. The Lean proofs use core Lean
+`run.sh` fetches tla2tools.jar (1.8.0) and Apalache (0.62.3) at pinned,
+checksummed versions; `TLA2TOOLS=` and `APALACHE=` point it at local copies.
+CI runs all of it in the `formal-verification` job. The Lean proofs use core Lean
 only, with no Mathlib, so they check offline from a bare toolchain.
 
 ## What a result here means, and what it doesn't
@@ -24,8 +30,9 @@ against the real code with a Go test, and those tests are now in the
 plugins' test suites.
 
 TLC checks are exhaustive but **bounded**: a fixed number of rotations,
-restarts, updates or seconds, given in each `.cfg`. Lean results hold for
-all inputs.
+restarts, updates or seconds, given in each `.cfg`. Apalache's inductive
+proofs cover every reachable state of much larger instances (below). Lean
+results hold for all inputs.
 
 ## TLA+ models (`tla/`)
 
@@ -41,6 +48,45 @@ differs from the old one exactly where it should.
 | `PluginLifecycle.tla` | caddy's `Restart` / `startWithListenerFds` driving the `OnStartup`/`OnRestart`/`OnRestartFailed`/`OnFinalShutdown` hooks of `sni_tls` and `radnr`, with another plugin's callbacks failing at each point | no orphaned goroutine; at most one per instance; at most one per process; nothing survives shutdown |
 | `RadnrRA.tla` | `radnr` `Advertiser.Run` scheduling with its real constants (30s interval, 3s `MIN_DELAY_BETWEEN_RAS`), RS arriving at any second | RFC 4861 §6.2.6 rate limit across *all* triggers; every RS answered within the window |
 | `DynUpdateAtomicity.tla` | `dynupdate` `serveUpdate` with records as shared heap cells, and a zone rebuild that can fail | a SERVFAIL'd UPDATE changes nothing; the records prerequisites see are the records served |
+
+### Three checkers
+
+- **SANY** (the TLA+ front end) parses and level-checks every spec.
+- **TLC** explores each `.cfg`'s instance exhaustively, including the
+  liveness property `EventuallyServesDisk` under the spec's fairness
+  conditions.
+- **Apalache** first type-checks every spec (each constant, variable and
+  ambiguous operator is annotated). It then re-checks each TLC config
+  symbolically, to TLC's reported state-graph depth for that instance, so
+  the bounded search reaches every state TLC did. Each config's second
+  line gives the bound and the properties. Apalache does not check
+  fairness, so it sees only the safety part: `NoRollback` is checked in
+  its step form `NoRollbackStep`, and the liveness-only config is skipped.
+  The two deepest bounded runs (75 and 29 steps) are marked `slow` and run
+  only with `APALACHE_SLOW=1`; the inductive proofs below cover the same
+  properties.
+
+### Inductive invariants (`tla/inductive/`, Apalache)
+
+Each passing model has an `IndInv`. For each config, Apalache shows three
+things: `Init` implies it, every `Next` step preserves it, and it implies
+the model's safety properties. Together that is a proof for every reachable
+state of the instance, at any depth. That makes instances checkable that
+are far beyond what TLC can enumerate:
+
+| Config | Instance | TLC's instance |
+|---|---|---|
+| `RadnrRA_Year` | a year of seconds (31,536,000), real radnr timing | 70 seconds |
+| `SniTlsReload_ThreeLoopsSerialized` | three pollers under `reloadMu`, 50 rotations | two pollers, 3 rotations |
+| `SniTlsReload_OneLoop` | one poller, no mutex, 50 rotations | 3 rotations |
+| `PluginLifecycle_Registry_X{First,Last}` | 12 reloads | 3 |
+| `DynUpdateAtomicity_DeepCopy` | 15 UPDATEs | 3 |
+
+Each proof with a pre-fix counterpart has a **negative control**
+(`expect: refuted`): the same invariant on the v0.4.1 variant
+(`RadnrRA_Year_Original`, `SniTlsReload_ThreeLoopsNoMutex`,
+`DynUpdateAtomicity_Original`) must *not* be provable. That shows the
+invariant really depends on the fix, so the proof is not passing vacuously.
 
 ## Lean proofs (`lean/CorednsPlugins/`)
 
