@@ -115,6 +115,10 @@ and interval jitter (§6.2.1).
 
 Everything runs offline — `GOPROXY=off go test ./...` passes in both modules.
 
+Each plugin also carries benchmarks for its request path (`bench_test.go`);
+[`docs/performance.md`](docs/performance.md) records where the time goes, what
+was changed and what each change bought.
+
 [`verification/`](verification/) holds TLA+ models of the lifecycle and
 concurrency paths (cert reload, caddy restart hooks, RA scheduling, update
 atomicity) and Lean proofs of the pure parts (the RFC 9463 option codec,

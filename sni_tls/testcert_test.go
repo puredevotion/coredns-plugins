@@ -72,10 +72,10 @@ func generateCertPEM(sans []string, ips []net.IP) (certPEM, keyPEM []byte) {
 // DNS names, writes them as PEM files under t.TempDir(), and returns their
 // paths. Used to exercise the real tls.LoadX509KeyPair + x509.ParseCertificate
 // path end-to-end, rather than empty dummy *tls.Certificate{} structs.
-func writeTestCert(t *testing.T, cn string, sans ...string) (certPath, keyPath string) {
-	t.Helper()
+func writeTestCert(tb testing.TB, cn string, sans ...string) (certPath, keyPath string) {
+	tb.Helper()
 
-	return writeCertFiles(t, cn, sans, nil)
+	return writeCertFiles(tb, cn, sans, nil)
 }
 
 // writeIPCert is writeTestCert for a cert whose only SANs are IP addresses,
@@ -85,20 +85,20 @@ func writeIPCert(t *testing.T, cn string, ips ...net.IP) (certPath, keyPath stri
 	return writeCertFiles(t, cn, nil, ips)
 }
 
-func writeCertFiles(t *testing.T, cn string, sans []string, ips []net.IP) (certPath, keyPath string) {
-	t.Helper()
+func writeCertFiles(tb testing.TB, cn string, sans []string, ips []net.IP) (certPath, keyPath string) {
+	tb.Helper()
 
 	certPEM, keyPEM := generateCertPEM(sans, ips)
 
-	dir := t.TempDir()
+	dir := tb.TempDir()
 	certPath = filepath.Join(dir, cn+"-cert.pem")
 	keyPath = filepath.Join(dir, cn+"-key.pem")
 
 	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
-		t.Fatalf("write cert file: %v", err)
+		tb.Fatalf("write cert file: %v", err)
 	}
 	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		t.Fatalf("write key file: %v", err)
+		tb.Fatalf("write key file: %v", err)
 	}
 
 	return certPath, keyPath

@@ -1,6 +1,8 @@
 package probe
 
 import (
+	"sync/atomic"
+
 	"github.com/coredns/coredns/plugin"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -197,31 +199,14 @@ func ecsFamilyLabel(family uint16) string {
 
 // recordMetrics updates the aggregate counters for one observation.
 func recordMetrics(o *Observation) {
-	probeObservations.WithLabelValues(
-		string(o.Transport),
-		familyLabel(o),
-		boolStr(o.DO),
-		boolStr(o.CompactAware),
-		delegLabel(o),
-		ecsLabel(o),
-		boolStr(o.ZoneVersionAsked),
-	).Inc()
+	observationCounter(o).Inc()
 
 	// Only disclosures, deliberately — see probeECSPrefixBits.
 	if o.ECS && o.ECSScope > 0 {
 		probeECSPrefixBits.WithLabelValues(ecsFamilyLabel(o.ECSFamily)).Observe(float64(o.ECSScope))
 	}
 
-	// RFC 9539. Version/group/resumed are empty for cleartext rather than a
-	// placeholder, so a cleartext series cannot be mistaken for a TLS one whose
-	// details we failed to read.
-	var version, group, resumed string
-	if o.TLS != nil {
-		version, group, resumed = o.TLS.Version, o.TLS.NamedGroup, boolStr(o.TLS.DidResume)
-	}
-	probeEncrypted.WithLabelValues(
-		string(o.Transport), boolStr(o.Encrypted()), version, group, resumed,
-	).Inc()
+	encryptedCounter(o).Inc()
 
 	// RFC 8145 via EDNS option 14. Only counted when the resolver actually sent
 	// tags: silence is not a statement about which keys it holds, and counting it
@@ -233,4 +218,153 @@ func recordMetrics(o *Observation) {
 		}
 		probeKeyTagKnowledge.WithLabelValues("edns", knows).Inc()
 	}
+}
+
+// Counter caches
+//
+// WithLabelValues validates every label, hashes all of them and takes the
+// vector's lock on every call, which came to a quarter of a microsecond per
+// query — a tenth of the whole unsigned answer path. Every label on the two
+// per-query counters is a small closed enum, so each combination's child is
+// resolved once and then found by indexing: the enums are packed into one
+// small integer and the child is kept in an atomic slot for it. A label value
+// outside the enum (a transport this file does not know) bypasses the cache
+// and takes the slow path, so the cache can never attach a count to the wrong
+// series.
+
+// Enum widths for the observationCounters index, in the order the labels are
+// declared on probeObservations.
+const (
+	transportKinds = 5 // The five transports, see transportIndex.
+	familyKinds    = 2
+	flagKinds      = 2 // Any boolean label.
+	delegKinds     = 3 // Unknown, aware, unaware.
+	ecsKinds       = 3 // Silent, declined, disclosed.
+
+	observationKinds = transportKinds * familyKinds * flagKinds * flagKinds * delegKinds * ecsKinds * flagKinds
+)
+
+// Transport ordinals for the counter caches.
+const (
+	transportUDPIndex = iota
+	transportTCPIndex
+	transportTLSIndex
+	transportQUICIndex
+	transportHTTPIndex
+)
+
+var (
+	observationCounters [observationKinds]atomic.Pointer[prometheus.Counter]
+	cleartextCounters   [transportKinds]atomic.Pointer[prometheus.Counter]
+)
+
+// transportIndex maps a Transport onto 0..transportKinds-1, or -1 for one this
+// file does not know, which must not be cached under a borrowed index.
+func transportIndex(t Transport) int {
+	switch t {
+	case TransportUDP:
+		return transportUDPIndex
+	case TransportTCP:
+		return transportTCPIndex
+	case TransportTLS:
+		return transportTLSIndex
+	case TransportQUIC:
+		return transportQUICIndex
+	case TransportHTTP:
+		return transportHTTPIndex
+	}
+	return -1
+}
+
+func flagIndex(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
+// delegIndex and ecsIndex number the three-valued readings in the order
+// their label functions enumerate them.
+func delegIndex(o *Observation) int {
+	switch {
+	case !o.EDNS:
+		return 0
+	case o.DELEGAware:
+		return 1
+	default:
+		return 2 //nolint:mnd // The third of the three delegLabel states.
+	}
+}
+
+func ecsIndex(o *Observation) int {
+	switch {
+	case !o.ECS:
+		return 0
+	case o.ECSScope == 0:
+		return 1
+	default:
+		return 2 //nolint:mnd // The third of the three ecsLabel states.
+	}
+}
+
+// observationCounter returns probeObservations' child for o's labels.
+func observationCounter(o *Observation) prometheus.Counter {
+	labels := func() prometheus.Counter {
+		return probeObservations.WithLabelValues(
+			string(o.Transport),
+			familyLabel(o),
+			boolStr(o.DO),
+			boolStr(o.CompactAware),
+			delegLabel(o),
+			ecsLabel(o),
+			boolStr(o.ZoneVersionAsked),
+		)
+	}
+	t := transportIndex(o.Transport)
+	if t < 0 {
+		return labels()
+	}
+	// Mixed radix, innermost label last, matching the declaration order above.
+	idx := t
+	idx = idx*familyKinds + flagIndex(o.IPv6)
+	idx = idx*flagKinds + flagIndex(o.DO)
+	idx = idx*flagKinds + flagIndex(o.CompactAware)
+	idx = idx*delegKinds + delegIndex(o)
+	idx = idx*ecsKinds + ecsIndex(o)
+	idx = idx*flagKinds + flagIndex(o.ZoneVersionAsked)
+	return cachedCounter(&observationCounters[idx], labels)
+}
+
+// encryptedCounter returns probeEncrypted's child for o's labels. Only the
+// cleartext children are cached: their TLS labels are all empty, so the
+// transport alone names the series. An encrypted query carries version and
+// group strings produced by the TLS stack, and its handshake already cost a
+// thousand times what the label lookup does.
+func encryptedCounter(o *Observation) prometheus.Counter {
+	labels := func() prometheus.Counter {
+		var version, group, resumed string
+		if o.TLS != nil {
+			version, group, resumed = o.TLS.Version, o.TLS.NamedGroup, boolStr(o.TLS.DidResume)
+		}
+		return probeEncrypted.WithLabelValues(
+			string(o.Transport), boolStr(o.Encrypted()), version, group, resumed,
+		)
+	}
+	t := transportIndex(o.Transport)
+	if t < 0 || o.TLS != nil {
+		return labels()
+	}
+	return cachedCounter(&cleartextCounters[t], labels)
+}
+
+// cachedCounter returns the counter in slot, resolving it through lookup the
+// first time. Two first callers may both resolve it; they get the same child
+// from the vector, so the race is benign and the slot ends up holding it.
+func cachedCounter(slot *atomic.Pointer[prometheus.Counter], lookup func() prometheus.Counter) prometheus.Counter {
+	if c := slot.Load(); c != nil {
+		return *c
+	}
+	c := lookup()
+	slot.Store(&c)
+	return c
 }

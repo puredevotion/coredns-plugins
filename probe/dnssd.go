@@ -82,44 +82,71 @@ const (
 // convention ParseQuery uses. Case-insensitive: DNS-SD labels are DNS labels, and a
 // resolver doing 0x20 randomization will send them mixed-case — rejecting those
 // would drop precisely the most careful clients.
-// DNS-SD prefix lengths, in labels, ahead of the token: the three-label
-// `_services._dns-sd._udp` / `probe._probe._tcp` forms, and the two-label
-// `_probe._tcp` form.
-const (
-	dnssdMinLabels  = 2 // At least one prefix label plus the token.
-	dnssdPrefixLen3 = 3
-	dnssdPrefixLen2 = 2
-)
-
 func parseDNSSD(sub string) (kind dnssdKind, token string) {
-	labels := strings.Split(strings.TrimSuffix(sub, "."), ".")
-	if len(labels) < dnssdMinLabels {
-		return dnssdNone, ""
+	sub = strings.TrimSuffix(sub, ".")
+	i := strings.LastIndexByte(sub, '.')
+	if i < 0 {
+		return dnssdNone, "" // One label is the token alone, not a browse name.
 	}
-
-	token, ok := parseToken(labels[len(labels)-1])
+	token, ok := parseToken(sub[i+1:])
 	if !ok {
 		return dnssdNone, ""
 	}
-	prefix := labels[:len(labels)-1]
-	for i := range prefix {
-		prefix[i] = toLowerASCII(prefix[i])
-	}
 
-	switch len(prefix) {
-	case dnssdPrefixLen3:
-		if prefix[0] == dnssdMetaService && prefix[1] == dnssdMetaDNSSD && prefix[2] == dnssdMetaUDP {
-			return dnssdBrowse, token
-		}
-		if prefix[0] == dnssdInstance && prefix[1] == dnssdServiceType && prefix[2] == dnssdProto {
-			return dnssdInstanceName, token
-		}
-	case dnssdPrefixLen2:
-		if prefix[0] == dnssdServiceType && prefix[1] == dnssdProto {
-			return dnssdEnumerate, token
-		}
+	// The prefix is matched label by label against the three fixed shapes
+	// rather than split and lowercased into a slice, which allocated on every
+	// probe query — this runs ahead of ParseQuery for all of them.
+	prefix := sub[:i]
+	switch {
+	case labelsEqualFold(prefix, dnssdMetaService, dnssdMetaDNSSD, dnssdMetaUDP):
+		return dnssdBrowse, token
+	case labelsEqualFold(prefix, dnssdInstance, dnssdServiceType, dnssdProto):
+		return dnssdInstanceName, token
+	case labelsEqualFold(prefix, dnssdServiceType, dnssdProto):
+		return dnssdEnumerate, token
 	}
 	return dnssdNone, ""
+}
+
+// labelsEqualFold reports whether name is exactly the given labels, compared
+// ASCII case-insensitively (RFC 4343) and without allocating.
+func labelsEqualFold(name string, labels ...string) bool {
+	for i, want := range labels {
+		var l string
+		if j := strings.IndexByte(name, '.'); j >= 0 {
+			l, name = name[:j], name[j+1:]
+		} else if i == len(labels)-1 {
+			l, name = name, ""
+		} else {
+			return false // Fewer labels than wanted.
+		}
+		if !equalFoldASCII(l, want) {
+			return false
+		}
+	}
+	return name == ""
+}
+
+// equalFoldASCII compares two strings byte for byte, folding A-Z onto a-z and
+// nothing else. The standard library's EqualFold also folds Unicode (a LATIN
+// SMALL LETTER LONG S would match "s"), which DNS case-insensitivity does not.
+func equalFoldASCII(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
 }
 
 // dnssdNames builds the fully-qualified names for one token's browse tree.

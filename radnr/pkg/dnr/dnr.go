@@ -29,6 +29,7 @@ const (
 	maxLengthUnits = 0xff // Max value of the 1-octet Length field.
 	uint16Size     = 2
 	uint32Size     = 4
+	ipv6Size       = 16   // Octets in one IPv6 address.
 	maxLabelLen    = 63   // Max length of a single DNS wire-format label.
 	maxNameLen     = 255  // Max length of a DNS wire-format name.
 	rootLabel      = 0x00 // The zero-length root label terminating a name.
@@ -75,7 +76,7 @@ func (o EncryptedDNS) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	var addrBytes []byte
+	addrBytes := make([]byte, 0, len(o.Addrs)*ipv6Size)
 	for _, a := range o.Addrs {
 		if !a.Is6() || a.Is4In6() {
 			return nil, fmt.Errorf("dnr: address %s is not IPv6", a)
@@ -92,30 +93,28 @@ func (o EncryptedDNS) Marshal() ([]byte, error) {
 		return nil, err
 	}
 
-	// Body after the 2-octet (Type,Length) header.
-	var body []byte
-	body = binary.BigEndian.AppendUint16(body, o.ServicePriority)
-	body = binary.BigEndian.AppendUint32(body, o.Lifetime)
-	body = binary.BigEndian.AppendUint16(body, adnLen)
-	body = append(body, adn...)
-	body = binary.BigEndian.AppendUint16(body, addrLen)
-	body = append(body, addrBytes...)
-	body = binary.BigEndian.AppendUint16(body, svcParamsLen)
-	body = append(body, o.SvcParams...)
-
-	total := headerSize + len(body)
-	if pad := (octetUnit - total%octetUnit) % octetUnit; pad != 0 {
-		body = append(body, make([]byte, pad)...)
-		total += pad
-	}
+	// One allocation, sized up front: the header, the three length-prefixed
+	// fields, and the zero padding that rounds the option to 8-octet units.
+	// The old version appended field by field into a growing slice and then
+	// copied the result behind the header.
+	body := uint16Size + uint32Size + uint16Size + len(adn) + uint16Size + len(addrBytes) + uint16Size + len(o.SvcParams)
+	total := headerSize + body
+	total += (octetUnit - total%octetUnit) % octetUnit
 	if total/octetUnit > maxLengthUnits {
 		return nil, fmt.Errorf("dnr: option too large (%d octets)", total)
 	}
 
 	out := make([]byte, 0, total)
 	out = append(out, OptionType, byte(total/octetUnit))
-	out = append(out, body...)
-	return out, nil
+	out = binary.BigEndian.AppendUint16(out, o.ServicePriority)
+	out = binary.BigEndian.AppendUint32(out, o.Lifetime)
+	out = binary.BigEndian.AppendUint16(out, adnLen)
+	out = append(out, adn...)
+	out = binary.BigEndian.AppendUint16(out, addrLen)
+	out = append(out, addrBytes...)
+	out = binary.BigEndian.AppendUint16(out, svcParamsLen)
+	out = append(out, o.SvcParams...)
+	return out[:total], nil // The tail of the allocation is the zero padding.
 }
 
 // parseADNField decodes the ADN field starting at p, given its already-read
@@ -136,14 +135,13 @@ func parseADNField(p []byte, adnLen uint16) (name string, rest []byte, err error
 // its already-read length prefix, and returns the addresses and the
 // remaining bytes after the field.
 func parseAddrs(p []byte, addrLen uint16) ([]netip.Addr, []byte, error) {
-	const ipv6Size = 16
 	if addrLen%ipv6Size != 0 {
 		return nil, nil, fmt.Errorf("dnr: AddrLength %d not a multiple of %d", addrLen, ipv6Size)
 	}
 	if int(addrLen) > len(p) {
 		return nil, nil, fmt.Errorf("dnr: AddrLength %d exceeds remaining %d", addrLen, len(p))
 	}
-	var addrs []netip.Addr
+	addrs := make([]netip.Addr, 0, int(addrLen)/ipv6Size)
 	for i := 0; i < int(addrLen); i += ipv6Size {
 		var a16 [ipv6Size]byte
 		copy(a16[:], p[i:i+ipv6Size])
@@ -242,7 +240,9 @@ func encodeADN(name string) ([]byte, error) {
 	if name == "" {
 		return nil, fmt.Errorf("dnr: empty ADN")
 	}
-	var out []byte
+	// Wire form is the presentation form plus one length octet per label and
+	// the root label: len(name)+2 exactly, so size it once.
+	out := make([]byte, 0, len(name)+2) //nolint:mnd // The leading length octet of the first label and the trailing root label.
 	for label := range strings.SplitSeq(name, ".") {
 		if label == "" {
 			return nil, fmt.Errorf("dnr: empty label in ADN %q", name)

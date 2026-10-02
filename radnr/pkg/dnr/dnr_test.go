@@ -53,7 +53,7 @@ func TestMarshal_GoldenBytes_ADNOnly(t *testing.T) {
 }
 
 func TestMarshal_WithAddrsAndSvcParams(t *testing.T) {
-	sp, err := svcparams.Encode(svcparams.Params{ALPN: []string{"dot", "doq"}, Port: 853})
+	sp, err := svcparams.Encode(svcparams.Params{ALPN: []string{alpnDoT, "doq"}, Port: 853})
 	if err != nil {
 		t.Fatalf("svcparams.Encode: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestMarshal_WithAddrsAndSvcParams(t *testing.T) {
 }
 
 func TestMarshalUnmarshal_RoundTrip(t *testing.T) {
-	sp, err := svcparams.Encode(svcparams.Params{ALPN: []string{"dot"}, Port: 853})
+	sp, err := svcparams.Encode(svcparams.Params{ALPN: []string{alpnDoT}, Port: 853})
 	if err != nil {
 		t.Fatalf("svcparams.Encode: %v", err)
 	}

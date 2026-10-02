@@ -32,10 +32,17 @@ import (
 type Signer struct {
 	key  *dns.DNSKEY
 	priv crypto.Signer
+	// Owner is the key's owner name, canonicalised once. RRSIG's SignerName
+	// field carries it on every signature.
+	owner string
 	// Validity is how long a correct signature stays valid. Short is fine (and
 	// preferable) because signatures are minted per query and nothing caches
 	// them for long; it also bounds the damage if the key ever leaks.
 	validity time.Duration
+	// KeyTag is the RFC 4034 Appendix B tag of key, computed once. The library
+	// recomputes it from the base64 public key on every call, and it is needed
+	// on every signature and every RFC 8145 comparison.
+	keyTag uint16
 }
 
 // defaultSigValidity is deliberately short. These signatures cover synthesised
@@ -102,7 +109,13 @@ func LoadSigner(basename string, validity time.Duration) (*Signer, error) {
 		return nil, fmt.Errorf("%s holds a %T, which cannot sign", privName, priv)
 	}
 
-	return &Signer{key: key, priv: signer, validity: validity}, nil
+	return &Signer{
+		key:      key,
+		priv:     signer,
+		owner:    dns.CanonicalName(key.Hdr.Name),
+		validity: validity,
+		keyTag:   key.KeyTag(),
+	}, nil
 }
 
 // openKeyRoot splits basename into its containing directory and file base,
@@ -168,7 +181,10 @@ func readDNSKEYFile(root *os.Root, dir, pubName string) (*dns.DNSKEY, error) {
 func (s *Signer) DNSKEY() *dns.DNSKEY { return s.key }
 
 // Owner returns the zone the key signs, normalised.
-func (s *Signer) Owner() string { return dns.CanonicalName(s.key.Hdr.Name) }
+func (s *Signer) Owner() string { return s.owner }
+
+// KeyTag returns the key's RFC 4034 Appendix B tag.
+func (s *Signer) KeyTag() uint16 { return s.keyTag }
 
 // DS returns the delegation signer record to publish at the registrar. Exposed
 // so the operator can print it rather than deriving it by hand — a signed zone
@@ -250,8 +266,8 @@ func (s *Signer) signRRset(rrs []dns.RR, mods Modifier) (sig *dns.RRSIG, ok bool
 		OrigTtl:     hdr.Ttl,
 		Expiration:  expire,
 		Inception:   incept,
-		KeyTag:      s.key.KeyTag(),
-		SignerName:  s.Owner(),
+		KeyTag:      s.keyTag,
+		SignerName:  s.owner,
 	}
 	if err := sig.Sign(s.priv, rrs); err != nil {
 		return nil, false, fmt.Errorf("signing %s %s: %w",
@@ -267,35 +283,39 @@ func (s *Signer) signRRset(rrs []dns.RR, mods Modifier) (sig *dns.RRSIG, ok bool
 // rrsigLabelCount counts the labels in a name into the single octet RRSIG
 // reserves for it (RFC 4034 §3.1.3).
 //
-// Counted directly into a uint8 rather than converted down from dns.CountLabel's
-// int, so the width RRSIG actually has is the width the value is ever held in —
-// there is no wider intermediate that could quietly wrap on the way in. A name
-// deep enough to overflow is rejected instead.
+// The library's CountLabel walks the name in place; SplitDomainName, which
+// this used to range over, allocated a slice of the labels only to count
+// them. The bound check keeps the conversion to RRSIG's width explicit: a name
+// deep enough to overflow is rejected rather than wrapped.
 func rrsigLabelCount(name string) (uint8, error) {
-	var n uint8
-	for range dns.SplitDomainName(name) {
-		if n == math.MaxUint8 {
-			return 0, fmt.Errorf("more than %d labels, which RRSIG cannot express", math.MaxUint8)
-		}
-		n++
+	n := dns.CountLabel(name)
+	if n > math.MaxUint8 {
+		return 0, fmt.Errorf("more than %d labels, which RRSIG cannot express", math.MaxUint8)
 	}
-	return n, nil
+	return uint8(n), nil //nolint:gosec // G115: bounds-checked immediately above; this is the checked conversion itself, not a suppressed truncation.
 }
 
-// rrsigTime renders a time as RRSIG's 32-bit inception/expiration value.
+// rrsigYear68 is dns.StringToTime's wrap period: 2^31 seconds, "approximately
+// 68 years" in RFC 4034 §3.1.5's words.
+const rrsigYear68 = 1 << 31
+
+// rrsigTime renders a time as RRSIG's 32-bit inception/expiration value, with
+// the RFC 1982 serial arithmetic RFC 4034 §3.1.5 prescribes: the value is the
+// Unix time modulo 2^32, which is what makes the field meaningful past 2106.
 //
-// Delegated to dns.StringToTime rather than converting time.Unix() by hand: it
-// is the library's own helper for exactly this field and it applies RFC 1982
-// serial arithmetic, which is what makes the 32-bit field meaningful past 2106
-// in the first place. Doing it here would mean reimplementing that wrap
-// behaviour — and getting it subtly wrong would produce signatures whose
-// validity window a resolver reads differently than we intended.
+// This is dns.StringToTime's arithmetic on the time directly. That helper takes
+// a YYYYMMDDHHmmSS string, so using it meant formatting the time and parsing
+// it straight back — four allocations and a date parse per signature, which
+// at two signatures per denial was a measurable share of the non-crypto cost.
+// TestRRSIGTimeMatchesLibraryRoundTrip pins this to the library's result, so
+// the wrap behaviour cannot drift from what a resolver expects.
 func rrsigTime(t time.Time) (uint32, error) {
-	v, err := dns.StringToTime(t.UTC().Format("20060102150405"))
-	if err != nil {
-		return 0, fmt.Errorf("render RRSIG time: %w", err)
+	unix := t.Unix()
+	if unix < 0 {
+		return 0, fmt.Errorf("render RRSIG time: %s predates the epoch", t.UTC().Format(time.RFC3339))
 	}
-	return v, nil
+	mod := max(unix/rrsigYear68-1, 0)
+	return uint32(unix - mod*rrsigYear68), nil //nolint:gosec // G115: unix-mod*2^31 lies in [0, 2^32) once mod is clamped above; this is the RFC 1982 reduction itself.
 }
 
 // corruptSignature invalidates a base64 signature while keeping it the same
