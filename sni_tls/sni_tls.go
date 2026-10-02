@@ -22,12 +22,6 @@ type certStore struct {
 	strict   bool
 }
 
-// errNoMatchingCert is returned by GetCertificate in strict mode when no exact
-// or wildcard SNI match is found. Returning an error here (rather than a cert)
-// makes the Go TLS server abort the handshake instead of completing one with
-// an unintended cert — a closed failure, not a silent one.
-var errNoMatchingCert = errors.New("sni_tls: no certificate configured for this SNI (strict mode, no fallback)")
-
 // GetCertificate implements the tls.Config.GetCertificate callback: look up the
 // client's requested SNI, then its RFC 9525 §6.3 single-label wildcard form
 // (dns.sevenwoods.nl -> *.sevenwoods.nl) so a wildcard cert's SAN actually
@@ -38,9 +32,18 @@ var errNoMatchingCert = errors.New("sni_tls: no certificate configured for this 
 // to the fallback cert on every connection instead. Falls back to the
 // first-loaded cert if neither matches, unless strict is set, in which case
 // an unmatched or absent SNI fails the handshake instead of guessing.
+//
+// The strict refusal is (nil, nil), not an error. Since setup() leaves
+// tls.Config.Certificates empty, crypto/tls then aborts with a fatal
+// unrecognized_name(112) alert, which RFC 6066 §3 says a server that "does
+// not recognize the server name" SHOULD send. Any error would go out as
+// internal_error(80) instead, telling the client the server is broken
+// rather than that it asked for a name this listener does not serve.
+//
+//nolint:misspell,nilnil // RFC 6066 §3's alert name and wording are quoted verbatim, in US spelling; (nil, nil) is the strict refusal described above.
 func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if hello.ServerName != "" {
-		name := strings.ToLower(hello.ServerName)
+		name := asciiLower(hello.ServerName)
 		if cert, ok := s.byName[name]; ok {
 			return cert, nil
 		}
@@ -51,9 +54,41 @@ func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 		}
 	}
 	if s.strict {
-		return nil, errNoMatchingCert
+		return nil, nil
 	}
 	return s.fallback, nil
+}
+
+// asciiLower folds A-Z to a-z and leaves every other byte alone. DNS names
+// compare case-insensitively in ASCII only (RFC 4343 §3; RFC 9525 §6.3,
+// "case-insensitive ASCII comparison"). The strings.ToLower this replaces
+// folds Unicode too, so an SNI of "\u212a.example.com" (KELVIN SIGN) used to become
+// "k.example.com" and select that name's certificate, strict mode included.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
+}
+
+// validPresentedName reports whether a certificate's DNS SAN is one RFC
+// 9525 §6.3 lets a client match. A wildcard is valid only as "the complete
+// content of the left-most label", and only one of it; otherwise "the
+// presented identifier is invalid and MUST be ignored". Keying such a SAN
+// would let an SNI that spells it out literally ("f*.example.com") select
+// its certificate.
+func validPresentedName(name string) bool {
+	switch strings.Count(name, "*") {
+	case 0:
+		return true
+	case 1:
+		return strings.HasPrefix(name, "*.") && len(name) > len("*.")
+	default:
+		return false
+	}
 }
 
 // wildcardOf returns name's RFC 9525 §6.3 single-label wildcard form (its
@@ -76,8 +111,8 @@ func wildcardOf(name string) (string, bool) {
 }
 
 // loadCert loads a cert/key pair via tls.LoadX509KeyPair and returns it
-// alongside its SAN DNS names (lowercased, matching TLS SNI's case-insensitive
-// comparison per RFC 6066 §3); tls.Certificate.Leaf is NOT populated by
+// alongside its SAN DNS names (ASCII-lowercased, as GetCertificate folds the
+// SNI; invalid wildcards dropped); tls.Certificate.Leaf is NOT populated by
 // LoadX509KeyPair (see design doc step 1), so the leaf must be parsed
 // explicitly via x509.ParseCertificate to read its DNSNames.
 func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
@@ -92,12 +127,14 @@ func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("sni_tls: could not parse leaf certificate %s: %w", certFile, err)
 	}
-	if len(leaf.DNSNames) == 0 {
-		return nil, nil, fmt.Errorf("sni_tls: %s has no SAN DNS names to key SNI lookup on", certFile)
+	names := make([]string, 0, len(leaf.DNSNames))
+	for _, n := range leaf.DNSNames {
+		if validPresentedName(n) {
+			names = append(names, asciiLower(n))
+		}
 	}
-	names := make([]string, len(leaf.DNSNames))
-	for i, n := range leaf.DNSNames {
-		names[i] = strings.ToLower(n)
+	if len(names) == 0 {
+		return nil, nil, fmt.Errorf("sni_tls: %s has no usable SAN DNS names to key SNI lookup on", certFile)
 	}
 	return &cert, names, nil
 }

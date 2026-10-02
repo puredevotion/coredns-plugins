@@ -116,10 +116,12 @@ tls://.:853 {
 }
 ```
 
-With `strict` set, `GetCertificate` never falls back: an unmatched or absent
-SNI returns an error instead of a cert, which makes Go's TLS server abort the
-handshake. The client sees a failed connection instead of a silent
-downgrade. Exact and wildcard SNI matches are unaffected; `strict` only
+With `strict` set, `GetCertificate` never falls back: for an unmatched or
+absent SNI it returns no cert, and since the config carries no static
+`Certificates`, Go's TLS server aborts the handshake with a fatal
+`unrecognized_name(112)` alert, the one RFC 6066 §3 says a server that "does
+not recognize the server name" SHOULD send. The client sees a refused
+handshake instead of a silent downgrade. Exact and wildcard SNI matches are unaffected; `strict` only
 removes the guess-on-miss path.
 
 **Caution: `strict` conflicts with DDR by IP address.** RFC 9462 §6.3:

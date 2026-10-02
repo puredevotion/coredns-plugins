@@ -152,17 +152,18 @@ func TestGetCertificate_Strict_EmptyLeftLabelIsNotAWildcardMatch(t *testing.T) {
 	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: "host.example.com"}); err != nil || got != wildcard {
 		t.Fatalf("host.example.com: got (%v, %v), want the wildcard cert", got, err)
 	}
-	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: ".example.com"}); err == nil || got != nil {
-		t.Errorf(".example.com: got (%v, %v), want a strict-mode refusal", got, err)
+	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: ".example.com"}); err != nil || got != nil {
+		t.Errorf(".example.com: got (%v, %v), want a strict-mode refusal (nil, nil)", got, err)
 	}
 }
 
 // TestGetCertificate_Strict_RejectsUnmatchedOrAbsentSNI is the behaviour the
 // verified-DDR caveat in docs/sni-tls-plugin.md asks for: on an instance
 // serving more than one cert, strict mode must refuse to guess. An
-// unmatched or absent SNI must fail the handshake (return an error, no
-// cert), never silently hand out a cert lacking the connecting VIP's
-// required IP-SAN.
+// unmatched or absent SNI must fail the handshake (no cert, and no error so
+// crypto/tls sends the RFC 6066 alert; see
+// TestSetup_StrictRefusalSendsUnrecognizedName), never silently hand out a
+// cert lacking the connecting VIP's required IP-SAN.
 func TestGetCertificate_Strict_RejectsUnmatchedOrAbsentSNI(t *testing.T) {
 	primary := &tls.Certificate{}
 	secondary := &tls.Certificate{}
@@ -191,11 +192,41 @@ func TestGetCertificate_Strict_RejectsUnmatchedOrAbsentSNI(t *testing.T) {
 	// Unmatched and absent SNI must hard-fail, not fall back.
 	for _, sni := range []string{testSNIUnknown, ""} {
 		got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: sni})
-		if err == nil {
-			t.Errorf("ServerName=%q: expected error in strict mode, got nil (cert=%v)", sni, got)
+		if err != nil {
+			t.Errorf("ServerName=%q: strict refusal returned error %v; it must be (nil, nil) so the client gets the RFC 6066 alert", sni, err)
 		}
 		if got != nil {
 			t.Errorf("ServerName=%q: expected no cert in strict mode, got %v", sni, got)
+		}
+	}
+}
+
+// DNS names fold case in ASCII only (RFC 4343 §3, RFC 9525 §6.3). With
+// Unicode folding, KELVIN SIGN (U+212A) lower-cased to "k", so an SNI no
+// SAN matches selected k.example.com's certificate, even in strict mode.
+func TestGetCertificate_FoldsASCIIOnly(t *testing.T) {
+	const kelvin = "\u212a.example.com" // KELVIN SIGN, not K.
+	k := &tls.Certificate{}
+	store := &certStore{byName: map[string]*tls.Certificate{"k.example.com": k}, strict: true}
+
+	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: "K.EXAMPLE.COM"}); err != nil || got != k {
+		t.Errorf("K.EXAMPLE.COM: got (%v, %v), want k.example.com's cert", got, err)
+	}
+	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: kelvin}); err != nil || got != nil {
+		t.Errorf("KELVIN SIGN SNI: got (%v, %v), want a strict refusal", got, err)
+	}
+}
+
+func TestAsciiLower(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                   "",
+		"DNS.Example.COM":    "dns.example.com",
+		"\u212a.example.com": "\u212a.example.com",
+		"\u00c9.example.com": "\u00c9.example.com",
+		"a-Z_09@[`{":         "a-z_09@[`{",
+	} {
+		if got := asciiLower(in); got != want {
+			t.Errorf("asciiLower(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -235,8 +266,8 @@ func TestBuildCertStore_Strict_PropagatesToGetCertificate(t *testing.T) {
 	if !store.strict {
 		t.Fatal("buildCertStore(strict=true) must produce a store with strict set")
 	}
-	if _, getErr := store.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIUnknown}); getErr == nil {
-		t.Fatal("expected strict store to reject unmatched SNI")
+	if refused, getErr := store.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIUnknown}); refused != nil || getErr != nil {
+		t.Fatalf("expected strict store to refuse unmatched SNI with (nil, nil), got (%v, %v)", refused, getErr)
 	}
 	// The configured name must still resolve.
 	got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIPrimary})
@@ -289,6 +320,26 @@ func TestLoadCert_LowercasesSANs(t *testing.T) {
 	}
 	if len(names) != 1 || names[0] != testSNIPrimary {
 		t.Fatalf("SAN not lowercased: got %v, want [dns.example.com]", names)
+	}
+}
+
+// RFC 9525 §6.3: a SAN whose wildcard is not the whole left-most label, or
+// that has more than one, "is invalid and MUST be ignored". They used to be
+// keyed as literal names, so an SNI spelling one out selected its cert.
+func TestLoadCert_IgnoresInvalidWildcardSANs(t *testing.T) {
+	certPath, keyPath := writeTestCert(t, "mixed",
+		"ok.example.com", "*.Example.org", "f*.example.com", "*.*.example.com", "a.*.example.com", "*")
+	_, names, err := loadCert(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("loadCert: %v", err)
+	}
+	if want := []string{"ok.example.com", "*.example.org"}; strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("names = %v, want %v", names, want)
+	}
+
+	certPath, keyPath = writeTestCert(t, "only-invalid", "f*.example.com")
+	if _, _, err := loadCert(certPath, keyPath); err == nil {
+		t.Error("a cert whose only SAN must be ignored loaded anyway")
 	}
 }
 
