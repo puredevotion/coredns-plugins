@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/miekg/dns"
 )
 
 // RFC 8145 — Signalling Trust Anchor Knowledge in DNSSEC.
@@ -22,11 +24,13 @@ import (
 //
 //	EDNS option 14 (edns-key-tag). RFC 8145 §4.2: "A DNS client MUST NOT
 //	include the edns-key-tag option for non-DNSKEY queries", so a conforming
-//	resolver attaches it only to DNSKEY queries, which go to the apex. This
-//	zone parses it on probe-token queries, so what it records there comes from
-//	senders that break that rule.
+//	resolver attaches it only to DNSKEY queries, which go to the apex. It is
+//	counted there (source "dnskey"). It is also parsed on probe-token queries
+//	(source "edns"), where it can be tied to a visitor, but anything recorded
+//	there comes from a sender that breaks that rule.
 //
-//	Key Tag queries (`_ta-<hex>...`). RFC 8145 §5.2 has a resolver send one
+//	Key Tag queries (`_ta-<hex>...`), QTYPE NULL and QCLASS IN (§5.1). RFC
+//	8145 §5.2 has a resolver send one
 //	"whenever it also originates a DNSKEY query for a trust anchor zone", to
 //	the apex of each CONFIGURED TRUST ANCHOR. This zone is not a
 //	configured trust anchor for anybody — it chains from root through a DS — so
@@ -82,7 +86,10 @@ func ParseKeyTagQuery(sub string) ([]uint16, error) {
 		// only label. Anything deeper is not one.
 		return nil, ErrNotKeyTagQuery
 	}
-	if !strings.HasPrefix(strings.ToLower(label), keyTagPrefix) {
+	// ASCII-only case folding, as for every DNS name (RFC 4343 §3). Unicode
+	// folding is never right for a label, and toLowerASCII keeps byte offsets
+	// stable for the slice below.
+	if !strings.HasPrefix(toLowerASCII(label), keyTagPrefix) {
 		return nil, ErrNotKeyTagQuery
 	}
 
@@ -161,6 +168,24 @@ func parseEDNSKeyTags(data []byte) ([]uint16, bool) {
 		tags = append(tags, binary.BigEndian.Uint16(data[i:i+2]))
 	}
 	return tags, true
+}
+
+// ednsKeyTags collects the tags from every edns-key-tag option in opt. A
+// recursive resolver forwarding its client's list as well as its own "SHOULD
+// transmit the two Key Tag lists using separate instances of the edns-key-tag
+// option code in the OPT RR" (RFC 8145 §4.2.2.1), so a query can carry more
+// than one; keeping only the last would drop a list. A malformed instance
+// contributes nothing, and does not discard the others.
+func ednsKeyTags(opt *dns.OPT) []uint16 {
+	var tags []uint16
+	for _, o := range opt.Option {
+		if v, ok := o.(*dns.EDNS0_LOCAL); ok && v.Code == ednsKeyTagOption {
+			if more, ok := parseEDNSKeyTags(v.Data); ok {
+				tags = append(tags, more...)
+			}
+		}
+	}
+	return tags
 }
 
 // hasKeyTag reports whether want appears in tags.

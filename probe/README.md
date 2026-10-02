@@ -97,8 +97,8 @@ It defines two mechanisms, and **they are not equally useful here**:
 
 | Mechanism | Applies to | Expect |
 |---|---|---|
-| **EDNS option 14** (`edns-key-tag`) | DNSKEY queries only: "A DNS client MUST NOT include the edns-key-tag option for non-DNSKEY queries" (RFC 8145 §4.2) | on probe names, only from senders that break that rule |
-| **Key Tag queries** (`_ta-<hex>…`) | the apex of a resolver's *configured* trust anchors | ~nothing |
+| **EDNS option 14** (`edns-key-tag`) | DNSKEY queries only: "A DNS client MUST NOT include the edns-key-tag option for non-DNSKEY queries" (RFC 8145 §4.2) | on apex DNSKEY queries, counted as `source="dnskey"`; on probe names (`source="edns"`, recorded per token) only from senders that break that rule |
+| **Key Tag queries** (`_ta-<hex>…`, QTYPE NULL, QCLASS IN) | the apex of a resolver's *configured* trust anchors | ~nothing |
 
 Key Tag queries are sent only to zones a resolver has been configured to trust directly (RFC 8145 §5.2). This zone chains from root through a DS, so it is nobody's configured anchor. It is handled anyway because the case where one *does* arrive means somebody pinned this zone as a trust anchor — exactly the kind of thing a measurement zone should notice rather than answer `REFUSED` to.
 
@@ -110,6 +110,8 @@ Two deliberate refusals to be helpful:
 - Arrival **order is preserved** and sortedness reported separately, rather than sorted on the way in. A sender that violates §5.1's ordering requirement is a finding.
 
 A Key Tag query is answered `NODATA` — NOERROR with the SOA in authority. RFC 8145 §5.3 makes the response whatever the zone content implies, and this synthesized zone treats every well-formed Key Tag name as existing with no data. That is a choice, not a consequence: `NXDOMAIN` would be the answer for a zone without those names, and §5.3.1 notes that with `NXDOMAIN` "resolvers that implement aggressive negative caching will send fewer Key Tag queries" — the opposite of what a measurement zone wants. Definitely not `REFUSED`: §5.3 says the server "MUST generate an appropriate response".
+
+A query can carry option 14 more than once: a recursive resolver forwarding its client's list as well as its own sends them "using separate instances of the edns-key-tag option code" (§4.2.2.1). `key_tags` holds every instance's tags, in order. A `_ta-` name asked for any type but NULL gets the same `NODATA`, but is not counted: §5.1 defines a Key Tag query as "type NULL and of class IN".
 
 `knows_zone_key` is only meaningful alongside a non-empty `key_tags`: a resolver that signalled nothing has **not** told us it lacks our key.
 

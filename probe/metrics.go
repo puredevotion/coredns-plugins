@@ -104,10 +104,12 @@ var (
 	// key was among the tags.
 	//
 	// `source` separates the two RFC 8145 mechanisms, which are not equally
-	// informative: "edns" (option 14; RFC 8145 §4.2 allows it only on DNSKEY
-	// queries, so on probe names it comes from senders that break that rule)
-	// and "query" (a `_ta-` Key Tag query, which only
-	// arrives if somebody pinned this zone as a configured trust anchor).
+	// informative: "dnskey" (option 14 on an apex DNSKEY query, where §4.2
+	// has a validating resolver send it), "edns" (option 14 on a probe name;
+	// §4.2 allows it only on DNSKEY queries, so this comes from senders that
+	// break that rule) and "query" (a `_ta-` Key Tag query of type NULL,
+	// which only arrives if somebody pinned this zone as a configured trust
+	// anchor).
 	//
 	// `knows` is three-valued: "yes", "no", and "unknown" for when this zone has
 	// no signer to compare against. A zone with no key cannot conclude a resolver
