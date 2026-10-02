@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/mdlayher/ndp"
@@ -44,10 +45,40 @@ type RADNR struct {
 	// Runner is set in tests; when nil, OnStartup builds a real advertiser.
 	runner runner
 
-	cancel context.CancelFunc
+	// The owner field is the caddy instance this RADNR was set up for (its
+	// server-type context), compared by identity; see advertisers.
+	owner any
+
+	running *advertiserHandle
 
 	Cfg config.Config
 }
+
+// advertiserHandle is one running advertiser, and the instance that
+// started it.
+type advertiserHandle struct {
+	owner  any
+	cancel context.CancelFunc
+}
+
+// advertisers holds every advertiser this process has started and not yet
+// stopped. It exists because caddy can drop an instance without calling any
+// of its shutdown hooks: when a reload fails after the new instance's
+// OnStartup has already run (a later plugin's OnStartup errors, or a
+// listener cannot bind), the new instance is discarded and the old one gets
+// OnRestartFailed. Its advertiser would then keep sending RAs from a
+// Corefile that never took effect, with nothing left that could stop it.
+//
+// So every OnStartup first stops the advertisers of every OTHER instance.
+// At most one caddy instance is live, so that is always safe: on a
+// successful reload the old instance's advertisers were already stopped by
+// its OnRestart, and on a failed one this is what reclaims the discarded
+// instance's. Advertisers of the same instance (several radnr blocks in one
+// Corefile) are left alone. See verification/tla/PluginLifecycle.tla.
+var (
+	advertisersMu sync.Mutex
+	advertisers   = map[*advertiserHandle]struct{}{}
+)
 
 // Name implements the CoreDNS plugin interface.
 func (r *RADNR) Name() string { return pluginName }
@@ -68,18 +99,13 @@ func (r *RADNR) OnStartup() error {
 		run = &advertiser.Advertiser{Conn: conn, Cfg: r.Cfg, Interval: advInterval}
 	}
 
-	// An advertiser may already be running. When another plugin's OnRestart
-	// fails, caddy runs every plugin's OnRestartFailed — this — including
-	// ones whose OnRestart (OnShutdown) never ran. Overwriting r.cancel
-	// would orphan that advertiser: its raw socket and its RAs would
-	// outlive every later reload and shutdown. Stopped only now, once the
-	// replacement's socket is open, so a failed dial leaves the old one
-	// advertising. See verification/tla/PluginLifecycle.tla.
-	if r.cancel != nil {
-		r.cancel()
-	}
+	// This RADNR's own advertiser may already be running too: when another
+	// plugin's OnRestart fails, caddy runs every plugin's OnRestartFailed —
+	// this — including ones whose OnRestart (OnShutdown) never ran. Both it
+	// and any other instance's are stopped only now, once the replacement's
+	// socket is open, so a failed dial leaves the old one advertising.
 	ctx, cancel := context.WithCancel(context.Background())
-	r.cancel = cancel
+	r.adopt(cancel)
 
 	go func() {
 		if err := run.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
@@ -91,11 +117,29 @@ func (r *RADNR) OnStartup() error {
 	return nil
 }
 
+// adopt registers cancel as r's running advertiser, stopping r's previous
+// one and every advertiser some other caddy instance left running.
+func (r *RADNR) adopt(cancel context.CancelFunc) {
+	advertisersMu.Lock()
+	defer advertisersMu.Unlock()
+	for h := range advertisers {
+		if h == r.running || h.owner != r.owner {
+			h.cancel()
+			delete(advertisers, h)
+		}
+	}
+	r.running = &advertiserHandle{owner: r.owner, cancel: cancel}
+	advertisers[r.running] = struct{}{}
+}
+
 // OnShutdown stops the advertisement loop. Safe to call if never started.
 func (r *RADNR) OnShutdown() error {
-	if r.cancel != nil {
-		r.cancel()
-		r.cancel = nil
+	advertisersMu.Lock()
+	defer advertisersMu.Unlock()
+	if r.running != nil {
+		r.running.cancel()
+		delete(advertisers, r.running)
+		r.running = nil
 	}
 	return nil
 }

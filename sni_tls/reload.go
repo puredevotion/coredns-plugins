@@ -38,13 +38,40 @@ const reloadInterval = 30 * time.Second
 // its replacement starts. See verification/tla/SniTlsReload.tla, which
 // checks both the failure and this fix.
 type liveStore struct {
-	current  atomic.Pointer[certStore]
-	digest   atomic.Pointer[[32]byte]
-	cancel   context.CancelFunc
+	current atomic.Pointer[certStore]
+	digest  atomic.Pointer[[32]byte]
+	// The owner field is the caddy instance this store was set up for (its
+	// server-type context), compared by identity; see pollers.
+	owner    any
+	running  *pollerHandle
 	pairs    [][2]string
 	reloadMu sync.Mutex
 	strict   bool
 }
+
+// pollerHandle is one running poll loop, and the instance that started it.
+type pollerHandle struct {
+	owner  any
+	cancel context.CancelFunc
+}
+
+// pollers holds every poll loop this process has started and not yet
+// stopped. Caddy can drop an instance without calling any of its shutdown
+// hooks: when a reload fails after the new instance's OnStartup already ran
+// (a later plugin's OnStartup errors, or a listener cannot bind), the new
+// instance is discarded and the old one gets OnRestartFailed. Its poller
+// would otherwise run until the process exits.
+//
+// So every OnStartup first stops the pollers of every OTHER instance. At
+// most one caddy instance is live, so that is always safe: on a successful
+// reload the old instance's pollers were already stopped by its OnRestart,
+// and on a failed one this reclaims the discarded instance's. Pollers of the
+// same instance (several server blocks) are left alone. See
+// verification/tla/PluginLifecycle.tla.
+var (
+	pollersMu sync.Mutex
+	pollers   = map[*pollerHandle]struct{}{}
+)
 
 // newLiveStore wraps an already-loaded certStore for polling; setup() still
 // fails loudly on the initial buildCertStore error before reaching this.
@@ -66,17 +93,13 @@ func (l *liveStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 // polling on the still-live old instance, matching radnr's lifecycle
 // convention.
 //
-// A loop may already be running. When another plugin's OnRestart fails,
-// caddy runs every plugin's OnRestartFailed, including those whose
-// OnRestart (our OnShutdown) never ran. Overwriting l.cancel there would
-// orphan the running loop with no way to stop it, and leave two loops
-// writing one store. See verification/tla/PluginLifecycle.tla.
+// This store's own loop may already be running too. When another plugin's
+// OnRestart fails, caddy runs every plugin's OnRestartFailed, including
+// those whose OnRestart (our OnShutdown) never ran; keeping that loop would
+// leave two loops writing one store.
 func (l *liveStore) OnStartup() error {
-	if l.cancel != nil {
-		l.cancel()
-	}
 	ctx, cancel := context.WithCancel(context.Background())
-	l.cancel = cancel
+	l.adopt(cancel)
 	go l.run(ctx)
 	return nil
 }
@@ -84,11 +107,29 @@ func (l *liveStore) OnStartup() error {
 // OnShutdown stops the poll loop; wired to both OnRestart (server tearing
 // down for a Corefile-driven restart) and OnFinalShutdown (process exit).
 func (l *liveStore) OnShutdown() error {
-	if l.cancel != nil {
-		l.cancel()
-		l.cancel = nil
+	pollersMu.Lock()
+	defer pollersMu.Unlock()
+	if l.running != nil {
+		l.running.cancel()
+		delete(pollers, l.running)
+		l.running = nil
 	}
 	return nil
+}
+
+// adopt registers cancel as l's running loop, stopping l's previous loop and
+// every loop some other caddy instance left running.
+func (l *liveStore) adopt(cancel context.CancelFunc) {
+	pollersMu.Lock()
+	defer pollersMu.Unlock()
+	for h := range pollers {
+		if h == l.running || h.owner != l.owner {
+			h.cancel()
+			delete(pollers, h)
+		}
+	}
+	l.running = &pollerHandle{owner: l.owner, cancel: cancel}
+	pollers[l.running] = struct{}{}
 }
 
 // run polls reloadInterval until ctx is canceled.

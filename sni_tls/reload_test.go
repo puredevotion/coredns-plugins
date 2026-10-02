@@ -204,6 +204,46 @@ func TestLiveStore_Lifecycle_RestartFailedWithoutRestart(t *testing.T) {
 	}
 }
 
+// TestLiveStore_Lifecycle_ReclaimsDroppedInstance is a reload that fails
+// after the new instance's OnStartup already ran: caddy discards the new
+// instance without calling its shutdown hooks, then runs the old one's
+// OnRestartFailed. That must stop the discarded instance's poller.
+func TestLiveStore_Lifecycle_ReclaimsDroppedInstance(t *testing.T) {
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
+	pairs := [][2]string{{certPath, keyPath}}
+	store, err := buildCertStore(pairs, false)
+	if err != nil {
+		t.Fatalf("buildCertStore: %v", err)
+	}
+	oldInst := newLiveStore(pairs, false, store, digestPairs(pairs))
+	oldInst.owner = new(int)
+	newInst := newLiveStore(pairs, false, store, digestPairs(pairs))
+	newInst.owner = new(int)
+
+	baseline := runtime.NumGoroutine()
+	mustNil(t, oldInst.OnStartup())  // First startup.
+	mustNil(t, oldInst.OnShutdown()) // Old instance's OnRestart.
+	mustNil(t, newInst.OnStartup())  // New instance's OnStartup, then the reload fails.
+	mustNil(t, oldInst.OnStartup())  // Old instance's OnRestartFailed.
+	mustNil(t, oldInst.OnShutdown()) // OnFinalShutdown; newInst gets none.
+
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutine(s) still running after final shutdown; the dropped instance's poller survived",
+				runtime.NumGoroutine()-baseline)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func mustNil(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // overwrite copies srcContentFrom's bytes onto dst. Test-only helper: both
 // paths are always t.TempDir() fixtures from the caller, never external
 // input.

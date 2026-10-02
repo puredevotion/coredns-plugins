@@ -67,6 +67,7 @@ func setup(c *caddy.Controller) error {
 	}
 
 	live := newLiveStore(pairs, strict, store, digestPairs(pairs))
+	live.owner = c.Context()
 	c.OnStartup(live.OnStartup)
 	c.OnRestart(live.OnShutdown)
 	c.OnFinalShutdown(live.OnShutdown)

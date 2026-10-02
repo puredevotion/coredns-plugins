@@ -107,6 +107,78 @@ func TestOnStartup_RestartFailedWithoutRestart(t *testing.T) {
 	}
 }
 
+// TestOnStartup_ReclaimsDroppedInstance is a reload that fails after the new
+// instance's OnStartup already ran (a later plugin's OnStartup errors, or a
+// listener cannot bind). Caddy discards the new instance without calling
+// any of its shutdown hooks and runs the old one's OnRestartFailed. That
+// must stop the discarded instance's advertiser, which would otherwise keep
+// sending RAs from a Corefile that never took effect.
+func TestOnStartup_ReclaimsDroppedInstance(t *testing.T) {
+	oldRunner := &ctxRunner{ctxs: make(chan context.Context, 2)}
+	newRunner := &ctxRunner{ctxs: make(chan context.Context, 1)}
+	oldInst := &RADNR{Cfg: validCfg(), runner: oldRunner, owner: new(int)}
+	newInst := &RADNR{Cfg: validCfg(), runner: newRunner, owner: new(int)}
+	t.Cleanup(func() { shutdownAll(t, oldInst, newInst) })
+
+	if err := oldInst.OnStartup(); err != nil { // First startup.
+		t.Fatalf("OnStartup: %v", err)
+	}
+	<-oldRunner.ctxs
+	if err := oldInst.OnShutdown(); err != nil { // Old instance's OnRestart.
+		t.Fatalf("OnShutdown: %v", err)
+	}
+	if err := newInst.OnStartup(); err != nil { // New instance's OnStartup...
+		t.Fatalf("new OnStartup: %v", err)
+	}
+	dropped := <-newRunner.ctxs
+	// ...then the reload fails and caddy drops newInst silently.
+	if err := oldInst.OnStartup(); err != nil { // Old instance's OnRestartFailed.
+		t.Fatalf("OnStartup (restart-failed): %v", err)
+	}
+	resumed := <-oldRunner.ctxs
+
+	select {
+	case <-dropped.Done():
+	case <-time.After(time.Second):
+		t.Fatal("the dropped instance's advertiser is still running")
+	}
+	if resumed.Err() != nil {
+		t.Fatal("the resumed advertiser was stopped")
+	}
+}
+
+func shutdownAll(t *testing.T, rs ...*RADNR) {
+	t.Helper()
+	for _, r := range rs {
+		if err := r.OnShutdown(); err != nil {
+			t.Errorf("OnShutdown: %v", err)
+		}
+	}
+}
+
+// TestOnStartup_SameInstanceBlocksCoexist: several radnr blocks in one
+// Corefile belong to one instance, and starting one must not stop another.
+func TestOnStartup_SameInstanceBlocksCoexist(t *testing.T) {
+	owner := new(int)
+	runA := &ctxRunner{ctxs: make(chan context.Context, 1)}
+	runB := &ctxRunner{ctxs: make(chan context.Context, 1)}
+	a := &RADNR{Cfg: validCfg(), runner: runA, owner: owner}
+	b := &RADNR{Cfg: validCfg(), runner: runB, owner: owner}
+	t.Cleanup(func() { shutdownAll(t, a, b) })
+
+	if err := a.OnStartup(); err != nil {
+		t.Fatalf("a.OnStartup: %v", err)
+	}
+	ctxA := <-runA.ctxs
+	if err := b.OnStartup(); err != nil {
+		t.Fatalf("b.OnStartup: %v", err)
+	}
+	<-runB.ctxs
+	if ctxA.Err() != nil {
+		t.Fatal("starting a second block of the same instance stopped the first")
+	}
+}
+
 func TestOnStartup_InvalidConfig(t *testing.T) {
 	r := &RADNR{Cfg: config.Config{}} // Empty, invalid.
 	if err := r.OnStartup(); err == nil {
