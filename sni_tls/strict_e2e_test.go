@@ -24,7 +24,7 @@ func TestStrict_EndToEnd_RealTLSHandshake(t *testing.T) {
 	certA, keyA := writeTestCert(t, "sevenwoods", sniA)
 	certB, keyB := writeTestCert(t, "homearpa", sniB)
 
-	store, err := buildCertStore([][2]string{{certA, keyA}, {certB, keyB}}, true)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certA, keyA}, {certB, keyB}}, strict: true})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
@@ -112,7 +112,7 @@ func dialNoSNIStrict(t *testing.T, ln net.Listener) error {
 // Wildcard exercises that already, but only against the internal struct, and
 // never combined with strict). A concrete subdomain must still resolve via
 // the wildcard SAN; the bare domain itself must NOT match its own wildcard
-// (RFC 6125 §6.4.3) and, in strict mode, must hard-fail rather than fall
+// (RFC 9525 §6.3) and, in strict mode, must hard-fail rather than fall
 // back.
 func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 	const wildcardSAN = "*.sevenwoods.nl"
@@ -123,7 +123,7 @@ func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 	wildcardCert, wildcardKey := writeTestCert(t, "wildcard", wildcardSAN)
 	otherCert, otherKey := writeTestCert(t, "homearpa", otherSNI)
 
-	store, err := buildCertStore([][2]string{{wildcardCert, wildcardKey}, {otherCert, otherKey}}, true)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{wildcardCert, wildcardKey}, {otherCert, otherKey}}, strict: true})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}

@@ -468,6 +468,71 @@ func TestMutableTypePolicy(t *testing.T) {
 	}
 }
 
+// "Delete all RRsets from a name" names no type, so a type allowlist cannot
+// admit it. It used to skip the allowlist check, so a TXT-only key could
+// wipe a name's A records.
+func TestMutableRefusesDeleteAllRRsetsAtName(t *testing.T) {
+	const www = "www.example.org."
+	d := newTestPlugin(t, map[uint16]bool{dns.TypeTXT: true})
+
+	wipe := &dns.ANY{Hdr: dns.RR_Header{Name: www, Rrtype: dns.TypeANY, Class: dns.ClassANY}}
+	if got := send(t, d, newUpdate(nil, []dns.RR{wipe})); got != dns.RcodeRefused {
+		t.Errorf("rcode = %s, want REFUSED", dns.RcodeToString[got])
+	}
+	if !d.rrsetExists(www, dns.TypeA) {
+		t.Error("a TXT-only key deleted www's A records")
+	}
+
+	// Without an allowlist the same update is an ordinary §2.5.3 delete.
+	open := newTestPlugin(t, nil)
+	if got := send(t, open, newUpdate(nil, []dns.RR{wipe})); got != dns.RcodeSuccess {
+		t.Errorf("unrestricted rcode = %s, want NOERROR", dns.RcodeToString[got])
+	}
+	if open.rrsetExists(www, dns.TypeA) {
+		t.Error("delete-all-RRsets left www's A records in place")
+	}
+}
+
+// RFC 2136 §3.4.1.2 rejects meta-types and unrecognized types in every class
+// but the one delete-all form. Only ANY, AXFR, IXFR, MAILA, MAILB and OPT
+// were caught, so a class-IN TSIG or TKEY record was added to the zone.
+func TestPrescanRejectsMetaAndUnknownTypes(t *testing.T) {
+	const name = "meta.example.org."
+	tsig := func(class uint16) dns.RR {
+		return &dns.TSIG{
+			Hdr:       dns.RR_Header{Name: name, Rrtype: dns.TypeTSIG, Class: class},
+			Algorithm: dns.HmacSHA256, Fudge: 300, MACSize: 0, OrigId: 1,
+		}
+	}
+	tkey := &dns.TKEY{
+		Hdr:       dns.RR_Header{Name: name, Rrtype: dns.TypeTKEY, Class: dns.ClassINET, Ttl: 300},
+		Algorithm: "gss-tsig.", Mode: 3,
+	}
+	tests := []struct {
+		rr   dns.RR
+		name string
+	}{
+		{tsig(dns.ClassINET), "TSIG added in class IN"},
+		{tsig(dns.ClassANY), "TSIG deleted in class ANY"},
+		{tkey, "TKEY added in class IN"},
+		{rr(t, name+` 300 IN TYPE200 \# 0`), "unassigned meta-type 200"},
+		{rr(t, name+` 300 IN TYPE65000 \# 2 abcd`), "unrecognized data type"},
+		{rr(t, name+` 300 IN TYPE0 \# 0`), "reserved type 0"},
+		{&dns.ANY{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeAXFR, Class: dns.ClassNONE}}, "AXFR deleted in class NONE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestPlugin(t, nil)
+			if got := send(t, d, newUpdate(nil, []dns.RR{tt.rr})); got != dns.RcodeFormatError {
+				t.Errorf("rcode = %s, want FORMERR", dns.RcodeToString[got])
+			}
+			if d.nameInUse(name) {
+				t.Errorf("a %s record was added to the zone", dns.TypeToString[tt.rr.Header().Rrtype])
+			}
+		})
+	}
+}
+
 func TestCNAMEExclusivity(t *testing.T) {
 	d := newTestPlugin(t, nil)
 
@@ -499,6 +564,142 @@ func TestSOAAddOnlyMovesForward(t *testing.T) {
 	if after := serialOf(t, d); after != before {
 		t.Errorf("a lower SOA serial was accepted: %d -> %d", before, after)
 	}
+}
+
+// An accepted SOA replaces the zone's, per RFC 2136 §3.4.2.2. Appending it
+// instead left two SOAs: the view served the last one while bumpSerial
+// advanced the first, so the served serial froze and no later change ever
+// reached a secondary.
+func TestSOAAddReplacesAndSerialKeepsMoving(t *testing.T) {
+	d := newTestPlugin(t, nil)
+
+	newer := rr(t, "example.org. 300 IN SOA ns.example.org. admin.example.org. 500 3600 900 86400 300")
+	if got := send(t, d, newUpdate(nil, []dns.RR{newer})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	if n := countSOAs(d); n != 1 {
+		t.Fatalf("zone has %d SOAs after an SOA update, want 1", n)
+	}
+	// RFC 2136 §3.6: the update changed the serial itself, so the server
+	// does not increment it on top.
+	if got := servedSerial(t, d); got != 500 {
+		t.Fatalf("served serial = %d, want 500", got)
+	}
+
+	txt := rr(t, `later.example.org. 60 IN TXT "x"`)
+	if got := send(t, d, newUpdate(nil, []dns.RR{txt})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	if got := servedSerial(t, d); got != 501 {
+		t.Errorf("served serial = %d after a further change, want 501", got)
+	}
+}
+
+// RFC 2136 §7.11: an automatic increment that wraps to zero must go on to one.
+func TestSerialIncrementSkipsZero(t *testing.T) {
+	d := newTestPlugin(t, nil)
+	edge := rr(t, "example.org. 300 IN SOA ns.example.org. admin.example.org. 4294967295 3600 900 86400 300")
+	for i, r := range d.rrs {
+		if r.Header().Rrtype == dns.TypeSOA {
+			d.rrs[i] = edge
+		}
+	}
+	if err := d.swap(d.rrs); err != nil {
+		t.Fatal(err)
+	}
+
+	txt := rr(t, `wrap.example.org. 60 IN TXT "x"`)
+	if got := send(t, d, newUpdate(nil, []dns.RR{txt})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	if got := servedSerial(t, d); got != 1 {
+		t.Errorf("served serial = %d after wrapping, want 1", got)
+	}
+}
+
+// A zone's SOA is its apex's. One sent for a name below the apex has
+// nothing to replace and must not become the zone's SOA.
+func TestSOABelowApexIsIgnored(t *testing.T) {
+	d := newTestPlugin(t, nil)
+
+	below := rr(t, "www.example.org. 300 IN SOA ns.example.org. admin.example.org. 500 3600 900 86400 300")
+	if got := send(t, d, newUpdate(nil, []dns.RR{below})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	if n := countSOAs(d); n != 1 {
+		t.Errorf("zone has %d SOAs, want 1", n)
+	}
+	if got := servedSerial(t, d); got != 100 {
+		t.Errorf("served serial = %d, want 100 (nothing changed)", got)
+	}
+}
+
+// RFC 2136 §3.4.2.2: "otherwise replace the CNAME Zone RR with the CNAME
+// Update RR". A name has at most one CNAME.
+func TestCNAMEAddReplacesExistingCNAME(t *testing.T) {
+	d := newTestPlugin(t, nil)
+
+	repoint := rr(t, "alias.example.org. 300 IN CNAME ns.example.org.")
+	if got := send(t, d, newUpdate(nil, []dns.RR{repoint})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	got := d.rrsetOf("alias.example.org.", dns.TypeCNAME)
+	if len(got) != 1 {
+		t.Fatalf("CNAME RRset = %v, want exactly one CNAME", got)
+	}
+	if c, ok := got[0].(*dns.CNAME); !ok || c.Target != "ns.example.org." {
+		t.Errorf("CNAME = %v, want the new target", got[0])
+	}
+}
+
+// RFC 2136 §3.4.2.1: an update is all or nothing. A rebuild failure
+// (file.Zone refuses NSEC3) must leave the zone untouched, including the
+// TTL refreshed and the serial bumped earlier in the same UPDATE — both used
+// to be written through records shared with the live zone.
+func TestFailedRebuildLeavesZoneUntouched(t *testing.T) {
+	d := newTestPlugin(t, nil)
+	before := serialOf(t, d)
+
+	refresh := rr(t, "www.example.org. 9999 IN A 192.0.2.10")
+	nsec3 := rr(t, "abc.example.org. 300 IN NSEC3 1 0 10 AABB 2T7B4G4VSA5SMI47K61MV5BV1A22BOJR A")
+	if got := send(t, d, newUpdate(nil, []dns.RR{refresh, nsec3})); got != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %s, want SERVFAIL", dns.RcodeToString[got])
+	}
+	if after := serialOf(t, d); after != before {
+		t.Errorf("serial moved %d -> %d on a failed UPDATE", before, after)
+	}
+	www := d.rrsetOf("www.example.org.", dns.TypeA)
+	if len(www) != 1 {
+		t.Fatalf("www A RRset = %v, want one record", www)
+	}
+	if ttl := www[0].Header().Ttl; ttl != 300 {
+		t.Errorf("www TTL = %d after a failed UPDATE, want 300", ttl)
+	}
+}
+
+func countSOAs(d *DynUpdate) int {
+	n := 0
+	for _, r := range d.rrs {
+		if r.Header().Rrtype == dns.TypeSOA {
+			n++
+		}
+	}
+	return n
+}
+
+// servedSerial is the serial a secondary sees: the one the view answers
+// with, not whichever SOA happens to be first in d.rrs.
+func servedSerial(t *testing.T, d *DynUpdate) uint32 {
+	t.Helper()
+	resp := query(t, d, testZone, dns.TypeSOA)
+	if len(resp.Answer) != 1 {
+		t.Fatalf("SOA query answered %v, want one SOA", resp.Answer)
+	}
+	soa, ok := resp.Answer[0].(*dns.SOA)
+	if !ok {
+		t.Fatalf("SOA query answered %v", resp.Answer[0])
+	}
+	return soa.Serial
 }
 
 func TestSerialGreaterWrapsPerRFC1982(t *testing.T) {

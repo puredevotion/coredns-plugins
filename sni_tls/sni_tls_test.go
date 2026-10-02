@@ -41,10 +41,11 @@ func TestGetCertificate(t *testing.T) {
 	}
 }
 
-// TestGetCertificate_CaseInsensitive covers RFC 6066 §3: "'HostName' contains
-// the fully qualified DNS hostname … using ASCII or normalised form …
-// comparisons … are case-insensitive". A client sending mixed-case SNI must
-// still match the lowercased map key.
+// TestGetCertificate_CaseInsensitive covers RFC 6066 §3: "'HostName'
+// contains the fully qualified DNS hostname of the server, as understood by
+// the client. The hostname is represented as a byte string using ASCII
+// encoding without a trailing dot. ... DNS hostnames are case-insensitive."
+// A client sending mixed-case SNI must still match the lowercased map key.
 func TestGetCertificate_CaseInsensitive(t *testing.T) {
 	secondary := &tls.Certificate{}
 	store := &certStore{
@@ -123,6 +124,9 @@ func TestWildcardOf(t *testing.T) {
 		{"sevenwoods.nl", "*.nl", true},
 		{"nl", "", false}, // Truly single-label: no dot, no wildcard form.
 		{"", "", false},
+		// An empty leftmost label is not a label "*" can stand for.
+		{".sevenwoods.nl", "", false},
+		{".", "", false},
 	}
 	for _, tc := range tests {
 		got, ok := wildcardOf(tc.name)
@@ -134,12 +138,32 @@ func TestWildcardOf(t *testing.T) {
 
 // --- certStore.GetCertificate: strict mode (no fallback) --------------------.
 
+// TestGetCertificate_Strict_EmptyLeftLabelIsNotAWildcardMatch: "*" stands
+// for one whole label, so SNI ".example.com" is not covered by
+// "*.example.com". Strict mode must refuse it, not serve the wildcard cert.
+func TestGetCertificate_Strict_EmptyLeftLabelIsNotAWildcardMatch(t *testing.T) {
+	wildcard := &tls.Certificate{}
+	store := &certStore{
+		byName:   map[string]*tls.Certificate{"*.example.com": wildcard},
+		fallback: wildcard,
+		strict:   true,
+	}
+
+	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: "host.example.com"}); err != nil || got != wildcard {
+		t.Fatalf("host.example.com: got (%v, %v), want the wildcard cert", got, err)
+	}
+	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: ".example.com"}); err != nil || got != nil {
+		t.Errorf(".example.com: got (%v, %v), want a strict-mode refusal (nil, nil)", got, err)
+	}
+}
+
 // TestGetCertificate_Strict_RejectsUnmatchedOrAbsentSNI is the behaviour the
 // verified-DDR caveat in docs/sni-tls-plugin.md asks for: on an instance
 // serving more than one cert, strict mode must refuse to guess. An
-// unmatched or absent SNI must fail the handshake (return an error, no
-// cert), never silently hand out a cert lacking the connecting VIP's
-// required IP-SAN.
+// unmatched or absent SNI must fail the handshake (no cert, and no error so
+// crypto/tls sends the RFC 6066 alert; see
+// TestSetup_StrictRefusalSendsUnrecognizedName), never silently hand out a
+// cert lacking the connecting VIP's required IP-SAN.
 func TestGetCertificate_Strict_RejectsUnmatchedOrAbsentSNI(t *testing.T) {
 	primary := &tls.Certificate{}
 	secondary := &tls.Certificate{}
@@ -168,11 +192,41 @@ func TestGetCertificate_Strict_RejectsUnmatchedOrAbsentSNI(t *testing.T) {
 	// Unmatched and absent SNI must hard-fail, not fall back.
 	for _, sni := range []string{testSNIUnknown, ""} {
 		got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: sni})
-		if err == nil {
-			t.Errorf("ServerName=%q: expected error in strict mode, got nil (cert=%v)", sni, got)
+		if err != nil {
+			t.Errorf("ServerName=%q: strict refusal returned error %v; it must be (nil, nil) so the client gets the RFC 6066 alert", sni, err)
 		}
 		if got != nil {
 			t.Errorf("ServerName=%q: expected no cert in strict mode, got %v", sni, got)
+		}
+	}
+}
+
+// DNS names fold case in ASCII only (RFC 4343 §3, RFC 9525 §6.3). With
+// Unicode folding, KELVIN SIGN (U+212A) lower-cased to "k", so an SNI no
+// SAN matches selected k.example.com's certificate, even in strict mode.
+func TestGetCertificate_FoldsASCIIOnly(t *testing.T) {
+	const kelvin = "\u212a.example.com" // KELVIN SIGN, not K.
+	k := &tls.Certificate{}
+	store := &certStore{byName: map[string]*tls.Certificate{"k.example.com": k}, strict: true}
+
+	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: "K.EXAMPLE.COM"}); err != nil || got != k {
+		t.Errorf("K.EXAMPLE.COM: got (%v, %v), want k.example.com's cert", got, err)
+	}
+	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: kelvin}); err != nil || got != nil {
+		t.Errorf("KELVIN SIGN SNI: got (%v, %v), want a strict refusal", got, err)
+	}
+}
+
+func TestAsciiLower(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                   "",
+		"DNS.Example.COM":    "dns.example.com",
+		"\u212a.example.com": "\u212a.example.com",
+		"\u00c9.example.com": "\u00c9.example.com",
+		"a-Z_09@[`{":         "a-z_09@[`{",
+	} {
+		if got := asciiLower(in); got != want {
+			t.Errorf("asciiLower(%q) = %q, want %q", in, got, want)
 		}
 	}
 }
@@ -205,15 +259,15 @@ func TestGetCertificate_NonStrict_StillFallsBack(t *testing.T) {
 func TestBuildCertStore_Strict_PropagatesToGetCertificate(t *testing.T) {
 	primaryCert, primaryKey := writeTestCert(t, "primary", testSNIPrimary)
 
-	store, err := buildCertStore([][2]string{{primaryCert, primaryKey}}, true)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{primaryCert, primaryKey}}, strict: true})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	if !store.strict {
 		t.Fatal("buildCertStore(strict=true) must produce a store with strict set")
 	}
-	if _, getErr := store.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIUnknown}); getErr == nil {
-		t.Fatal("expected strict store to reject unmatched SNI")
+	if refused, getErr := store.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIUnknown}); refused != nil || getErr != nil {
+		t.Fatalf("expected strict store to refuse unmatched SNI with (nil, nil), got (%v, %v)", refused, getErr)
 	}
 	// The configured name must still resolve.
 	got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIPrimary})
@@ -269,6 +323,26 @@ func TestLoadCert_LowercasesSANs(t *testing.T) {
 	}
 }
 
+// RFC 9525 §6.3: a SAN whose wildcard is not the whole left-most label, or
+// that has more than one, "is invalid and MUST be ignored". They used to be
+// keyed as literal names, so an SNI spelling one out selected its cert.
+func TestLoadCert_IgnoresInvalidWildcardSANs(t *testing.T) {
+	certPath, keyPath := writeTestCert(t, "mixed",
+		"ok.example.com", "*.Example.org", "f*.example.com", "*.*.example.com", "a.*.example.com", "*")
+	_, names, err := loadCert(certPath, keyPath)
+	if err != nil {
+		t.Fatalf("loadCert: %v", err)
+	}
+	if want := []string{"ok.example.com", "*.example.org"}; strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Errorf("names = %v, want %v", names, want)
+	}
+
+	certPath, keyPath = writeTestCert(t, "only-invalid", "f*.example.com")
+	if _, _, err := loadCert(certPath, keyPath); err == nil {
+		t.Error("a cert whose only SAN must be ignored loaded anyway")
+	}
+}
+
 // TestLoadCert_NoSANs_Errors covers a cert with no SAN DNS names, which can
 // never be selected by GetCertificate's SNI lookup (only reachable via
 // fallback).
@@ -315,10 +389,10 @@ func TestBuildCertStore_EndToEnd(t *testing.T) {
 	primaryCert, primaryKey := writeTestCert(t, "primary", testSNIPrimary)
 	secondaryCert, secondaryKey := writeTestCert(t, "secondary", testSNISecondary)
 
-	store, err := buildCertStore([][2]string{
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{
 		{primaryCert, primaryKey},
 		{secondaryCert, secondaryKey},
-	}, false)
+	}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
@@ -350,7 +424,7 @@ func TestBuildCertStore_EndToEnd(t *testing.T) {
 // Corefile listing certs that never materialise should fail loudly, not
 // silently produce a store with no fallback and no certs.
 func TestBuildCertStore_PropagatesLoadError(t *testing.T) {
-	_, err := buildCertStore([][2]string{{"/nonexistent/cert.pem", "/nonexistent/key.pem"}}, false)
+	_, err := buildCertStore(storeConfig{pairs: [][2]string{{"/nonexistent/cert.pem", "/nonexistent/key.pem"}}})
 	if err == nil || !strings.Contains(err.Error(), "sni_tls") {
 		t.Fatalf("expected wrapped sni_tls error, got %v", err)
 	}
@@ -366,10 +440,10 @@ func TestBuildCertStore_PropagatesLoadError(t *testing.T) {
 func TestBuildCertStore_TolerantOfMissingSecondCert(t *testing.T) {
 	primaryCert, primaryKey := writeTestCert(t, "primary", testSNIPrimary)
 
-	store, err := buildCertStore([][2]string{
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{
 		{primaryCert, primaryKey},
 		{"/etc/coredns/tls/secondary.crt", "/etc/coredns/tls/secondary.key"}, // Never copied by the gate.
-	}, false)
+	}})
 	if err != nil {
 		t.Fatalf("buildCertStore must tolerate one missing pair when another loads: %v", err)
 	}
@@ -392,10 +466,10 @@ func TestBuildCertStore_TolerantOfMissingSecondCert(t *testing.T) {
 func TestBuildCertStore_TolerantOfMissingFirstCert(t *testing.T) {
 	secondaryCert, secondaryKey := writeTestCert(t, "secondary", testSNISecondary)
 
-	store, err := buildCertStore([][2]string{
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{
 		{"/etc/coredns/tls/primary.crt", "/etc/coredns/tls/primary.key"}, // Never copied.
 		{secondaryCert, secondaryKey},
-	}, false)
+	}})
 	if err != nil {
 		t.Fatalf("buildCertStore must tolerate the first pair missing when a later one loads: %v", err)
 	}
@@ -409,7 +483,7 @@ func TestBuildCertStore_TolerantOfMissingFirstCert(t *testing.T) {
 // empty slice reaching buildCertStore directly is a valid input with nothing
 // to load — not an error, just a store with no fallback.
 func TestBuildCertStore_Empty(t *testing.T) {
-	store, err := buildCertStore(nil, false)
+	store, err := buildCertStore(storeConfig{})
 	if err != nil {
 		t.Fatalf("buildCertStore(nil): %v", err)
 	}

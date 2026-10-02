@@ -31,6 +31,21 @@ const defaultLifetime = 3600
 // shrink it instead of waiting out the real 3s.
 var minDelayBetweenRAs = 3 * time.Second
 
+// maxRADelay is RFC 4861 §10's MAX_RA_DELAY_TIME: "Router Advertisements
+// sent in response to a Router Solicitation MUST be delayed by a random time
+// between 0 and MAX_RA_DELAY_TIME seconds" (§6.2.6). A package var so tests
+// can shrink it.
+var maxRADelay = 500 * time.Millisecond
+
+// raDelay draws the §6.2.6 random response delay.
+func raDelay() time.Duration {
+	if maxRADelay <= 0 {
+		return 0
+	}
+	//nolint:gosec // G404: RFC 4861 timing jitter, not a security-sensitive value.
+	return time.Duration(rand.Int63n(int64(maxRADelay)))
+}
+
 // Conn is the subset of *ndp.Conn the advertiser needs; injectable for tests.
 type Conn interface {
 	WriteTo(m ndp.Message, cm *ipv6.ControlMessage, dst netip.Addr) error
@@ -103,12 +118,13 @@ func BuildRA(c *config.Config) (*ndp.RouterAdvertisement, error) {
 // deriving MinRtrAdvInterval from MaxRtrAdvInterval (Min = 0.33*Max).
 const minIntervalRatioDivisor = 3
 
-// nextInterval picks a randomised periodic-RA delay per RFC 4861 §6.2.1: the
-// actual interval MUST be a uniform random value between MinRtrAdvInterval and
-// MaxRtrAdvInterval, not a fixed period, so multiple advertisers on a link
-// don't stay synchronised; a.Interval is treated as MaxRtrAdvInterval, and Min
-// is derived using the RFC's default ratio, floored at 3s (the RFC's
-// absolute minimum for MinRtrAdvInterval).
+// nextInterval picks a randomised periodic-RA delay per RFC 4861 §6.2.4: "the
+// timer is reset to a uniformly distributed random value between the
+// interface's configured MinRtrAdvInterval and MaxRtrAdvInterval", so
+// multiple advertisers on a link don't stay synchronised. Here a.Interval is
+// MaxRtrAdvInterval, and MinRtrAdvInterval is derived from it with §6.2.1's
+// default ratio, floored at 3s (§6.2.1: it "MUST be no less than 3
+// seconds").
 func (a *Advertiser) nextInterval() time.Duration {
 	maxInterval := a.Interval
 	minInterval := max(maxInterval/minIntervalRatioDivisor, minDelayBetweenRAs)
@@ -125,11 +141,12 @@ func (a *Advertiser) nextInterval() time.Duration {
 func (a *Advertiser) readSolicitations(ctx context.Context, rs chan<- netip.Addr, rsDone chan<- struct{}) {
 	defer close(rsDone)
 	for {
-		m, _, from, err := a.Conn.ReadFrom()
+		m, cm, from, err := a.Conn.ReadFrom()
 		if err != nil {
 			return // Conn closed or ctx cancelled elsewhere.
 		}
-		if _, ok := m.(*ndp.RouterSolicitation); !ok {
+		solicitation, ok := m.(*ndp.RouterSolicitation)
+		if !ok || !validSolicitation(solicitation, cm, from) {
 			continue
 		}
 		select {
@@ -140,12 +157,101 @@ func (a *Advertiser) readSolicitations(ctx context.Context, rs chan<- netip.Addr
 	}
 }
 
+// validSolicitation applies the RFC 4861 §6.1.1 checks a parsed Router
+// Solicitation can still fail; a router "MUST silently discard" one that
+// fails any. The rest are done before the message gets here: the socket
+// verifies ICMPv6 checksums (ndp.Listen turns on IPV6_CHECKSUM), the conn
+// drops a non-zero ICMP Code, and ndp.ParseMessage rejects a short message
+// or a zero-length option.
+func validSolicitation(m *ndp.RouterSolicitation, cm *ipv6.ControlMessage, from netip.Addr) bool {
+	// "The IP Hop Limit field has a value of 255, i.e., the packet could not
+	// possibly have been forwarded by a router." Without the hop limit
+	// there is no way to tell, so a conn must report it.
+	if cm == nil || cm.HopLimit != ndp.HopLimit {
+		return false
+	}
+	// "If the IP source address is the unspecified address, there is no
+	// source link-layer address option in the message" (§6.1.1).
+	if from.IsUnspecified() {
+		for _, o := range m.Options {
+			if lla, ok := o.(*ndp.LinkLayerAddress); ok && lla.Direction == ndp.Source {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// raSchedule is the interface's interval timer (RFC 4861 §6.2.4). Every RA
+// is sent when it fires, solicited ones included, so the rules that hang off
+// "an advertisement was sent" apply to both: the MIN_DELAY_BETWEEN_RAS rate
+// limit, and the §6.2.6 reset of the timer "to a new random value, as if an
+// unsolicited advertisement had just been sent".
+type raSchedule struct {
+	timer    *time.Timer
+	next     time.Time // When timer fires.
+	lastSent time.Time
+}
+
+// at re-arms the timer for when.
+func (s *raSchedule) at(when time.Time) {
+	s.next = when
+	s.timer.Reset(time.Until(when))
+}
+
+// held reports whether the rate limit forbids an RA now, and until when.
+func (s *raSchedule) held() (time.Time, bool) {
+	earliest := s.lastSent.Add(minDelayBetweenRAs)
+	return earliest, time.Now().Before(earliest)
+}
+
+// onTimer handles the timer firing: send an RA (periodic, or one a
+// solicitation scheduled) and re-arm for a fresh random interval, unless one
+// went out less than minDelayBetweenRAs ago, in which case wait out the
+// window.
+func (s *raSchedule) onTimer(send func(), interval time.Duration) {
+	if earliest, held := s.held(); held {
+		s.at(earliest)
+		return
+	}
+	send()
+	s.at(time.Now().Add(interval))
+}
+
+// onSolicitation schedules the answer to a Router Solicitation, following
+// the procedure RFC 4861 §6.2.6 gives: "compute a random delay within the
+// range 0 through MAX_RA_DELAY_TIME. If the computed value corresponds to a
+// time later than the time the next multicast Router Advertisement is
+// scheduled to be sent, ignore the random delay and send the advertisement
+// at the already-scheduled time. If the router sent a multicast Router
+// Advertisement (solicited or unsolicited) within the last
+// MIN_DELAY_BETWEEN_RAS seconds, schedule the advertisement to be sent at a
+// time corresponding to MIN_DELAY_BETWEEN_RAS plus the random value after
+// the previous advertisement was sent." Taking the earlier of that and the timer's
+// current deadline also makes a burst of solicitations share one answer.
+func (s *raSchedule) onSolicitation(from netip.Addr, delay time.Duration) {
+	at := time.Now().Add(delay)
+	if earliest, held := s.held(); held {
+		at = earliest.Add(delay)
+	}
+	if at.Before(s.next) {
+		log.Printf("ra-dnr: solicited RA for RS from %s in %v", from, time.Until(at).Round(time.Millisecond))
+		s.at(at)
+	}
+}
+
 // Run advertises until ctx is cancelled: periodically (at a randomised
-// interval per RFC 4861 §6.2.1) and solicited (in response to a Router
-// Solicitation per §6.2.6, rate-limited to at most one send per
-// minDelayBetweenRAs regardless of trigger). Send errors are logged, not
-// fatal. Reads for Router Solicitations run inline in this goroutine — RAs are
-// too latency-insensitive here to need a separate reader goroutine.
+// interval per RFC 4861 §6.2.4) and solicited (in response to a Router
+// Solicitation per §6.2.6). Send errors are logged, not fatal. Reads for
+// Router Solicitations run inline in this goroutine — RAs are too
+// latency-insensitive here to need a separate reader goroutine.
+//
+// Both triggers go through the one interval timer (see raSchedule), so
+// "consecutive Router Advertisements sent to the all-nodes multicast address
+// MUST be rate limited to no more than one advertisement every
+// MIN_DELAY_BETWEEN_RAS seconds" holds whatever triggered them, every
+// solicited RA is delayed by its §6.2.6 random value, and the timer is reset
+// after each. See verification/tla/RadnrRA.tla, which checks these.
 func (a *Advertiser) Run(ctx context.Context) error {
 	ra, err := BuildRA(&a.Cfg)
 	if err != nil {
@@ -157,9 +263,9 @@ func (a *Advertiser) Run(ctx context.Context) error {
 		dst = netip.MustParseAddr(a.Cfg.UnicastTarget)
 	}
 
-	var lastSent time.Time
+	s := &raSchedule{}
 	send := func() {
-		lastSent = time.Now()
+		s.lastSent = time.Now()
 		if a.Cfg.DryRun {
 			log.Printf("ra-dnr: [dry-run] would send RA to %s (ADN=%s)", dst, a.Cfg.ADN) //nolint:misspell // ADN: RFC 9463 Authentication Domain Name, not a typo for AND
 			return
@@ -183,8 +289,9 @@ func (a *Advertiser) Run(ctx context.Context) error {
 	rsDone := make(chan struct{})
 	go a.readSolicitations(ctx, rs, rsDone)
 
-	t := time.NewTimer(a.nextInterval())
-	defer t.Stop()
+	s.next = time.Now().Add(a.nextInterval())
+	s.timer = time.NewTimer(time.Until(s.next))
+	defer s.timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -193,16 +300,10 @@ func (a *Advertiser) Run(ctx context.Context) error {
 			}
 			<-rsDone
 			return fmt.Errorf("advertiser run: %w", ctx.Err())
-		case <-t.C:
-			send()
-			t.Reset(a.nextInterval())
+		case <-s.timer.C:
+			s.onTimer(send, a.nextInterval())
 		case from := <-rs:
-			if since := time.Since(lastSent); since < minDelayBetweenRAs {
-				log.Printf("ra-dnr: RS from %s rate-limited (%v since last RA)", from, since)
-				continue
-			}
-			log.Printf("ra-dnr: solicited RA for RS from %s", from)
-			send()
+			s.onSolicitation(from, raDelay())
 		}
 	}
 }

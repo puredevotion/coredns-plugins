@@ -7,6 +7,7 @@ toolchain go1.27.1
 require (
 	github.com/coredns/caddy v1.1.4
 	github.com/coredns/coredns v1.14.7
+	github.com/quic-go/quic-go v0.61.0
 )
 
 require (
@@ -25,7 +26,6 @@ require (
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.61.0 // indirect
 	go.opentelemetry.io/otel v1.45.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.45.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect

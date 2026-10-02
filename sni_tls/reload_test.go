@@ -3,7 +3,9 @@ package snitls
 import (
 	"crypto/tls"
 	"os"
+	"runtime"
 	"testing"
+	"time"
 )
 
 // --- digestPairs: change detection -------------------------------------------.
@@ -62,12 +64,12 @@ func TestDigestPairs_MissingFileIsStableSentinel(t *testing.T) {
 func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	before, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIPrimary})
 	if err != nil {
@@ -93,12 +95,12 @@ func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 // rebuild/swap — steady-state should be cheap and quiet.
 func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	before := live.current.Load()
 	live.reloadOnce()
@@ -114,12 +116,12 @@ func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 // listener must keep serving the last-good cert, not lose it.
 func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	before := live.current.Load()
 
@@ -146,12 +148,12 @@ func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 // produce; must not deadlock, panic, or leak the poll goroutine.
 func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	if err := live.OnStartup(); err != nil {
 		t.Fatalf("OnStartup: %v", err)
@@ -164,6 +166,81 @@ func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 	}
 	if err := live.OnShutdown(); err != nil { // OnFinalShutdown.
 		t.Fatalf("OnShutdown (final): %v", err)
+	}
+}
+
+// TestLiveStore_Lifecycle_RestartFailedWithoutRestart is the sequence caddy
+// produces when a plugin registered before sni_tls fails its OnRestart: our
+// OnRestart never runs, but OnRestartFailed (OnStartup) still does. The
+// first poll loop must not be orphaned — after the final shutdown, no poll
+// goroutine may be left running.
+func TestLiveStore_Lifecycle_RestartFailedWithoutRestart(t *testing.T) {
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
+	if err != nil {
+		t.Fatalf("buildCertStore: %v", err)
+	}
+	pairs := [][2]string{{certPath, keyPath}}
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
+
+	baseline := runtime.NumGoroutine()
+	if err := live.OnStartup(); err != nil {
+		t.Fatalf("OnStartup: %v", err)
+	}
+	if err := live.OnStartup(); err != nil { // OnRestartFailed, no OnRestart before it.
+		t.Fatalf("OnStartup (restart-failed): %v", err)
+	}
+	if err := live.OnShutdown(); err != nil { // OnFinalShutdown.
+		t.Fatalf("OnShutdown (final): %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutine(s) still running after final shutdown; a poll loop was orphaned",
+				runtime.NumGoroutine()-baseline)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestLiveStore_Lifecycle_ReclaimsDroppedInstance is a reload that fails
+// after the new instance's OnStartup already ran: caddy discards the new
+// instance without calling its shutdown hooks, then runs the old one's
+// OnRestartFailed. That must stop the discarded instance's poller.
+func TestLiveStore_Lifecycle_ReclaimsDroppedInstance(t *testing.T) {
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
+	pairs := [][2]string{{certPath, keyPath}}
+	store, err := buildCertStore(storeConfig{pairs: pairs})
+	if err != nil {
+		t.Fatalf("buildCertStore: %v", err)
+	}
+	oldInst := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
+	oldInst.owner = new(int)
+	newInst := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
+	newInst.owner = new(int)
+
+	baseline := runtime.NumGoroutine()
+	mustNil(t, oldInst.OnStartup())  // First startup.
+	mustNil(t, oldInst.OnShutdown()) // Old instance's OnRestart.
+	mustNil(t, newInst.OnStartup())  // New instance's OnStartup, then the reload fails.
+	mustNil(t, oldInst.OnStartup())  // Old instance's OnRestartFailed.
+	mustNil(t, oldInst.OnShutdown()) // OnFinalShutdown; newInst gets none.
+
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d goroutine(s) still running after final shutdown; the dropped instance's poller survived",
+				runtime.NumGoroutine()-baseline)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func mustNil(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

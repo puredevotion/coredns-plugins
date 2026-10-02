@@ -18,12 +18,12 @@ func TestReload_EndToEnd_RealTLSHandshake(t *testing.T) {
 	sni := testSNIPrimary
 
 	certPath, keyPath := writeTestCert(t, "primary", sni)
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	serverConf := &tls.Config{GetCertificate: live.GetCertificate}
 

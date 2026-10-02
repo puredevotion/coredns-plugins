@@ -147,12 +147,12 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return p.serveDNSSD(state, w, r, kind, token)
 	}
 
-	// RFC 8145 §5.2 Key Tag query, e.g. `_ta-0635-7aae.<zone>`. Handled before
+	// RFC 8145 §5.1 Key Tag query, e.g. `_ta-0635-7aae.<zone>`. Handled before
 	// ParseQuery, which would otherwise answer REFUSED — and REFUSED to a
 	// resolver reporting its trust anchors is both wrong per the RFC and a
 	// measurement thrown away.
 	//
-	// Expect approximately none of these: RFC 8145 §5.1 sends them to the apex of
+	// Expect approximately none of these: RFC 8145 §5.2 sends them to the apex of
 	// each CONFIGURED trust anchor, and this zone is nobody's configured anchor —
 	// it chains from root through a DS. Handled anyway because the case where one
 	// DOES arrive means somebody pinned this zone as an anchor, which is exactly
@@ -160,9 +160,12 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	if tags, err := ParseKeyTagQuery(sub); err == nil {
 		return p.serveKeyTagQuery(state, w, r, tags)
 	} else if errors.Is(err, ErrBadKeyTagQuery) {
-		// Shaped like a Key Tag query but not one. Counted, then REFUSED like any
-		// other name this zone's grammar rejects.
-		probeKeyTagQueries.WithLabelValues("malformed").Inc()
+		// Shaped like a Key Tag query but not one. Counted (if NULL/IN, so it
+		// was meant as one), then REFUSED like any other name this zone's
+		// grammar rejects.
+		if isKeyTagQueryType(state) {
+			probeKeyTagQueries.WithLabelValues("malformed").Inc()
+		}
 		return p.respond(state, w, r, dns.RcodeRefused, nil, nil, false)
 	}
 
@@ -345,6 +348,7 @@ func (p *Probe) serveApex(state *request.Request, w dns.ResponseWriter, r *dns.M
 			Ns:  p.NSName,
 		}}
 	case dns.TypeDNSKEY:
+		p.countDNSKEYKeyTags(r)
 		if p.Signer == nil {
 			break
 		}
@@ -364,6 +368,33 @@ func (p *Probe) serveApex(state *request.Request, w dns.ResponseWriter, r *dns.M
 		}
 	}
 	return p.respond(state, w, r, dns.RcodeSuccess, answer, nil, false)
+}
+
+// countDNSKEYKeyTags counts the edns-key-tag option on an apex DNSKEY query,
+// the one place RFC 8145 §4.2 has a resolver send it ("A validating resolver
+// sets the edns-key-tag option in the OPT RR when sending a DNSKEY query").
+// §4.3: a server "MAY log or otherwise collect the Key Tag values". The apex
+// carries no token, so this is a population count, like a Key Tag query.
+func (p *Probe) countDNSKEYKeyTags(r *dns.Msg) {
+	opt := r.IsEdns0()
+	if opt == nil {
+		return
+	}
+	if tags := ednsKeyTags(opt); len(tags) > 0 {
+		probeKeyTagKnowledge.WithLabelValues("dnskey", p.zoneKeyLabel(tags)).Inc()
+	}
+}
+
+// zoneKeyLabel says whether tags include this zone's key: "yes", "no", or
+// "unknown" when there is no signer to compare against.
+func (p *Probe) zoneKeyLabel(tags []uint16) string {
+	if p.Signer == nil {
+		return labelUnknown
+	}
+	if hasKeyTag(tags, p.Signer.DNSKEY().KeyTag()) {
+		return labelYes
+	}
+	return "no"
 }
 
 // serveDNSSD answers one level of the per-visitor RFC 6763 browse tree.
@@ -436,35 +467,46 @@ func (p *Probe) respondDNSSD(state *request.Request, w dns.ResponseWriter, r *dn
 //
 // RFC 8145 §5.3: "A server does not need to have built-in logic that determines
 // the response to Key Tag queries: the response code is determined by whether the
-// data is in the zone file or covered by wildcards." This zone is synthesised and
-// has no `_ta-*` records, so the correct answer is NODATA — NOERROR with an empty
-// answer and the SOA in authority — NOT NXDOMAIN and certainly not REFUSED.
+// data is in the zone file or covered by wildcards." A zone with no `_ta-*` names
+// at all would answer NXDOMAIN. This one is synthesised, so it chooses to treat
+// every well-formed Key Tag name as existing with no data, and answers NODATA —
+// NOERROR with an empty answer and the SOA in authority. §5.3.1 is why: "When the
+// response code for a Key Tag query is NXDOMAIN, DNS resolvers that implement
+// aggressive negative caching will send fewer Key Tag queries", and this zone
+// exists to receive them. Certainly not REFUSED: §5.3 says the server "MUST
+// generate an appropriate response".
 //
 // There is no token in a Key Tag query, so it cannot be correlated to a visitor
 // and nothing is written to the per-token store. It is counted instead, which is
 // the honest place for a population-level signal with no individual attached.
+//
+// Only a query of "type NULL and of class IN" (§5.1) is a Key Tag query, so
+// only that is counted. Any other type at a `_ta-` name gets the same NODATA
+// answer, since the name exists either way, but says nothing about trust
+// anchors.
 func (p *Probe) serveKeyTagQuery(state *request.Request, w dns.ResponseWriter, r *dns.Msg, tags []uint16) (int, error) {
-	sorted := "unsorted"
-	if KeyTagsSorted(tags) {
-		sorted = "sorted"
-	}
-	probeKeyTagQueries.WithLabelValues(sorted).Inc()
-
-	knowsOurs := labelUnknown
-	if p.Signer != nil {
-		if hasKeyTag(tags, p.Signer.DNSKEY().KeyTag()) {
-			knowsOurs = labelYes
-		} else {
-			knowsOurs = "no"
+	if isKeyTagQueryType(state) {
+		sorted := "unsorted"
+		if KeyTagsSorted(tags) {
+			sorted = "sorted"
 		}
-	}
-	probeKeyTagKnowledge.WithLabelValues("query", knowsOurs).Inc()
+		probeKeyTagQueries.WithLabelValues(sorted).Inc()
 
-	log.Infof("RFC 8145 key tag query: tags=%s %s knows_zone_key=%s",
-		FormatKeyTagQuery(tags), sorted, knowsOurs)
+		knowsOurs := p.zoneKeyLabel(tags)
+		probeKeyTagKnowledge.WithLabelValues("query", knowsOurs).Inc()
+
+		log.Infof("RFC 8145 key tag query: tags=%s %s knows_zone_key=%s",
+			FormatKeyTagQuery(tags), sorted, knowsOurs)
+	}
 
 	auth := p.nodataDenial(state.Name(), 0, state.Do())
 	return p.respond(state, w, r, dns.RcodeSuccess, nil, auth, false)
+}
+
+// isKeyTagQueryType reports whether the question is QTYPE NULL, QCLASS IN,
+// the only form RFC 8145 §5.1 defines a Key Tag query to take.
+func isKeyTagQueryType(state *request.Request) bool {
+	return state.QType() == dns.TypeNULL && state.QClass() == dns.ClassINET
 }
 
 // SOA timing fields for both zones this plugin serves. Neither zone is ever

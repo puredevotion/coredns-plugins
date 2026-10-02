@@ -161,26 +161,53 @@ func serialGreater(a, b uint32) bool {
 	return a != b && ((a < b && b-a > 1<<31) || (a > b && a-b < 1<<31))
 }
 
-// bumpSerial advances the SOA after a successful change. RFC 2136 §3.6 leaves
-// this to the server; not doing it means a secondary compares serials, sees no
+// bumpSerial advances the SOA after a successful change that did not set the
+// serial itself. RFC 2136 §3.6: the server "shall increment it
+// automatically"; not doing it means a secondary compares serials, sees no
 // difference, and never transfers the change it was just NOTIFYed about.
+//
+// The SOA is replaced by an incremented copy rather than incremented in
+// place: rrs is a fresh slice, but its records are still d.rrs's, and an
+// in-place ++ would survive a failed rebuild.
 func bumpSerial(rrs []dns.RR) {
-	if soa := soaOf(rrs); soa != nil {
-		soa.Serial++
+	for i, rr := range rrs {
+		soa, ok := rr.(*dns.SOA)
+		if !ok {
+			continue
+		}
+		next := *soa
+		next.Serial++
+		if next.Serial == 0 {
+			// RFC 2136 §7.11: "if the result of the increment is zero (0)
+			// (as will be true when wrapping around 2**32), it is
+			// necessary to increment it again or set it to one (1)".
+			next.Serial = 1
+		}
+		rrs[i] = &next
+		return
 	}
 }
 
-func isMetaType(t uint16) bool {
-	switch t {
-	case dns.TypeANY, dns.TypeAXFR, dns.TypeIXFR, dns.TypeMAILA, dns.TypeMAILB, dns.TypeOPT:
-		return true
+// isUpdatableType reports whether an update record may carry type t, which
+// RFC 2136 §3.4.1.2 limits to recognised data types. Zero is reserved (RFC
+// 6895 §3.1), OPT is a pseudo-RR that belongs in a message's additional
+// data section (RFC 6891 §6.1.1), and 128-255 are "Q and Meta-TYPEs" (RFC 6895
+// §3.1): ANY, AXFR, IXFR, MAILA, MAILB, TSIG and TKEY among them.
+// "Recognised" means miekg/dns knows the type; an unknown one is RFC 3597
+// opaque data this plugin cannot validate.
+func isUpdatableType(t uint16) bool {
+	if t == 0 || t == dns.TypeOPT || (t >= 128 && t <= 255) {
+		return false
 	}
-	return false
+	_, known := dns.TypeToString[t]
+	return known
 }
 
-// reply sends the response to an UPDATE. RFC 2136 §3.8 wants the request's
-// sections echoed; miekg's SetReply copies the Zone section, which is what a
-// client matches the response against.
+// reply sends the response to an UPDATE. RFC 2136 §3.8 allows either
+// "copying the ZOCOUNT, PRCOUNT, UPCOUNT, and ADCOUNT fields and associated
+// sections, or placing zeros (0) in the these "count" fields" (sic); miekg's
+// SetReply copies the Zone section only, as BIND does, which is what a client
+// matches the response against.
 func (d *DynUpdate) reply(w dns.ResponseWriter, r *dns.Msg, rcode int) (int, error) {
 	m := new(dns.Msg)
 	m.SetReply(r)

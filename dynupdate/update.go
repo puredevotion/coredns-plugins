@@ -48,13 +48,20 @@ func (d *DynUpdate) serveUpdate(w dns.ResponseWriter, r *dns.Msg) (int, error) {
 
 	updated, changed := d.apply(r.Ns)
 	if !changed {
-		// RFC 2136 §3.4.2.7: an update that changes nothing is still a
-		// success. Silently doing nothing and reporting NOERROR is correct,
+		// RFC 2136 §2.5.1: "Any duplicate RRs will be silently ignored",
+		// and §3.4.2.5: "Signal NOERROR". An update that changes nothing is
+		// still a success. Silently doing nothing and reporting NOERROR is correct,
 		// and is why an ACME client re-adding an identical TXT does not fail.
 		return d.reply(w, r, dns.RcodeSuccess)
 	}
 
-	bumpSerial(updated)
+	// RFC 2136 §3.6: "If the zone's SOA's SERIAL is not changed as a result
+	// of an update operation, then the server shall increment it
+	// automatically". An UPDATE that replaced the SOA has already moved it
+	// forward, by exactly as much as the client asked.
+	if cur, next := soaOf(d.rrs), soaOf(updated); cur != nil && next != nil && next.Serial == cur.Serial {
+		bumpSerial(updated)
+	}
 	if err := d.swap(updated); err != nil {
 		log.Errorf("rebuilding %s after UPDATE: %v", zone, err)
 		return d.reply(w, r, dns.RcodeServerFailure)
@@ -135,8 +142,9 @@ func (d *DynUpdate) checkPrereqs(prereqs []dns.RR) int {
 // therefore cannot double as a sentinel.
 const rcodeNoVerdict = -1
 
-// checkPrereqExists implements the §3.2.2/§3.2.4 ClassANY forms: "name is in
-// use" (TypeANY) or "this RRset exists" (any other type).
+// checkPrereqExists implements §3.2.1, the ClassANY forms: "name is in use"
+// (§2.4.4, TypeANY) or "RRset exists (value independent)" (§2.4.1, any other
+// type).
 func (d *DynUpdate) checkPrereqExists(h *dns.RR_Header) int {
 	if h.Rdlength != 0 {
 		return dns.RcodeFormatError
@@ -153,8 +161,8 @@ func (d *DynUpdate) checkPrereqExists(h *dns.RR_Header) int {
 	return rcodeNoVerdict
 }
 
-// checkPrereqAbsent implements the §3.2.1/§3.2.5 ClassNONE forms: "name is
-// not in use" (TypeANY) or "this RRset does not exist" (any other type).
+// checkPrereqAbsent implements §3.2.2, the ClassNONE forms: "name is not in
+// use" (§2.4.5, TypeANY) or "RRset does not exist" (§2.4.3, any other type).
 func (d *DynUpdate) checkPrereqAbsent(h *dns.RR_Header) int {
 	if h.Rdlength != 0 {
 		return dns.RcodeFormatError
@@ -184,28 +192,32 @@ func (d *DynUpdate) prescan(updates []dns.RR) int {
 }
 
 // prescanRecord applies §3.4.1 to a single update record.
+//
+//nolint:misspell // RFC 2136 §3.4.1.2 is quoted verbatim, in its US spelling.
 func (d *DynUpdate) prescanRecord(h *dns.RR_Header) int {
 	if !d.inZone(h.Name) {
 		return dns.RcodeNotZone
 	}
-	// Meta-types are queries, not records; none of them can appear in an
-	// update section in any class.
+	// RFC 2136 §3.4.1.2: "For RRs whose CLASS is not ANY, check the TYPE
+	// and if it is ANY, AXFR, MAILA, MAILB, or any other QUERY metatype, or
+	// any unrecognized type, then signal FORMERR", and for CLASS ANY the
+	// TYPE must not be "any other QUERY metatype besides ANY, or any
+	// unrecognized type". TSIG and TKEY are meta-types too (RFC 6895 §3.1:
+	// 128-255 are "Q and Meta-TYPEs"), so a TSIG record in the update
+	// section is rejected here rather than added to the zone.
 	deleteEverythingAtName := h.Class == dns.ClassANY && h.Rrtype == dns.TypeANY
-	if isMetaType(h.Rrtype) && !deleteEverythingAtName {
+	if !deleteEverythingAtName && !isUpdatableType(h.Rrtype) {
 		return dns.RcodeFormatError
 	}
 
 	switch h.Class {
 	case dns.ClassINET:
-		if h.Rrtype == dns.TypeANY {
-			return dns.RcodeFormatError
-		}
 	case dns.ClassANY:
 		if h.Ttl != 0 || h.Rdlength != 0 {
 			return dns.RcodeFormatError
 		}
 	case dns.ClassNONE:
-		if h.Ttl != 0 || h.Rrtype == dns.TypeANY {
+		if h.Ttl != 0 {
 			return dns.RcodeFormatError
 		}
 	default:
@@ -216,7 +228,13 @@ func (d *DynUpdate) prescanRecord(h *dns.RR_Header) int {
 	// rejects the whole update rather than letting part of it land. An
 	// UPDATE key that only needs to publish ACME challenges should not be
 	// able to repoint an A record, and TSIG cannot express that.
-	if d.mutable != nil && h.Rrtype != dns.TypeANY && !d.mutable[h.Rrtype] {
+	//
+	// "Delete all RRsets from a name" (§2.5.3) names no type, so under a
+	// type allowlist it is refused outright: it would otherwise delete the
+	// A, AAAA and MX records a TXT-only key must not touch. RFC 3007 §3
+	// leaves this to policy, which "dictates the authorized actions that an
+	// authenticated principal can take".
+	if d.mutable != nil && (deleteEverythingAtName || !d.mutable[h.Rrtype]) {
 		log.Warningf("UPDATE for %s rejected: type %s is not in the mutable set",
 			h.Name, dns.TypeToString[h.Rrtype])
 		return dns.RcodeRefused
@@ -245,7 +263,7 @@ func (d *DynUpdate) apply(updates []dns.RR) ([]dns.RR, bool) {
 
 		switch h.Class {
 		case dns.ClassINET:
-			out, changed = applyAdd(out, changed, rr, h, name)
+			out, changed = applyAdd(out, changed, rr, h, name, apex)
 		case dns.ClassANY:
 			out, changed = applyDeleteRRset(out, changed, h, name, apex)
 		case dns.ClassNONE:
@@ -256,38 +274,58 @@ func (d *DynUpdate) apply(updates []dns.RR) ([]dns.RR, bool) {
 	return out, changed
 }
 
-// applyAdd implements the ClassINET (add) form of §3.4.2.3: SOA serial
+// applyAdd implements the ClassINET (add) form of §3.4.2.2: SOA serial
 // gating, CNAME exclusivity in both directions, and TTL-only update of an
 // already-present record.
-func applyAdd(out []dns.RR, changed bool, rr dns.RR, h *dns.RR_Header, name string) ([]dns.RR, bool) {
+//
+// SOA and CNAME are singletons, and §3.4.2.2 says so: an accepted SOA or
+// CNAME update REPLACES the zone's, it does not join it. Appending instead
+// left two SOAs (the view serves the last one inserted while bumpSerial
+// advances the first, so the served serial froze and secondaries stopped
+// transferring) or two CNAMEs at one name. See
+// verification/lean/CorednsPlugins/DynUpdate.lean.
+func applyAdd(out []dns.RR, changed bool, rr dns.RR, h *dns.RR_Header, name string, apex bool) ([]dns.RR, bool) {
 	// SOA is special: an added SOA only takes effect if its serial is
 	// greater than the current one, so a stale updater cannot wind the
-	// zone backwards.
+	// zone backwards. A zone has one SOA, at its apex; one sent for any
+	// other name has nothing to replace.
 	if h.Rrtype == dns.TypeSOA {
 		cur := soaOf(out)
 		newSOA, ok := rr.(*dns.SOA)
-		if !ok || cur == nil || !serialGreater(newSOA.Serial, cur.Serial) {
+		if !ok || !apex || cur == nil || !serialGreater(newSOA.Serial, cur.Serial) {
 			return out, changed
 		}
+		out, _ = deleteWhere(out, changed, func(x dns.RR) bool { return x.Header().Rrtype == dns.TypeSOA })
+		return append(out, dns.Copy(rr)), true
 	}
 	// CNAME exclusivity, both directions. Silently ignored rather than
-	// rejected, per §3.4.2.3.
+	// rejected, per §3.4.2.2.
 	if h.Rrtype == dns.TypeCNAME && hasNonCNAME(out, name) {
 		return out, changed
 	}
-	if h.Rrtype != dns.TypeCNAME && h.Rrtype != dns.TypeSOA && hasCNAME(out, name) {
+	if h.Rrtype != dns.TypeCNAME && hasCNAME(out, name) {
 		return out, changed
 	}
 
 	if i := indexOfRR(out, rr); i >= 0 {
-		// Identical record already present: only the TTL is updated.
+		// Identical record already present: only the TTL is updated. On a
+		// copy: out shares its records with d.rrs, and a write through
+		// out[i] would land in the live zone even if the rebuild below
+		// then fails and the client is told SERVFAIL.
 		if out[i].Header().Ttl != h.Ttl {
+			out[i] = dns.Copy(out[i])
 			out[i].Header().Ttl = h.Ttl
 			changed = true
 		}
 		return out, changed
 	}
 
+	if h.Rrtype == dns.TypeCNAME {
+		// "otherwise replace the CNAME Zone RR with the CNAME Update RR".
+		out, _ = deleteWhere(out, changed, func(x dns.RR) bool {
+			return sameName(x, name) && x.Header().Rrtype == dns.TypeCNAME
+		})
+	}
 	return append(out, dns.Copy(rr)), true
 }
 

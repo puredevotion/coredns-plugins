@@ -33,6 +33,11 @@ const (
 // PEM bytes, not files, and runs against *testing.F not *testing.T) can reuse
 // the same well-formed generation logic instead of duplicating it.
 func generateSeedCertPEM(sans ...string) (certPEM, keyPEM []byte) {
+	return generateCertPEM(sans, nil)
+}
+
+// generateCertPEM is generateSeedCertPEM with IP-address SANs as well.
+func generateCertPEM(sans []string, ips []net.IP) (certPEM, keyPEM []byte) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		panic("generateSeedCertPEM: GenerateKey: " + err.Error())
@@ -46,6 +51,7 @@ func generateSeedCertPEM(sans ...string) (certPEM, keyPEM []byte) {
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		DNSNames:     sans,
+		IPAddresses:  ips,
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
@@ -69,7 +75,20 @@ func generateSeedCertPEM(sans ...string) (certPEM, keyPEM []byte) {
 func writeTestCert(t *testing.T, cn string, sans ...string) (certPath, keyPath string) {
 	t.Helper()
 
-	certPEM, keyPEM := generateSeedCertPEM(sans...)
+	return writeCertFiles(t, cn, sans, nil)
+}
+
+// writeIPCert is writeTestCert for a cert whose only SANs are IP addresses,
+// the kind RFC 9462 §4.2 verified discovery wants served without SNI.
+func writeIPCert(t *testing.T, cn string, ips ...net.IP) (certPath, keyPath string) {
+	t.Helper()
+	return writeCertFiles(t, cn, nil, ips)
+}
+
+func writeCertFiles(t *testing.T, cn string, sans []string, ips []net.IP) (certPath, keyPath string) {
+	t.Helper()
+
+	certPEM, keyPEM := generateCertPEM(sans, ips)
 
 	dir := t.TempDir()
 	certPath = filepath.Join(dir, cn+"-cert.pem")
@@ -86,9 +105,9 @@ func writeTestCert(t *testing.T, cn string, sans ...string) (certPath, keyPath s
 }
 
 // writeNoSANCert generates a self-signed cert with no SAN DNS names at all
-// (CN only) — covers the RFC 6125 §6.4.4 rule that CN-only matching is
-// deprecated and modern validators (and this plugin) must key strictly off
-// SANs, so such a cert should be rejected by loadCert.
+// (CN only) — RFC 9525 Appendix A: "it is no longer valid to use the
+// commonName RDN" as an identifier, so validators (and this plugin) key
+// strictly off SANs and such a cert must be rejected by loadCert.
 func writeNoSANCert(t *testing.T) (certPath, keyPath string) {
 	t.Helper()
 	return writeTestCert(t, "no-san-cn") // DNSNames left empty.

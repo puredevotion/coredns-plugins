@@ -29,7 +29,7 @@ func setup(c *caddy.Controller) error {
 		return fmt.Errorf("validate config: %w", plugin.Error(pluginName, err))
 	}
 
-	r := &RADNR{Cfg: cfg}
+	r := &RADNR{Cfg: cfg, owner: c.Context()}
 	c.OnStartup(r.OnStartup)
 	c.OnRestart(r.OnShutdown)
 	c.OnFinalShutdown(r.OnShutdown)

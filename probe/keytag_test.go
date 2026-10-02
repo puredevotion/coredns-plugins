@@ -1,19 +1,24 @@
 package probe
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/coredns/coredns/plugin/pkg/dnstest"
+	"github.com/coredns/coredns/plugin/test"
 	"github.com/miekg/dns"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 )
 
-// TestParseKeyTagQueryRFCExamples uses RFC 8145 §5.2's own worked examples. Key
+// TestParseKeyTagQueryRFCExamples uses RFC 8145 §5.1's own worked examples. Key
 // tags are HEXADECIMAL and zero-padded to four digits — the natural wrong guess
 // is decimal, and it would parse a lot of names into confidently wrong numbers.
 func TestParseKeyTagQueryRFCExamples(t *testing.T) {
-	// RFC 8145 §5.2: root key tag 17476 decimal = 0x4444.
+	// RFC 8145 §5.1: root key tag 17476 decimal = 0x4444.
 	tags, err := ParseKeyTagQuery("_ta-4444")
 	if err != nil {
 		t.Fatalf("ParseKeyTagQuery: %v", err)
@@ -25,7 +30,7 @@ func TestParseKeyTagQueryRFCExamples(t *testing.T) {
 		t.Errorf("tag decoded as %d, want 17476 — hex, not decimal", tags[0])
 	}
 
-	// RFC 8145 §5.2: 1589, 43547, 31406 decimal for example.com.
+	// RFC 8145 §5.1: 1589, 43547, 31406 decimal for example.com.
 	tags, err = ParseKeyTagQuery("_ta-0635-7aae-aa1b")
 	if err != nil {
 		t.Fatalf("ParseKeyTagQuery: %v", err)
@@ -45,7 +50,7 @@ func TestParseKeyTagQueryRFCExamples(t *testing.T) {
 	}
 }
 
-// TestParseKeyTagQueryRejectsUnpadded — RFC 8145 §5.2 says values MUST be
+// TestParseKeyTagQueryRejectsUnpadded — RFC 8145 §5.1 says values MUST be
 // zero-padded to four hex digits. Accepting "635" as 0x0635 would silently
 // normalise away a real implementation bug, which is the opposite of what a
 // measurement zone is for.
@@ -86,7 +91,7 @@ func TestParseKeyTagQueryRejectsHostileInput(t *testing.T) {
 	}
 }
 
-// TestKeyTagSortConformanceIsRecordedNotFixed — RFC 8145 §5.2 requires
+// TestKeyTagSortConformanceIsRecordedNotFixed — RFC 8145 §5.1 requires
 // smallest-to-largest. A sender that gets it wrong is a finding, so the parser
 // preserves arrival order and sortedness is reported separately.
 func TestKeyTagSortConformanceIsRecordedNotFixed(t *testing.T) {
@@ -258,4 +263,100 @@ func TestKnowsZoneKeyRequiresASignal(t *testing.T) {
 func observeFromMsg(t *testing.T, m *dns.Msg) Observation {
 	t.Helper()
 	return observeWith(t, m)
+}
+
+// keyTagOpt builds one edns-key-tag option instance carrying tags.
+func keyTagOpt(tags ...uint16) *dns.EDNS0_LOCAL {
+	data := make([]byte, 0, 2*len(tags))
+	for _, tag := range tags {
+		data = binary.BigEndian.AppendUint16(data, tag)
+	}
+	return &dns.EDNS0_LOCAL{Code: ednsKeyTagOption, Data: data}
+}
+
+// RFC 8145 §4.2.2.1: a recursive resolver forwarding a client's list "SHOULD
+// transmit the two Key Tag lists using separate instances of the
+// edns-key-tag option code". Only the last instance used to be kept.
+func TestObserveKeepsEveryEDNSKeyTagInstance(t *testing.T) {
+	o := newOpt()
+	o.Option = append(o.Option,
+		keyTagOpt(19036, 12345),
+		&dns.EDNS0_LOCAL{Code: ednsKeyTagOption, Data: []byte{0x44}}, // Malformed; must not discard the others.
+		keyTagOpt(19036, 34567))
+	obs := observeWith(t, ednsQuery(o))
+	want := []uint16{19036, 12345, 19036, 34567}
+	if !slices.Equal(obs.KeyTags, want) {
+		t.Errorf("KeyTags = %v, want %v", obs.KeyTags, want)
+	}
+}
+
+// RFC 8145 §4.2: "A validating resolver sets the edns-key-tag option in the
+// OPT RR when sending a DNSKEY query", which goes to the apex. The apex never
+// looked at it, so the conforming case was the one never recorded.
+func TestApexDNSKEYQueryCountsEDNSKeyTags(t *testing.T) {
+	p := newTestProbe(t, true)
+	ours := p.Signer.DNSKEY().KeyTag()
+	counter := probeKeyTagKnowledge.WithLabelValues("dnskey", labelYes)
+	before := testutil.ToFloat64(counter)
+
+	m := new(dns.Msg)
+	m.SetQuestion(testZone, dns.TypeDNSKEY)
+	m.SetEdns0(1232, true)
+	m.IsEdns0().Option = append(m.IsEdns0().Option, keyTagOpt(ours))
+	rec := dnstest.NewRecorder(&test.ResponseWriter{})
+	if _, err := p.ServeDNS(context.Background(), rec, m); err != nil {
+		t.Fatalf("ServeDNS: %v", err)
+	}
+	if rec.Msg == nil || len(rec.Msg.Answer) == 0 {
+		t.Fatal("apex DNSKEY query was not answered")
+	}
+	if got := testutil.ToFloat64(counter) - before; got != 1 {
+		t.Errorf("dnskey/yes counter moved by %v, want 1", got)
+	}
+
+	// No option, no count: silence is not a statement about keys.
+	before = testutil.ToFloat64(counter)
+	query(t, p, testZone, dns.TypeDNSKEY, true)
+	if got := testutil.ToFloat64(counter) - before; got != 0 {
+		t.Errorf("a DNSKEY query without option 14 was counted (%v)", got)
+	}
+}
+
+// RFC 8145 §5.1: "A Key Tag query consists of a standard DNS query of type
+// NULL and of class IN". A `_ta-` name asked for any other type is answered
+// the same way but is not a trust-anchor signal, and used to be counted.
+func TestKeyTagQueryCountedOnlyForNULL(t *testing.T) {
+	p := newTestProbe(t, true)
+	counter := probeKeyTagQueries.WithLabelValues("sorted")
+
+	before := testutil.ToFloat64(counter)
+	m := query(t, p, "_ta-4444."+testZone, dns.TypeA, false)
+	if m.Rcode != dns.RcodeSuccess || len(m.Answer) != 0 {
+		t.Errorf("A at a _ta- name: rcode %s with %d answers, want NODATA", dns.RcodeToString[m.Rcode], len(m.Answer))
+	}
+	if got := testutil.ToFloat64(counter) - before; got != 0 {
+		t.Errorf("an A query at a _ta- name was counted as a Key Tag query (%v)", got)
+	}
+
+	before = testutil.ToFloat64(counter)
+	query(t, p, "_ta-4444."+testZone, dns.TypeNULL, false)
+	if got := testutil.ToFloat64(counter) - before; got != 1 {
+		t.Errorf("a NULL Key Tag query moved the counter by %v, want 1", got)
+	}
+
+	malformed := probeKeyTagQueries.WithLabelValues("malformed")
+	before = testutil.ToFloat64(malformed)
+	query(t, p, "_ta-zzzz."+testZone, dns.TypeA, false)
+	if got := testutil.ToFloat64(malformed) - before; got != 0 {
+		t.Errorf("an A query at a malformed _ta- name was counted (%v)", got)
+	}
+}
+
+// The prefix folds case in ASCII, as DNS names do (RFC 4343 §3). No
+// non-ASCII rune lower-cases to "t" or "a", so the old Unicode fold could
+// not misfire here; this only guards the ASCII behaviour.
+func TestParseKeyTagQueryPrefixIsCaseInsensitive(t *testing.T) {
+	if tags, err := ParseKeyTagQuery("_TA-4444"); err != nil || !slices.Equal(tags, []uint16{0x4444}) {
+		t.Errorf("_TA-4444: got (%v, %v), want [0x4444]", tags, err)
+	}
 }

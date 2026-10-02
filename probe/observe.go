@@ -241,21 +241,16 @@ func applyEDNSObservation(obs *Observation, opt *dns.OPT) {
 	obs.CompactAware = opt.Hdr.Ttl&coFlag != 0
 	obs.DELEGAware = opt.Hdr.Ttl&deFlag != 0
 
+	// RFC 8145 option 14 has no type in miekg/dns and arrives as an
+	// EDNS0_LOCAL; see ednsKeyTags.
+	obs.KeyTags = ednsKeyTags(opt)
+
 	for _, o := range opt.Option {
 		switch v := o.(type) {
 		case *dns.EDNS0_COOKIE:
 			obs.Cookie = true
 		case *dns.EDNS0_ZONEVERSION:
 			obs.ZoneVersionAsked = true
-		case *dns.EDNS0_LOCAL:
-			// RFC 8145 option 14 has no type in miekg/dns, so it lands here.
-			// Decoded rather than ignored; a malformed payload records
-			// nothing rather than a truncated tag list.
-			if v.Code == ednsKeyTagOption {
-				if tags, ok := parseEDNSKeyTags(v.Data); ok {
-					obs.KeyTags = tags
-				}
-			}
 		case *dns.EDNS0_SUBNET:
 			applyECSObservation(obs, v)
 		}

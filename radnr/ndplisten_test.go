@@ -21,7 +21,7 @@ func TestNdpListen_UnknownInterface(t *testing.T) {
 }
 
 // TestNdpListen_RealRawSocket_RequiresPrivilege exercises the actual
-// ndp.Listen call for real rather than skipping: it accepts either a
+// dialNDP call for real rather than skipping: it accepts either a
 // genuine success (privileged runner) or a genuine permission error
 // (everyone else), so the attempt itself stays covered instead of assumed.
 func TestNdpListen_RealRawSocket_RequiresPrivilege(t *testing.T) {
@@ -30,20 +30,21 @@ func TestNdpListen_RealRawSocket_RequiresPrivilege(t *testing.T) {
 		t.Skipf("no interface with a link-local IPv6 address available to test against: %v", err)
 	}
 
-	conn, addr, err := ndp.Listen(ifi, ndp.LinkLocal)
+	conn, err := dialNDP(ifi, ndp.LinkLocal)
 	if err != nil {
-		t.Logf("ndp.Listen on %q failed as expected without CAP_NET_RAW (uid=%d): %v", ifi.Name, os.Getuid(), err)
+		t.Logf("dialNDP on %q failed as expected without CAP_NET_RAW (uid=%d): %v", ifi.Name, os.Getuid(), err)
 		return
 	}
 	// Only reachable when actually running privileged (e.g. root in CI with
-	// NET_RAW granted): prove the conn this plugin would really use works.
+	// NET_RAW granted): the socket opened, joined ff02::2 and enabled hop
+	// limit control messages, which is the conn this plugin really uses.
 	defer func() {
 		if err := conn.Close(); err != nil {
 			t.Logf("conn.Close: %v", err)
 		}
 	}()
-	if !addr.IsValid() {
-		t.Fatal("ndp.Listen returned an invalid link-local address")
+	if _, ok := conn.(*routerConn); !ok {
+		t.Fatalf("dialNDP returned %T, want *routerConn", conn)
 	}
 }
 
@@ -84,7 +85,7 @@ func TestNdpListen_StubbedSuccess(t *testing.T) {
 		if addr != ndp.LinkLocal {
 			t.Fatalf("dialNDP called with unexpected addr %v", addr)
 		}
-		return nopConn{}, nil
+		return newNopConn(), nil
 	}
 
 	conn, err := ndpListen("lo")

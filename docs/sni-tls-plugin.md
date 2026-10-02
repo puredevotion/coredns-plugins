@@ -81,15 +81,18 @@ the *first-loaded* cert as a fallback — matching the stock `tls` plugin's
 SNI-agnostic single-cert behavior, so a single-cert deployment behaves
 exactly as it did before this plugin existed.
 
-That fallback becomes a real risk the moment an instance serves **more than
-one cert** and also serves RFC 9462 §4.2 *verified* DNS Designated Resolver
-(DDR) discovery for one of those names: verified discovery only holds if the
-cert returned for the DDR-advertised VIP carries that VIP's IP address as a
-SAN. A client that dials the right VIP but sends the wrong (or no) SNI — a
-bug, a stale cache, a misbehaving library, or someone probing the listener —
-would, under the default fallback, silently receive *some* cert. If that
-happens to be a cert without the expected IP-SAN, "verified" discovery
-completed against a cert that doesn't actually verify anything.
+That fallback matters the moment an instance serves **more than one cert**
+and also serves RFC 9462 §4.2 *verified* DNS Designated Resolver (DDR)
+discovery: "The client MUST verify that the certificate contains the IP
+address of the designating Unencrypted DNS Resolver in an iPAddress entry of
+the subjectAltName extension" — the address the client first asked, which
+§4.2 says still applies "Even when a different IP address is used for the
+connection". A client that sends the wrong (or no) SNI — a bug, a stale
+cache, a misbehaving library — would, under the default fallback, receive
+*some* cert. If that cert lacks the IP-SAN, the client's own check fails, and
+(§7) "the client MUST NOT automatically use the discovered Designated
+Resolver". The result is not a falsely verified connection; it is the client
+silently staying on (or falling back to) unencrypted DNS.
 
 This isn't hypothetical for this repo: `coredns-radnr`'s `539a57a` image
 rebuild was forced after this exact instance was found live serving a cert
@@ -113,16 +116,69 @@ tls://.:853 {
 }
 ```
 
-With `strict` set, `GetCertificate` never falls back: an unmatched or absent
-SNI returns an error instead of a cert, which makes Go's TLS server abort the
-handshake. The client sees a failed connection, not a wrongly-verified one —
-fail closed instead of fail silent. Exact and wildcard SNI matches are
+With `strict` set, `GetCertificate` never falls back: for an unmatched or
+absent SNI it returns no cert, and since the config carries no static
+`Certificates`, Go's TLS server aborts the handshake with a fatal
+`unrecognized_name(112)` alert, the one RFC 6066 §3 says a server that "does
+not recognize the server name" SHOULD send. The client sees a refused
+handshake instead of a silent downgrade. Exact and wildcard SNI matches are
 unaffected; `strict` only removes the guess-on-miss path.
 
-**Rule of thumb for this repo:** any instance serving more than one cert AND
-any verified-DDR VIP must set `strict`. A single-cert instance has no reason
-to (there's only ever one cert to serve regardless of SNI, so fallback vs.
-strict makes no observable difference — but strict is harmless there too).
+A client that sent no SNI at all and is refused gets `missing_extension(109)`
+instead over QUIC (DoQ, DoH3): RFC 8446 §9.2, "Servers requiring this
+extension SHOULD respond to a ClientHello lacking a "server_name" extension
+by terminating the connection with a "missing_extension" alert". Over TCP
+(DoT, DoH) it still gets `unrecognized_name`: crypto/tls sends every other
+`GetCertificate` error as `internal_error`, so 112 is the best a refusal can
+do there.
+
+### Clients without SNI: the `no_sni` option
+
+RFC 9462 §6.3: "resolvers that support discovery using IP addresses will
+need to be configured to present the appropriate TLS certificate when no
+SNI is present for DoT, DoQ, and DoH." A client that discovered this
+resolver by IP address may send no SNI at all, and on its own `strict`
+refuses it exactly as it refuses an unmatched name. `no_sni` decides that
+case separately, in the same block:
+
+| Setting | A ClientHello without SNI gets |
+|---|---|
+| *(unset)* | the same as an unmatched SNI: refused with `strict`, the fallback (first-loaded) cert without |
+| `no_sni refuse` | refused (`missing_extension` over QUIC, `unrecognized_name` over TCP), with or without `strict` |
+| `no_sni fallback` | the fallback (first-loaded) cert, with or without `strict` |
+| `no_sni cert <cert> <key>` | that cert, with or without `strict` |
+
+A client that sends SNI is not affected: it gets its exact or wildcard
+match, and if there is none, the fallback cert (non-strict) or a refusal
+(`strict`), under every `no_sni` setting.
+
+For a strict instance that is also discovered by IP:
+
+```
+tls://.:853 {
+  sni_tls /etc/coredns/tls/primary.crt   /etc/coredns/tls/primary.key
+  sni_tls /etc/coredns/tls/secondary.crt /etc/coredns/tls/secondary.key
+  sni_tls {
+    strict
+    no_sni cert /etc/coredns/tls/vip.crt /etc/coredns/tls/vip.key
+  }
+  forward . 127.0.0.1:53
+  cache 30
+  errors
+}
+```
+
+The `no_sni cert` is used only for clients without SNI. It is not keyed by
+its DNS names, and it may carry only IP-address SANs, which is what RFC
+9462 §4.2 verification looks for: "the IP address of the designating
+Unencrypted DNS Resolver in an iPAddress entry of the subjectAltName
+extension". It is polled and hot-reloaded like the other certs. If its files
+are missing, clients without SNI are refused until they appear; a present
+but broken pair fails setup. With `fallback` or `cert`, a warning is logged
+when the cert served without SNI has no IP-address SAN.
+
+A single-cert instance has no reason to set `strict`: there is only ever one
+cert to serve.
 
 ## Cert hot-reload (resolved)
 

@@ -1,8 +1,11 @@
 package snitls
 
 import (
+	"context"
 	ctls "crypto/tls"
 	"fmt"
+	"net"
+	"strings"
 	"testing"
 
 	"github.com/coredns/caddy"
@@ -157,8 +160,8 @@ func TestSetup_StrictBlock_RejectsUnmatchedSNI(t *testing.T) {
 	}
 
 	tlsConfig := dnsserver.GetConfig(c).TLSConfig
-	if _, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: "unmatched.example.org"}); err == nil {
-		t.Fatal("strict mode: expected unmatched SNI to be rejected, got a cert with no error")
+	if refused, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: "unmatched.example.org"}); refused != nil || err != nil {
+		t.Fatalf("strict mode: expected unmatched SNI to be refused with (nil, nil), got (%v, %v)", refused, err)
 	}
 	got, err := tlsConfig.GetCertificate(&ctls.ClientHelloInfo{ServerName: testSNIPrimary})
 	if err != nil || got == nil {
@@ -177,5 +180,53 @@ func TestSetup_RejectsDoubleTLSConfig(t *testing.T) {
 
 	if err := setup(c); err == nil {
 		t.Fatal("expected error when TLSConfig is already set, got nil")
+	}
+}
+
+// RFC 6066 §3: a server that "does not recognize the server name" SHOULD
+// abort with a fatal unrecognized_name(112) alert. Strict mode's refusal
+// used to be an error, which crypto/tls sends as internal_error(80).
+//
+//nolint:misspell // RFC 6066 §3 and crypto/tls's alert text are quoted verbatim, in US spelling.
+func TestSetup_StrictRefusalSendsUnrecognizedName(t *testing.T) {
+	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
+	c := caddy.NewTestController("dns", fmt.Sprintf("sni_tls %s %s\nsni_tls {\n  strict\n}", certPath, keyPath))
+	if err := setup(c); err != nil {
+		t.Fatalf("setup: %v", err)
+	}
+	serverConfig := dnsserver.GetConfig(c).TLSConfig
+
+	for _, tc := range []struct {
+		name    string
+		sni     string
+		version uint16
+	}{
+		{"TLS 1.2 unmatched SNI", testSNIUnknown, ctls.VersionTLS12},
+		{"TLS 1.3 unmatched SNI", testSNIUnknown, ctls.VersionTLS13},
+		{"TLS 1.3 absent SNI", "", ctls.VersionTLS13},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clientSide, serverSide := net.Pipe()
+			server := ctls.Server(serverSide, serverConfig)
+			serverDone := make(chan struct{})
+			go func() {
+				defer close(serverDone)
+				_ = server.HandshakeContext(context.Background()) //nolint:errcheck // The refusal is observed from the client side.
+				_ = server.Close()                                //nolint:errcheck // net.Pipe close cannot fail meaningfully here.
+			}()
+
+			client := ctls.Client(clientSide, &ctls.Config{
+				ServerName:         tc.sni,
+				MinVersion:         tc.version,
+				MaxVersion:         tc.version,
+				InsecureSkipVerify: true, //nolint:gosec // The handshake must be refused before any certificate is sent.
+			})
+			err := client.HandshakeContext(context.Background())
+			_ = client.Close() //nolint:errcheck // net.Pipe close cannot fail meaningfully here.
+			<-serverDone
+			if err == nil || !strings.Contains(err.Error(), "unrecognized name") {
+				t.Errorf("client handshake error = %v, want the unrecognized_name alert", err)
+			}
+		})
 	}
 }
