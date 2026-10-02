@@ -225,14 +225,80 @@ func TestAdvertise_ContextCancelClosesConn(t *testing.T) {
 	}
 }
 
-// withShrunkRateLimit shrinks the package's minDelayBetweenRAs for the
+// withShrunkRateLimit shrinks the package's minDelayBetweenRAs to d for the
 // duration of a test, restoring it afterward — real value is 3s (too slow to
-// wait out in a unit test).
+// wait out in a unit test) — and maxRADelay to a tenth of d, about the real
+// 3s : 0.5s ratio.
 func withShrunkRateLimit(t *testing.T, d time.Duration) {
 	t.Helper()
-	orig := minDelayBetweenRAs
-	minDelayBetweenRAs = d
-	t.Cleanup(func() { minDelayBetweenRAs = orig })
+	origMin, origDelay := minDelayBetweenRAs, maxRADelay
+	minDelayBetweenRAs, maxRADelay = d, d/10
+	t.Cleanup(func() { minDelayBetweenRAs, maxRADelay = origMin, origDelay })
+}
+
+// newTestSchedule is an raSchedule whose timer is far off, for driving its
+// rules directly.
+func newTestSchedule(lastSent time.Time) *raSchedule {
+	next := time.Now().Add(time.Hour)
+	return &raSchedule{timer: time.NewTimer(time.Hour), next: next, lastSent: lastSent}
+}
+
+// RFC 4861 §6.2.6: an RS outside the rate-limit window is answered after its
+// random delay, by moving the interval timer in.
+func TestSchedule_SolicitationAfterWindowUsesItsDelay(t *testing.T) {
+	withShrunkRateLimit(t, 3*time.Second)
+	s := newTestSchedule(time.Now().Add(-time.Minute))
+	defer s.timer.Stop()
+	before := time.Now()
+	s.onSolicitation(netip.MustParseAddr("fe80::1"), 200*time.Millisecond)
+	if d := s.next.Sub(before); d < 200*time.Millisecond || d > 250*time.Millisecond {
+		t.Errorf("answer scheduled %v after the RS, want its 200ms delay", d)
+	}
+}
+
+// RFC 4861 §6.2.6: inside the window, "MIN_DELAY_BETWEEN_RAS plus the random
+// value after the previous advertisement".
+func TestSchedule_SolicitationInWindowIsMinDelayPlusRandom(t *testing.T) {
+	withShrunkRateLimit(t, 3*time.Second)
+	last := time.Now()
+	s := newTestSchedule(last)
+	defer s.timer.Stop()
+	s.onSolicitation(netip.MustParseAddr("fe80::1"), 200*time.Millisecond)
+	if want := last.Add(3*time.Second + 200*time.Millisecond); !s.next.Equal(want) {
+		t.Errorf("answer scheduled at lastSent+%v, want lastSent+3.2s", s.next.Sub(last))
+	}
+}
+
+// RFC 4861 §6.2.6: a delay landing after the already-scheduled multicast RA
+// is ignored; that RA answers.
+func TestSchedule_SolicitationNeverDelaysTheScheduledRA(t *testing.T) {
+	withShrunkRateLimit(t, 3*time.Second)
+	s := newTestSchedule(time.Now().Add(-time.Minute))
+	defer s.timer.Stop()
+	scheduled := time.Now().Add(100 * time.Millisecond)
+	s.at(scheduled)
+	s.onSolicitation(netip.MustParseAddr("fe80::1"), 400*time.Millisecond)
+	if !s.next.Equal(scheduled) {
+		t.Errorf("the scheduled RA moved by %v", s.next.Sub(scheduled))
+	}
+}
+
+// RFC 4861 §6.2.6: after a multicast RA, solicited or not, "the interface's
+// interval timer is reset to a new random value, as if an unsolicited
+// advertisement had just been sent".
+func TestSchedule_EverySendResetsTheIntervalTimer(t *testing.T) {
+	withShrunkRateLimit(t, 3*time.Second)
+	s := newTestSchedule(time.Now().Add(-time.Minute))
+	defer s.timer.Stop()
+	sent := false
+	before := time.Now()
+	s.onTimer(func() { sent = true; s.lastSent = time.Now() }, 17*time.Second)
+	if !sent {
+		t.Fatal("no RA sent")
+	}
+	if d := s.next.Sub(before); d < 17*time.Second || d > 17*time.Second+50*time.Millisecond {
+		t.Errorf("timer re-armed %v ahead, want the fresh 17s interval", d)
+	}
 }
 
 // TestAdvertise_RouterSolicitationTriggersRA covers RFC 4861 §6.2.6: on

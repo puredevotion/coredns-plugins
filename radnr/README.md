@@ -14,12 +14,13 @@ handle DNS queries. It runs a background IPv6 Router Advertisement sender from
 authentication domain name (ADN) and connect over DoT/DoH/DoQ, validated by
 hostname PKIX — no per-device certificate install.
 
-Advertisements are both periodic (interval randomized per RFC 4861 §6.2.1, so
-multiple advertisers on a link don't stay synchronized) and solicited: a valid
-incoming Router Solicitation triggers an immediate RA, rate-limited to at most
-one send per 3s (`MIN_DELAY_BETWEEN_RAS`, RFC 4861 §6.2.6) regardless of
-trigger. A solicitation arriving inside that window is answered when it
-closes, not dropped, and a periodic RA due inside it waits too.
+Advertisements are both periodic (interval randomized per RFC 4861 §6.2.4, so
+multiple advertisers on a link don't stay synchronized) and solicited, per
+RFC 4861 §6.2.6: a valid incoming Router Solicitation is answered after a
+random delay of up to 0.5s (`MAX_RA_DELAY_TIME`), all RAs are rate-limited to
+at most one per 3s (`MIN_DELAY_BETWEEN_RAS`) regardless of trigger, a
+solicitation arriving inside that window is answered when it closes plus its
+random delay rather than dropped, and every RA resets the periodic timer.
 
 **SAFETY:** a second RA sender can disrupt LAN IPv6. *radnr* defaults to a
 non-default-router RA (RouterLifetime=0) and refuses to advertise prefixes. Use
