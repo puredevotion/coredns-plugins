@@ -52,38 +52,52 @@ below, neither of which was visible from the code's own comments.
 
 ### Where the time is now
 
-A signed answer is one ECDSA P-256 signature plus about 3 µs of everything
-else. `BenchmarkSignFloor` measures the signature alone over a digest; the
-only way below it is a different key algorithm (Ed25519 signs in roughly half
-the time), which is the operator's choice, not this plugin's.
+A signed answer is one ECDSA P-256 signature plus about 6 µs of everything
+else. `BenchmarkSignFloor` measures the signature alone over a digest, for
+the test key's algorithm and for Ed25519 beside it:
+
+| | per signature |
+|---|---|
+| ECDSA P-256 (the zone's key) | 38.8 µs |
+| Ed25519 | 20.6 µs |
+| signed A answer, end to end | 45.1 µs |
+
+The only way below the first line is the second one, and that is the
+operator's key choice, not this plugin's: an algorithm-15 key would take
+roughly 20 µs off every signed answer this zone gives.
 
 ### Results
 
+Baseline and final code measured back to back in one session, six runs each,
+nothing else on the machine:
+
 ```
-                              │    before    │              after               │
-                              │    sec/op    │    sec/op     vs base            │
-ParseQuery/baseline             46.16n ± 30%   34.46n ±  6%  -25.34% (p=0.002)
-ParseQuery/one-mod              76.25n ±  6%   50.27n ±  5%  -34.06% (p=0.002)
-ParseQuery/three-mods           149.8n ± 11%   107.8n ±  6%  -28.09% (p=0.002)
-ParseQuery/mixed-case           224.8n ±  4%   124.3n ± 26%  -44.71% (p=0.002)
-ParseQuery/refused              60.50n ±  7%   34.65n ±  7%  -42.74% (p=0.002)
-Observe                         250.8n ±  7%   130.9n ±  7%  -47.79% (p=0.002)
-Summary                         612.8n ±  5%   218.5n ±  5%  -64.34% (p=0.002)
-RecordMetrics                  288.70n ±  9%   86.64n ±  4%  -69.99% (p=0.002)
-SignRRset/correct               50.56µ ±  6%   46.87µ ±  7%   -7.29% (p=0.015)
-SignRRset/badsig                46.65µ ± 12%   45.85µ ±  3%        ~ (p=0.240)
-SignRRset/expired               47.94µ ±  5%   47.08µ ±  5%        ~ (p=0.394)
-MemStoreRecord/live=0           74.59n ± 11%   43.59n ± 17%  -41.57% (p=0.002)
-MemStoreRecord/live=1000     19598.50n ±  8%   46.53n ± 19%  -99.76% (p=0.002)
-MemStoreRecord/live=10000   189881.00n ± 16%   44.42n ± 35%  -99.98% (p=0.002)
-ServeDNS/A/unsigned             2.534µ ±  7%   1.733µ ± 12%  -31.61% (p=0.002)
-ServeDNS/A/signed               54.31µ ±  5%   48.06µ ±  4%  -11.50% (p=0.002)
-ServeDNS/TXT/signed             52.86µ ±  9%   50.56µ ±  9%        ~ (p=0.394)
-ServeDNS/TXT/big/signed         74.45µ ± 15%   56.77µ ±  4%  -23.75% (p=0.002)
-ServeDNS/nxname/signed         102.59µ ±  5%   52.43µ ±  8%  -48.89% (p=0.002)
-ServeDNS/refused                1.361µ ±  7%   1.154µ ±  7%  -15.18% (p=0.002)
-ServeDNS/not-our-zone           535.5n ± 37%   442.5n ± 10%  -17.36% (p=0.002)
-geomean                         2.569µ         902.6n        -64.87%
+                              │    before     │              after               │
+                              │    sec/op     │    sec/op     vs base            │
+ParseQuery/baseline             43.62n ±  5%   33.60n ±  9%  -22.95% (p=0.002)
+ParseQuery/one-mod              69.02n ±  2%   50.02n ±  2%  -27.52% (p=0.002)
+ParseQuery/three-mods           126.6n ±  2%   107.1n ±  5%  -15.44% (p=0.002)
+ParseQuery/mixed-case           210.4n ±  7%   119.3n ±  9%  -43.31% (p=0.002)
+ParseQuery/refused              53.68n ±  2%   34.47n ± 12%  -35.80% (p=0.002)
+Observe                         247.6n ±  4%   131.5n ± 12%  -46.88% (p=0.002)
+Summary                         582.1n ±  5%   203.0n ±  5%  -65.13% (p=0.002)
+RecordMetrics                  285.50n ±  5%   83.33n ±  4%  -70.81% (p=0.002)
+SignRRset/correct               41.78µ ±  3%   43.74µ ±  4%   +4.68% (p=0.009)
+SignRRset/badsig                44.04µ ±  6%   43.57µ ±  6%        ~ (p=0.937)
+SignRRset/expired-window        44.47µ ±  2%   43.94µ ±  6%        ~ (p=0.485)
+SignFloor/ecdsa-p256            38.77µ ±  5%   38.89µ ±  3%        ~ (p=1.000)
+SignFloor/ed25519               20.56µ ±  8%   21.06µ ± 13%        ~ (p=0.394)
+MemStoreRecord/live=0           74.87n ±  3%   42.62n ±  3%  -43.07% (p=0.002)
+MemStoreRecord/live=1000     19014.00n ±  2%   42.34n ±  6%  -99.78% (p=0.002)
+MemStoreRecord/live=10000   183101.50n ±  7%   41.88n ±  8%  -99.98% (p=0.002)
+ServeDNS/A/unsigned             2.374µ ±  4%   1.681µ ±  5%  -29.21% (p=0.002)
+ServeDNS/A/signed               46.75µ ±  4%   45.12µ ±  6%   -3.48% (p=0.026)
+ServeDNS/TXT/signed             49.04µ ±  6%   46.44µ ±  6%        ~ (p=0.093)
+ServeDNS/TXT/big/signed         55.03µ ±  4%   53.13µ ±  9%        ~ (p=0.132)
+ServeDNS/nxname/signed          96.41µ ±  3%   48.79µ ±  6%  -49.39% (p=0.002)
+ServeDNS/refused                1.343µ ±  5%   1.067µ ±  4%  -20.56% (p=0.002)
+ServeDNS/not-our-zone           539.1n ± 19%   373.4n ±  5%  -30.74% (p=0.002)
+geomean                         2.948µ         1.161µ        -60.61%
 
                               │   before    │             after              │
                               │  allocs/op  │ allocs/op   vs base            │
@@ -99,8 +113,13 @@ ServeDNS/nxname/signed          211.0 ± 0%     106.0 ± 0%   -49.76% (p=0.002)
 ServeDNS/refused                18.00 ± 0%     13.00 ± 0%   -27.78% (p=0.002)
 ```
 
+The signing rows read as unchanged because they are: `signRRset` is the
+signature plus ~5 µs, and the 8 allocations removed from it are a rounding
+error against the 83 that `crypto/ecdsa` and miekg/dns make. The win on
+signed answers is the `nxname` row, where the second signature is gone.
+
 The `MemStore` line is the one that matters operationally: at the ceiling a
-public zone can be driven to, the old store spent 190 µs per query inside the
+public zone can be driven to, the old store spent 183 µs per query inside the
 lock, which at a few thousand queries per second is most of a core and a
 serialisation point in front of every answer.
 
