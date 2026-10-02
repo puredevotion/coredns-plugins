@@ -41,10 +41,11 @@ func TestGetCertificate(t *testing.T) {
 	}
 }
 
-// TestGetCertificate_CaseInsensitive covers RFC 6066 §3: "'HostName' contains
-// the fully qualified DNS hostname … using ASCII or normalised form …
-// comparisons … are case-insensitive". A client sending mixed-case SNI must
-// still match the lowercased map key.
+// TestGetCertificate_CaseInsensitive covers RFC 6066 §3: "'HostName'
+// contains the fully qualified DNS hostname of the server, as understood by
+// the client. The hostname is represented as a byte string using ASCII
+// encoding without a trailing dot. ... DNS hostnames are case-insensitive."
+// A client sending mixed-case SNI must still match the lowercased map key.
 func TestGetCertificate_CaseInsensitive(t *testing.T) {
 	secondary := &tls.Certificate{}
 	store := &certStore{
@@ -123,6 +124,9 @@ func TestWildcardOf(t *testing.T) {
 		{"sevenwoods.nl", "*.nl", true},
 		{"nl", "", false}, // Truly single-label: no dot, no wildcard form.
 		{"", "", false},
+		// An empty leftmost label is not a label "*" can stand for.
+		{".sevenwoods.nl", "", false},
+		{".", "", false},
 	}
 	for _, tc := range tests {
 		got, ok := wildcardOf(tc.name)
@@ -133,6 +137,25 @@ func TestWildcardOf(t *testing.T) {
 }
 
 // --- certStore.GetCertificate: strict mode (no fallback) --------------------.
+
+// TestGetCertificate_Strict_EmptyLeftLabelIsNotAWildcardMatch: "*" stands
+// for one whole label, so SNI ".example.com" is not covered by
+// "*.example.com". Strict mode must refuse it, not serve the wildcard cert.
+func TestGetCertificate_Strict_EmptyLeftLabelIsNotAWildcardMatch(t *testing.T) {
+	wildcard := &tls.Certificate{}
+	store := &certStore{
+		byName:   map[string]*tls.Certificate{"*.example.com": wildcard},
+		fallback: wildcard,
+		strict:   true,
+	}
+
+	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: "host.example.com"}); err != nil || got != wildcard {
+		t.Fatalf("host.example.com: got (%v, %v), want the wildcard cert", got, err)
+	}
+	if got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: ".example.com"}); err == nil || got != nil {
+		t.Errorf(".example.com: got (%v, %v), want a strict-mode refusal", got, err)
+	}
+}
 
 // TestGetCertificate_Strict_RejectsUnmatchedOrAbsentSNI is the behaviour the
 // verified-DDR caveat in docs/sni-tls-plugin.md asks for: on an instance

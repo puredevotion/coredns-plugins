@@ -29,7 +29,7 @@ type certStore struct {
 var errNoMatchingCert = errors.New("sni_tls: no certificate configured for this SNI (strict mode, no fallback)")
 
 // GetCertificate implements the tls.Config.GetCertificate callback: look up the
-// client's requested SNI, then its RFC 6125 §6.4.3 single-level wildcard form
+// client's requested SNI, then its RFC 9525 §6.3 single-label wildcard form
 // (dns.sevenwoods.nl -> *.sevenwoods.nl) so a wildcard cert's SAN actually
 // gets selected for concrete hostnames under it -- caught live: a real LE
 // wildcard cert (*.sevenwoods.nl) loaded alongside a per-host cert silently
@@ -56,17 +56,20 @@ func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 	return s.fallback, nil
 }
 
-// wildcardOf returns name's RFC 6125 §6.4.3 single-level wildcard form (its
+// wildcardOf returns name's RFC 9525 §6.3 single-label wildcard form (its
 // leftmost label replaced with "*"), and whether name has enough labels for
 // that to be meaningful. A bare single-label name has no wildcard form --
 // *.example.com must not match example.com itself, matching how every TLS
 // client actually verifies wildcard certs. Multi-label names only get the
 // wildcard's own domain's protection: *.sevenwoods.nl matches
 // dns.sevenwoods.nl but not a.b.sevenwoods.nl (single wildcard level, not
-// suffix matching).
+// suffix matching). An empty leftmost label (".example.com") has no
+// wildcard form either: "*" stands for one whole label, and an empty string
+// is not one, so strict mode must refuse that SNI rather than serve the
+// wildcard cert for it.
 func wildcardOf(name string) (string, bool) {
 	i := strings.IndexByte(name, '.')
-	if i < 0 {
+	if i <= 0 {
 		return "", false
 	}
 	return "*" + name[i:], true
