@@ -4,9 +4,13 @@ package radnr
 import (
 	"context"
 	"errors"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
+
+	"github.com/mdlayher/ndp"
+	"golang.org/x/net/ipv6"
 
 	"github.com/puredevotion/coredns-plugins/radnr/internal/advertiser"
 	"github.com/puredevotion/coredns-plugins/radnr/internal/config"
@@ -256,7 +260,7 @@ func TestDial_RealPath_Injected(t *testing.T) {
 	cfg := validCfg()
 	cfg.DryRun = false
 
-	listenFn = func(string) (advertiser.Conn, error) { return nopConn{}, nil }
+	listenFn = func(string) (advertiser.Conn, error) { return newNopConn(), nil }
 	c, err := dial(&cfg)
 	if err != nil || c == nil {
 		t.Fatalf("dial via injected listener: c=%v err=%v", c, err)
@@ -271,23 +275,115 @@ func TestDial_RealPath_Injected(t *testing.T) {
 var errBoom = errors.New("boom")
 
 func TestNopConn_Methods(t *testing.T) {
-	var c nopConn
+	c := newNopConn()
 	if err := c.WriteTo(nil, nil, netip.MustParseAddr("ff02::1")); err != nil {
 		t.Fatalf("nopConn.WriteTo: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := c.ReadFrom()
+		done <- err
+	}()
+	select {
+	case <-done:
+		t.Fatal("nopConn.ReadFrom returned before Close")
+	case <-time.After(30 * time.Millisecond):
 	}
 	if err := c.Close(); err != nil {
 		t.Fatalf("nopConn.Close: %v", err)
 	}
-	// ReadFrom blocks forever by design; verify that in a goroutine that we cancel.
+	if err := c.Close(); err != nil {
+		t.Fatalf("second nopConn.Close: %v", err)
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, net.ErrClosed) {
+			t.Errorf("ReadFrom after Close = %v, want net.ErrClosed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("nopConn.ReadFrom still blocked after Close")
+	}
+}
+
+// A dry-run advertiser must stop when cancelled. The dry-run conn's ReadFrom
+// used to block forever, Run waits for its reader on shutdown, and so every
+// reload of a dry-run Corefile leaked two goroutines.
+func TestDryRunAdvertiserStopsOnCancel(t *testing.T) {
+	cfg := validCfg()
+	cfg.DryRun = true
+	a := &advertiser.Advertiser{Conn: newNopConn(), Cfg: cfg, Interval: time.Hour}
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		_, _, _, _ = c.ReadFrom() //nolint:errcheck // nopConn.ReadFrom blocks forever by design; this call never returns, so there is no error to check.
+		_ = a.Run(ctx) //nolint:errcheck // Run always returns ctx's error once cancelled; only its returning matters here.
 		close(done)
 	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
 	select {
 	case <-done:
-		t.Fatal("nopConn.ReadFrom should block, not return")
-	case <-time.After(30 * time.Millisecond):
-		// expected: still blocking
+	case <-time.After(time.Second):
+		t.Fatal("dry-run advertiser still running after cancel")
+	}
+}
+
+type fakeRouterSocket struct {
+	joinErr error
+	groups  []netip.Addr
+	flags   ipv6.ControlFlags
+}
+
+func (f *fakeRouterSocket) JoinGroup(g netip.Addr) error {
+	if f.joinErr != nil {
+		return f.joinErr
+	}
+	f.groups = append(f.groups, g)
+	return nil
+}
+
+func (f *fakeRouterSocket) SetControlMessage(cf ipv6.ControlFlags, on bool) error {
+	if on {
+		f.flags |= cf
+	}
+	return nil
+}
+
+// RFC 4861 §6.2.2: "A router MUST join the all-routers multicast address on
+// an advertising interface." The socket never joined it, so RSes sent to
+// ff02::2 reached it only if the kernel had joined for other reasons.
+func TestBecomeRouter_JoinsAllRoutersAndReadsHopLimit(t *testing.T) {
+	s := &fakeRouterSocket{}
+	if err := becomeRouter(s); err != nil {
+		t.Fatalf("becomeRouter: %v", err)
+	}
+	if len(s.groups) != 1 || s.groups[0] != netip.MustParseAddr("ff02::2") {
+		t.Errorf("joined %v, want [ff02::2]", s.groups)
+	}
+	if s.flags&ipv6.FlagHopLimit == 0 {
+		t.Error("hop limit control messages not enabled; §6.1.1 validation needs them")
+	}
+
+	if err := becomeRouter(&fakeRouterSocket{joinErr: errBoom}); !errors.Is(err, errBoom) {
+		t.Errorf("becomeRouter with a failing join = %v, want it to wrap errBoom", err)
+	}
+}
+
+// RFC 4861 §6.1.1: "ICMP Code is 0." ndp.ParseMessage does not check it.
+func TestParseNDP_RejectsNonZeroCode(t *testing.T) {
+	rs, err := ndp.MarshalMessage(&ndp.RouterSolicitation{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m, ok := parseNDP(rs); !ok {
+		t.Fatal("a valid RS was rejected")
+	} else if _, isRS := m.(*ndp.RouterSolicitation); !isRS {
+		t.Fatalf("parsed %T, want *ndp.RouterSolicitation", m)
+	}
+	rs[1] = 1
+	if _, ok := parseNDP(rs); ok {
+		t.Error("an RS with ICMP Code 1 was accepted")
+	}
+	if _, ok := parseNDP(rs[:1]); ok {
+		t.Error("a one-octet message was accepted")
 	}
 }

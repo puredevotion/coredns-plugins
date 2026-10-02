@@ -21,6 +21,10 @@ random delay of up to 0.5s (`MAX_RA_DELAY_TIME`), all RAs are rate-limited to
 at most one per 3s (`MIN_DELAY_BETWEEN_RAS`) regardless of trigger, a
 solicitation arriving inside that window is answered when it closes plus its
 random delay rather than dropped, and every RA resets the periodic timer.
+The socket joins the all-routers group `ff02::2` (RFC 4861 §6.2.2), where
+hosts send their solicitations, and an RS is "valid" in the §6.1.1 sense:
+hop limit 255, ICMP Code 0, and no source link-layer address option when
+sent from `::`. Anything else is silently discarded.
 
 **SAFETY:** a second RA sender can disrupt LAN IPv6. *radnr* defaults to a
 non-default-router RA (RouterLifetime=0) and refuses to advertise prefixes. Use

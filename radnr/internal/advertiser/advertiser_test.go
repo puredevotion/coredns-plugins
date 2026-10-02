@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,10 +15,13 @@ import (
 
 // fakeConn is an injected ndp transport for unit tests — no real socket.
 type fakeConn struct {
-	rsCh    chan struct{}
-	sendErr error
-	sent    []sent
-	closed  bool
+	sendErr  error
+	rsCh     chan struct{} // The test sends on it to inject an RS.
+	closedCh chan struct{} // Guarded by mu.
+	sent     []sent
+	hopLimit int // Hop limit each RS arrives with; 0 means a valid 255.
+	mu       sync.Mutex
+	closed   bool // Guarded by mu.
 }
 
 type sent struct {
@@ -34,18 +38,43 @@ func (f *fakeConn) WriteTo(m ndp.Message, _ *ipv6.ControlMessage, dst netip.Addr
 	return nil
 }
 
+// done returns a channel Close closes. The test's rsCh is never closed, so
+// a test injecting an RS cannot race a Close.
+func (f *fakeConn) done() <-chan struct{} {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.closedCh == nil {
+		f.closedCh = make(chan struct{})
+	}
+	return f.closedCh
+}
+
+func (f *fakeConn) isClosed() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.closed
+}
+
 func (f *fakeConn) ReadFrom() (ndp.Message, *ipv6.ControlMessage, netip.Addr, error) {
-	<-f.rsCh // Block until test injects an RS or Close unblocks it.
-	if f.closed {
+	select {
+	case <-f.rsCh: // The test injected an RS.
+	case <-f.done():
 		return nil, nil, netip.Addr{}, errors.New("fakeConn: closed")
 	}
-	return &ndp.RouterSolicitation{}, nil, netip.MustParseAddr("fe80::99"), nil
+	cm := &ipv6.ControlMessage{HopLimit: ndp.HopLimit}
+	if f.hopLimit != 0 {
+		cm.HopLimit = f.hopLimit
+	}
+	return &ndp.RouterSolicitation{}, cm, netip.MustParseAddr("fe80::99"), nil
 }
 
 func (f *fakeConn) Close() error {
+	f.done() // Make sure closedCh exists.
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	if !f.closed {
 		f.closed = true
-		close(f.rsCh)
+		close(f.closedCh)
 	}
 	return nil
 }
@@ -220,7 +249,7 @@ func TestAdvertise_ContextCancelClosesConn(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	expectRunDone(t, a.Run(ctx))
-	if !fc.closed {
+	if !fc.isClosed() {
 		t.Fatalf("Run must close the Conn on ctx cancellation")
 	}
 }
@@ -322,6 +351,53 @@ func TestAdvertise_RouterSolicitationTriggersRA(t *testing.T) {
 	<-done
 	if len(fc.sent) < 2 {
 		t.Fatalf("expected initial RA + solicited RA, got %d sends", len(fc.sent))
+	}
+}
+
+// RFC 4861 §6.1.1: a router "MUST silently discard" an RS whose hop limit is
+// not 255, since it could have been forwarded from off-link. Such RSes used
+// to be answered.
+func TestAdvertise_ForwardedSolicitationIsIgnored(t *testing.T) {
+	withShrunkRateLimit(t, 20*time.Millisecond)
+	fc := &fakeConn{rsCh: make(chan struct{}, 1), hopLimit: 64}
+	a := &Advertiser{Conn: fc, Cfg: baseCfg(), Interval: time.Hour}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() { expectRunDoneAsync(t, a.Run(ctx)); close(done) }()
+
+	time.Sleep(30 * time.Millisecond)
+	fc.rsCh <- struct{}{}
+	<-done
+	if len(fc.sent) != 1 {
+		t.Fatalf("got %d sends, want only the initial RA", len(fc.sent))
+	}
+}
+
+func TestValidSolicitation(t *testing.T) {
+	ll := netip.MustParseAddr("fe80::99")
+	withSLLA := &ndp.RouterSolicitation{Options: []ndp.Option{
+		&ndp.LinkLayerAddress{Direction: ndp.Source, Addr: []byte{2, 0, 0, 0, 0, 1}},
+	}}
+	tests := []struct {
+		from netip.Addr
+		m    *ndp.RouterSolicitation
+		cm   *ipv6.ControlMessage
+		name string
+		want bool
+	}{
+		{ll, &ndp.RouterSolicitation{}, &ipv6.ControlMessage{HopLimit: 255}, "on-link", true},
+		{ll, withSLLA, &ipv6.ControlMessage{HopLimit: 255}, "on-link with SLLA", true},
+		{ll, &ndp.RouterSolicitation{}, &ipv6.ControlMessage{HopLimit: 254}, "forwarded", false},
+		{ll, &ndp.RouterSolicitation{}, nil, "hop limit unknown", false},
+		{netip.IPv6Unspecified(), &ndp.RouterSolicitation{}, &ipv6.ControlMessage{HopLimit: 255}, "unspecified source", true},
+		{netip.IPv6Unspecified(), withSLLA, &ipv6.ControlMessage{HopLimit: 255}, "unspecified source with SLLA", false},
+	}
+	for _, tt := range tests {
+		if got := validSolicitation(tt.m, tt.cm, tt.from); got != tt.want {
+			t.Errorf("%s: validSolicitation = %v, want %v", tt.name, got, tt.want)
+		}
 	}
 }
 

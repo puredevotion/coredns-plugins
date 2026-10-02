@@ -141,11 +141,12 @@ func (a *Advertiser) nextInterval() time.Duration {
 func (a *Advertiser) readSolicitations(ctx context.Context, rs chan<- netip.Addr, rsDone chan<- struct{}) {
 	defer close(rsDone)
 	for {
-		m, _, from, err := a.Conn.ReadFrom()
+		m, cm, from, err := a.Conn.ReadFrom()
 		if err != nil {
 			return // Conn closed or ctx cancelled elsewhere.
 		}
-		if _, ok := m.(*ndp.RouterSolicitation); !ok {
+		solicitation, ok := m.(*ndp.RouterSolicitation)
+		if !ok || !validSolicitation(solicitation, cm, from) {
 			continue
 		}
 		select {
@@ -154,6 +155,31 @@ func (a *Advertiser) readSolicitations(ctx context.Context, rs chan<- netip.Addr
 			return
 		}
 	}
+}
+
+// validSolicitation applies the RFC 4861 §6.1.1 checks a parsed Router
+// Solicitation can still fail; a router "MUST silently discard" one that
+// fails any. The rest are done before the message gets here: the socket
+// verifies ICMPv6 checksums (ndp.Listen turns on IPV6_CHECKSUM), the conn
+// drops a non-zero ICMP Code, and ndp.ParseMessage rejects a short message
+// or a zero-length option.
+func validSolicitation(m *ndp.RouterSolicitation, cm *ipv6.ControlMessage, from netip.Addr) bool {
+	// "The IP Hop Limit field has a value of 255, i.e., the packet could not
+	// possibly have been forwarded by a router." Without the hop limit
+	// there is no way to tell, so a conn must report it.
+	if cm == nil || cm.HopLimit != ndp.HopLimit {
+		return false
+	}
+	// "If the IP source address is the unspecified address, there is no
+	// source link-layer address option in the message" (§6.1.1).
+	if from.IsUnspecified() {
+		for _, o := range m.Options {
+			if lla, ok := o.(*ndp.LinkLayerAddress); ok && lla.Direction == ndp.Source {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // raSchedule is the interface's interval timer (RFC 4861 §6.2.4). Every RA
