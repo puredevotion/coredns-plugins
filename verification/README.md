@@ -14,7 +14,7 @@ verification/run.sh apalache   # type checking, bounded model checking, inductiv
 verification/run.sh lean       # Lean (lake on PATH, toolchain in lean/lean-toolchain)
 ```
 
-`run.sh` fetches tla2tools.jar (1.8.0) and Apalache (0.62.3) at pinned,
+`run.sh` fetches tla2tools.jar (1.7.4) and Apalache (0.62.3) at pinned,
 checksummed versions; `TLA2TOOLS=` and `APALACHE=` point it at local copies.
 CI runs all of it in the `formal-verification` job. The Lean proofs use core Lean
 only, with no Mathlib, so they check offline from a bare toolchain.

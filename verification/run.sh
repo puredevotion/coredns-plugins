@@ -27,8 +27,11 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 what=${1:-all}
 
-TLA2TOOLS_VERSION=1.8.0
-TLA2TOOLS_SHA256=edee9330068fbb7be0bc9dc2bc928f5918a7635b5ee4da56dbb48556b7afa6a2
+# The latest stable TLA+ release. Not v1.8.0: that release's tla2tools.jar
+# is a nightly build of master, re-uploaded every day under the same URL, so
+# no checksum of it holds for long.
+TLA2TOOLS_VERSION=1.7.4
+TLA2TOOLS_SHA256=936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 APALACHE_VERSION=0.62.3
 APALACHE_SHA256=83ab873d4dc0f8b607aeea6df0bfebf604f90b4b39f2d464357125698970365c
 
@@ -74,7 +77,10 @@ check_sany() {
   local failed=0 spec out
   cd "$here/tla"
   for spec in *.tla; do
-    if out=$(java -cp "$TLA2TOOLS" tla2sany.SANY -error-codes "$spec" 2>&1); then
+    # SANY 1.7.x exits 0 even after semantic or level errors (1.8 added
+    # -error-codes for that), so its report decides too.
+    if out=$(java -cp "$TLA2TOOLS" tla2sany.SANY "$spec" 2>&1) &&
+      ! grep -qE '^Semantic errors:|^\*\*\* Errors:|Parse Error|^Fatal errors' <<<"$out"; then
       report "sany $spec" ok ok
     else
       report "sany $spec" error ok || failed=1
@@ -82,6 +88,14 @@ check_sany() {
     fi
   done
   return $failed
+}
+
+# only_temporal_property prints the config's PROPERTY when it lists exactly
+# one, on a single PROPERTY/PROPERTIES line, and fails otherwise.
+only_temporal_property() { # cfg
+  local names
+  names=$(sed -nE 's/^PROPERT(Y|IES)[[:space:]]+//p' "$1")
+  [[ $(grep -c . <<<"$names") -eq 1 && $names =~ ^[A-Za-z0-9_]+$ ]] && echo "$names"
 }
 
 check_tlc() {
@@ -92,12 +106,19 @@ check_tlc() {
   for cfg in *.cfg; do
     spec=${cfg%%_*}.tla
     expect=$(sed -n '1s/^\\\* expect: //p' "$cfg")
+    # No trace-spec flag: TLC 1.7.x writes SpecTE files only when asked
+    # (-generateSpecTE); 1.8 made that the default (-noGenerateSpecTE).
     out=$(java -XX:+UseParallelGC -cp "$TLA2TOOLS" tlc2.TLC -workers auto \
-      -noGenerateSpecTE -metadir "$meta/${cfg%.cfg}" -config "$cfg" "$spec" 2>&1) || true
+      -metadir "$meta/${cfg%.cfg}" -config "$cfg" "$spec" 2>&1) || true
     if grep -q "^Model checking completed. No error has been found." <<<"$out"; then
       got=pass
     elif prop=$(grep -oE "^Error: (Invariant|Action property|Temporal property) [A-Za-z0-9_]+ (is|was) violated" <<<"$out" |
                 head -1 | awk '{print $(NF-2)}') && [[ -n $prop ]]; then
+      got="violated $prop"
+    elif grep -q "^Error: Temporal properties were violated." <<<"$out" &&
+      prop=$(only_temporal_property "$cfg"); then
+      # TLC 1.7.x does not name the violated temporal property. With one
+      # PROPERTY in the config there is nothing else it can be.
       got="violated $prop"
     else
       got=error
