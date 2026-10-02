@@ -9,11 +9,11 @@ import (
 	"github.com/miekg/dns"
 )
 
-// TestParseKeyTagQueryRFCExamples uses RFC 8145 §5.2's own worked examples. Key
+// TestParseKeyTagQueryRFCExamples uses RFC 8145 §5.1's own worked examples. Key
 // tags are HEXADECIMAL and zero-padded to four digits — the natural wrong guess
 // is decimal, and it would parse a lot of names into confidently wrong numbers.
 func TestParseKeyTagQueryRFCExamples(t *testing.T) {
-	// RFC 8145 §5.2: root key tag 17476 decimal = 0x4444.
+	// RFC 8145 §5.1: root key tag 17476 decimal = 0x4444.
 	tags, err := ParseKeyTagQuery("_ta-4444")
 	if err != nil {
 		t.Fatalf("ParseKeyTagQuery: %v", err)
@@ -25,7 +25,7 @@ func TestParseKeyTagQueryRFCExamples(t *testing.T) {
 		t.Errorf("tag decoded as %d, want 17476 — hex, not decimal", tags[0])
 	}
 
-	// RFC 8145 §5.2: 1589, 43547, 31406 decimal for example.com.
+	// RFC 8145 §5.1: 1589, 43547, 31406 decimal for example.com.
 	tags, err = ParseKeyTagQuery("_ta-0635-7aae-aa1b")
 	if err != nil {
 		t.Fatalf("ParseKeyTagQuery: %v", err)
@@ -45,7 +45,7 @@ func TestParseKeyTagQueryRFCExamples(t *testing.T) {
 	}
 }
 
-// TestParseKeyTagQueryRejectsUnpadded — RFC 8145 §5.2 says values MUST be
+// TestParseKeyTagQueryRejectsUnpadded — RFC 8145 §5.1 says values MUST be
 // zero-padded to four hex digits. Accepting "635" as 0x0635 would silently
 // normalise away a real implementation bug, which is the opposite of what a
 // measurement zone is for.
@@ -86,7 +86,7 @@ func TestParseKeyTagQueryRejectsHostileInput(t *testing.T) {
 	}
 }
 
-// TestKeyTagSortConformanceIsRecordedNotFixed — RFC 8145 §5.2 requires
+// TestKeyTagSortConformanceIsRecordedNotFixed — RFC 8145 §5.1 requires
 // smallest-to-largest. A sender that gets it wrong is a finding, so the parser
 // preserves arrival order and sortedness is reported separately.
 func TestKeyTagSortConformanceIsRecordedNotFixed(t *testing.T) {

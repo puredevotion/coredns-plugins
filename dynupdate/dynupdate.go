@@ -26,9 +26,11 @@
 // The zone is kept as a flat []dns.RR. An UPDATE is applied to a COPY of that
 // slice, and only if every prerequisite passed and the whole update section
 // prescanned clean is a fresh file.Zone built from the result and swapped in
-// under a write lock. RFC 2136 §3.4.2.1 requires the update be atomic — a
-// reader must never observe half of it — and rebuilding is the cheapest way to
-// get that without reimplementing the tree's delete semantics.
+// under a write lock. RFC 2136 §3.7 requires the update be atomic — "a QUERY
+// should not be able to retrieve RRsets which have been partially modified" —
+// and §3.4.2.1 that a failure "undo all updates applied to the zone during
+// this transaction". Rebuilding is the cheapest way to get both without
+// reimplementing the tree's delete semantics.
 //
 // Rebuilding is O(zone) per update. That is a deliberate trade: this plugin
 // exists for ACME challenges and similar low-rate mutation, where correctness

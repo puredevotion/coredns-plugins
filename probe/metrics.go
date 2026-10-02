@@ -89,7 +89,7 @@ var (
 
 	// ProbeKeyTagQueries counts inbound RFC 8145 Key Tag queries.
 	//
-	// `state` records whether the sender honoured §5.2's smallest-to-largest sort
+	// `state` records whether the sender honoured §5.1's smallest-to-largest sort
 	// requirement, plus "malformed" for names shaped like a Key Tag query that
 	// were not one. Recording conformance rather than silently normalising it is
 	// the point — this zone exists to see what implementations actually do.
@@ -104,8 +104,9 @@ var (
 	// key was among the tags.
 	//
 	// `source` separates the two RFC 8145 mechanisms, which are not equally
-	// informative: "edns" (option 14, attached to any query — the half that
-	// actually produces data) and "query" (a `_ta-` Key Tag query, which only
+	// informative: "edns" (option 14; RFC 8145 §4.2 allows it only on DNSKEY
+	// queries, so on probe names it comes from senders that break that rule)
+	// and "query" (a `_ta-` Key Tag query, which only
 	// arrives if somebody pinned this zone as a configured trust anchor).
 	//
 	// `knows` is three-valued: "yes", "no", and "unknown" for when this zone has

@@ -147,12 +147,12 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return p.serveDNSSD(state, w, r, kind, token)
 	}
 
-	// RFC 8145 §5.2 Key Tag query, e.g. `_ta-0635-7aae.<zone>`. Handled before
+	// RFC 8145 §5.1 Key Tag query, e.g. `_ta-0635-7aae.<zone>`. Handled before
 	// ParseQuery, which would otherwise answer REFUSED — and REFUSED to a
 	// resolver reporting its trust anchors is both wrong per the RFC and a
 	// measurement thrown away.
 	//
-	// Expect approximately none of these: RFC 8145 §5.1 sends them to the apex of
+	// Expect approximately none of these: RFC 8145 §5.2 sends them to the apex of
 	// each CONFIGURED trust anchor, and this zone is nobody's configured anchor —
 	// it chains from root through a DS. Handled anyway because the case where one
 	// DOES arrive means somebody pinned this zone as an anchor, which is exactly
@@ -436,9 +436,14 @@ func (p *Probe) respondDNSSD(state *request.Request, w dns.ResponseWriter, r *dn
 //
 // RFC 8145 §5.3: "A server does not need to have built-in logic that determines
 // the response to Key Tag queries: the response code is determined by whether the
-// data is in the zone file or covered by wildcards." This zone is synthesised and
-// has no `_ta-*` records, so the correct answer is NODATA — NOERROR with an empty
-// answer and the SOA in authority — NOT NXDOMAIN and certainly not REFUSED.
+// data is in the zone file or covered by wildcards." A zone with no `_ta-*` names
+// at all would answer NXDOMAIN. This one is synthesised, so it chooses to treat
+// every well-formed Key Tag name as existing with no data, and answers NODATA —
+// NOERROR with an empty answer and the SOA in authority. §5.3.1 is why: "When the
+// response code for a Key Tag query is NXDOMAIN, DNS resolvers that implement
+// aggressive negative caching will send fewer Key Tag queries", and this zone
+// exists to receive them. Certainly not REFUSED: §5.3 says the server "MUST
+// generate an appropriate response".
 //
 // There is no token in a Key Tag query, so it cannot be correlated to a visitor
 // and nothing is written to the per-token store. It is counted instead, which is

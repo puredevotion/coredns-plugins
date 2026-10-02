@@ -112,7 +112,7 @@ func dialNoSNIStrict(t *testing.T, ln net.Listener) error {
 // Wildcard exercises that already, but only against the internal struct, and
 // never combined with strict). A concrete subdomain must still resolve via
 // the wildcard SAN; the bare domain itself must NOT match its own wildcard
-// (RFC 6125 §6.4.3) and, in strict mode, must hard-fail rather than fall
+// (RFC 9525 §6.3) and, in strict mode, must hard-fail rather than fall
 // back.
 func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 	const wildcardSAN = "*.sevenwoods.nl"

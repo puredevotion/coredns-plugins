@@ -81,15 +81,18 @@ the *first-loaded* cert as a fallback — matching the stock `tls` plugin's
 SNI-agnostic single-cert behavior, so a single-cert deployment behaves
 exactly as it did before this plugin existed.
 
-That fallback becomes a real risk the moment an instance serves **more than
-one cert** and also serves RFC 9462 §4.2 *verified* DNS Designated Resolver
-(DDR) discovery for one of those names: verified discovery only holds if the
-cert returned for the DDR-advertised VIP carries that VIP's IP address as a
-SAN. A client that dials the right VIP but sends the wrong (or no) SNI — a
-bug, a stale cache, a misbehaving library, or someone probing the listener —
-would, under the default fallback, silently receive *some* cert. If that
-happens to be a cert without the expected IP-SAN, "verified" discovery
-completed against a cert that doesn't actually verify anything.
+That fallback matters the moment an instance serves **more than one cert**
+and also serves RFC 9462 §4.2 *verified* DNS Designated Resolver (DDR)
+discovery: "The client MUST verify that the certificate contains the IP
+address of the designating Unencrypted DNS Resolver in an iPAddress entry of
+the subjectAltName extension" — the address the client first asked, which
+§4.2 says still applies "Even when a different IP address is used for the
+connection". A client that sends the wrong (or no) SNI — a bug, a stale
+cache, a misbehaving library — would, under the default fallback, receive
+*some* cert. If that cert lacks the IP-SAN, the client's own check fails, and
+(§7) "the client MUST NOT automatically use the discovered Designated
+Resolver". The result is not a falsely verified connection; it is the client
+silently staying on (or falling back to) unencrypted DNS.
 
 This isn't hypothetical for this repo: `coredns-radnr`'s `539a57a` image
 rebuild was forced after this exact instance was found live serving a cert
@@ -115,14 +118,20 @@ tls://.:853 {
 
 With `strict` set, `GetCertificate` never falls back: an unmatched or absent
 SNI returns an error instead of a cert, which makes Go's TLS server abort the
-handshake. The client sees a failed connection, not a wrongly-verified one —
-fail closed instead of fail silent. Exact and wildcard SNI matches are
-unaffected; `strict` only removes the guess-on-miss path.
+handshake. The client sees a failed connection instead of a silent
+downgrade. Exact and wildcard SNI matches are unaffected; `strict` only
+removes the guess-on-miss path.
 
-**Rule of thumb for this repo:** any instance serving more than one cert AND
-any verified-DDR VIP must set `strict`. A single-cert instance has no reason
-to (there's only ever one cert to serve regardless of SNI, so fallback vs.
-strict makes no observable difference — but strict is harmless there too).
+**Caution: `strict` conflicts with DDR by IP address.** RFC 9462 §6.3:
+"resolvers that support discovery using IP addresses will need to be
+configured to present the appropriate TLS certificate when no SNI is
+present for DoT, DoQ, and DoH." `strict` refuses exactly those clients,
+because it treats an absent SNI like an unmatched one. So `strict` suits an
+instance whose clients always send SNI, and is wrong for one that clients
+discover by IP. (Distinguishing the two — refusing an unmatched SNI but
+serving a configured no-SNI default — is an open design question; see
+verification/README.md.) A single-cert instance has no reason to set it:
+there is only ever one cert to serve.
 
 ## Cert hot-reload (resolved)
 

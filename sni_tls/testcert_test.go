@@ -86,9 +86,9 @@ func writeTestCert(t *testing.T, cn string, sans ...string) (certPath, keyPath s
 }
 
 // writeNoSANCert generates a self-signed cert with no SAN DNS names at all
-// (CN only) — covers the RFC 6125 §6.4.4 rule that CN-only matching is
-// deprecated and modern validators (and this plugin) must key strictly off
-// SANs, so such a cert should be rejected by loadCert.
+// (CN only) — RFC 9525 Appendix A: "it is no longer valid to use the
+// commonName RDN" as an identifier, so validators (and this plugin) key
+// strictly off SANs and such a cert must be rejected by loadCert.
 func writeNoSANCert(t *testing.T) (certPath, keyPath string) {
 	t.Helper()
 	return writeTestCert(t, "no-san-cn") // DNSNames left empty.
