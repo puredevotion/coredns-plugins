@@ -468,6 +468,71 @@ func TestMutableTypePolicy(t *testing.T) {
 	}
 }
 
+// "Delete all RRsets from a name" names no type, so a type allowlist cannot
+// admit it. It used to skip the allowlist check, so a TXT-only key could
+// wipe a name's A records.
+func TestMutableRefusesDeleteAllRRsetsAtName(t *testing.T) {
+	const www = "www.example.org."
+	d := newTestPlugin(t, map[uint16]bool{dns.TypeTXT: true})
+
+	wipe := &dns.ANY{Hdr: dns.RR_Header{Name: www, Rrtype: dns.TypeANY, Class: dns.ClassANY}}
+	if got := send(t, d, newUpdate(nil, []dns.RR{wipe})); got != dns.RcodeRefused {
+		t.Errorf("rcode = %s, want REFUSED", dns.RcodeToString[got])
+	}
+	if !d.rrsetExists(www, dns.TypeA) {
+		t.Error("a TXT-only key deleted www's A records")
+	}
+
+	// Without an allowlist the same update is an ordinary §2.5.3 delete.
+	open := newTestPlugin(t, nil)
+	if got := send(t, open, newUpdate(nil, []dns.RR{wipe})); got != dns.RcodeSuccess {
+		t.Errorf("unrestricted rcode = %s, want NOERROR", dns.RcodeToString[got])
+	}
+	if open.rrsetExists(www, dns.TypeA) {
+		t.Error("delete-all-RRsets left www's A records in place")
+	}
+}
+
+// RFC 2136 §3.4.1.2 rejects meta-types and unrecognized types in every class
+// but the one delete-all form. Only ANY, AXFR, IXFR, MAILA, MAILB and OPT
+// were caught, so a class-IN TSIG or TKEY record was added to the zone.
+func TestPrescanRejectsMetaAndUnknownTypes(t *testing.T) {
+	const name = "meta.example.org."
+	tsig := func(class uint16) dns.RR {
+		return &dns.TSIG{
+			Hdr:       dns.RR_Header{Name: name, Rrtype: dns.TypeTSIG, Class: class},
+			Algorithm: dns.HmacSHA256, Fudge: 300, MACSize: 0, OrigId: 1,
+		}
+	}
+	tkey := &dns.TKEY{
+		Hdr:       dns.RR_Header{Name: name, Rrtype: dns.TypeTKEY, Class: dns.ClassINET, Ttl: 300},
+		Algorithm: "gss-tsig.", Mode: 3,
+	}
+	tests := []struct {
+		rr   dns.RR
+		name string
+	}{
+		{tsig(dns.ClassINET), "TSIG added in class IN"},
+		{tsig(dns.ClassANY), "TSIG deleted in class ANY"},
+		{tkey, "TKEY added in class IN"},
+		{rr(t, name+` 300 IN TYPE200 \# 0`), "unassigned meta-type 200"},
+		{rr(t, name+` 300 IN TYPE65000 \# 2 abcd`), "unrecognized data type"},
+		{rr(t, name+` 300 IN TYPE0 \# 0`), "reserved type 0"},
+		{&dns.ANY{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeAXFR, Class: dns.ClassNONE}}, "AXFR deleted in class NONE"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := newTestPlugin(t, nil)
+			if got := send(t, d, newUpdate(nil, []dns.RR{tt.rr})); got != dns.RcodeFormatError {
+				t.Errorf("rcode = %s, want FORMERR", dns.RcodeToString[got])
+			}
+			if d.nameInUse(name) {
+				t.Errorf("a %s record was added to the zone", dns.TypeToString[tt.rr.Header().Rrtype])
+			}
+		})
+	}
+}
+
 func TestCNAMEExclusivity(t *testing.T) {
 	d := newTestPlugin(t, nil)
 

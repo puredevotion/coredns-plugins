@@ -30,7 +30,7 @@ Put *tsig* in the same server block with `require_opcode UPDATE`, so unsigned up
 
 ### Why `mutable` exists
 
-TSIG authenticates the sender; it cannot say what the sender is allowed to change. A key issued to an ACME client needs to publish TXT records under one name and nothing else, but a bare RFC 2136 grant lets it repoint your A records. `mutable` narrows that to a type list, checked during the prescan so a disallowed type rejects the whole update rather than letting part of it land.
+TSIG authenticates the sender; it cannot say what the sender is allowed to change. A key issued to an ACME client needs to publish TXT records under one name and nothing else, but a bare RFC 2136 grant lets it repoint your A records. `mutable` narrows that to a type list, checked during the prescan so a disallowed type rejects the whole update rather than letting part of it land. "Delete all RRsets from a name" (RFC 2136 §2.5.3) names no type, so under `mutable` it is refused outright: otherwise a TXT-only key could delete a name's A records.
 
 ## Syntax
 

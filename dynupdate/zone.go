@@ -188,12 +188,19 @@ func bumpSerial(rrs []dns.RR) {
 	}
 }
 
-func isMetaType(t uint16) bool {
-	switch t {
-	case dns.TypeANY, dns.TypeAXFR, dns.TypeIXFR, dns.TypeMAILA, dns.TypeMAILB, dns.TypeOPT:
-		return true
+// isUpdatableType reports whether an update record may carry type t, which
+// RFC 2136 §3.4.1.2 limits to recognised data types. Zero is reserved (RFC
+// 6895 §3.1), OPT is a pseudo-RR that belongs in a message's additional
+// data section (RFC 6891 §6.1.1), and 128-255 are "Q and Meta-TYPEs" (RFC 6895
+// §3.1): ANY, AXFR, IXFR, MAILA, MAILB, TSIG and TKEY among them.
+// "Recognised" means miekg/dns knows the type; an unknown one is RFC 3597
+// opaque data this plugin cannot validate.
+func isUpdatableType(t uint16) bool {
+	if t == 0 || t == dns.TypeOPT || (t >= 128 && t <= 255) {
+		return false
 	}
-	return false
+	_, known := dns.TypeToString[t]
+	return known
 }
 
 // reply sends the response to an UPDATE. RFC 2136 §3.8 allows either

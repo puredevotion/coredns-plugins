@@ -192,28 +192,32 @@ func (d *DynUpdate) prescan(updates []dns.RR) int {
 }
 
 // prescanRecord applies §3.4.1 to a single update record.
+//
+//nolint:misspell // RFC 2136 §3.4.1.2 is quoted verbatim, in its US spelling.
 func (d *DynUpdate) prescanRecord(h *dns.RR_Header) int {
 	if !d.inZone(h.Name) {
 		return dns.RcodeNotZone
 	}
-	// Meta-types are queries, not records; none of them can appear in an
-	// update section in any class.
+	// RFC 2136 §3.4.1.2: "For RRs whose CLASS is not ANY, check the TYPE
+	// and if it is ANY, AXFR, MAILA, MAILB, or any other QUERY metatype, or
+	// any unrecognized type, then signal FORMERR", and for CLASS ANY the
+	// TYPE must not be "any other QUERY metatype besides ANY, or any
+	// unrecognized type". TSIG and TKEY are meta-types too (RFC 6895 §3.1:
+	// 128-255 are "Q and Meta-TYPEs"), so a TSIG record in the update
+	// section is rejected here rather than added to the zone.
 	deleteEverythingAtName := h.Class == dns.ClassANY && h.Rrtype == dns.TypeANY
-	if isMetaType(h.Rrtype) && !deleteEverythingAtName {
+	if !deleteEverythingAtName && !isUpdatableType(h.Rrtype) {
 		return dns.RcodeFormatError
 	}
 
 	switch h.Class {
 	case dns.ClassINET:
-		if h.Rrtype == dns.TypeANY {
-			return dns.RcodeFormatError
-		}
 	case dns.ClassANY:
 		if h.Ttl != 0 || h.Rdlength != 0 {
 			return dns.RcodeFormatError
 		}
 	case dns.ClassNONE:
-		if h.Ttl != 0 || h.Rrtype == dns.TypeANY {
+		if h.Ttl != 0 {
 			return dns.RcodeFormatError
 		}
 	default:
@@ -224,7 +228,13 @@ func (d *DynUpdate) prescanRecord(h *dns.RR_Header) int {
 	// rejects the whole update rather than letting part of it land. An
 	// UPDATE key that only needs to publish ACME challenges should not be
 	// able to repoint an A record, and TSIG cannot express that.
-	if d.mutable != nil && h.Rrtype != dns.TypeANY && !d.mutable[h.Rrtype] {
+	//
+	// "Delete all RRsets from a name" (§2.5.3) names no type, so under a
+	// type allowlist it is refused outright: it would otherwise delete the
+	// A, AAAA and MX records a TXT-only key must not touch. RFC 3007 §3
+	// leaves this to policy, which "dictates the authorized actions that an
+	// authenticated principal can take".
+	if d.mutable != nil && (deleteEverythingAtName || !d.mutable[h.Rrtype]) {
 		log.Warningf("UPDATE for %s rejected: type %s is not in the mutable set",
 			h.Name, dns.TypeToString[h.Rrtype])
 		return dns.RcodeRefused
