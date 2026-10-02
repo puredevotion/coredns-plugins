@@ -1,5 +1,38 @@
 # Changelog
 
+## [0.5.0](https://github.com/puredevotion/coredns-plugins/compare/v0.4.1...v0.5.0) (2026-10-02)
+
+
+### Features
+
+* formal verification (TLA+, Lean) and the RFC fixes it found ([#49](https://github.com/puredevotion/coredns-plugins/issues/49)) ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **sni_tls:** no_sni option (refuse, fallback, or a dedicated cert) for clients without SNI ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+
+
+### Bug Fixes
+
+* **ci:** commit custom-gcl as a static binary, use it for lint ([#46](https://github.com/puredevotion/coredns-plugins/issues/46)) ([28b6a69](https://github.com/puredevotion/coredns-plugins/commit/28b6a69fc51bdc368758b2c7bb4ec3af0d5bb24b))
+* **ci:** force etcd client past CoreDNS-pinned CVE (GO-2026-6107) ([#48](https://github.com/puredevotion/coredns-plugins/issues/48)) ([f197900](https://github.com/puredevotion/coredns-plugins/commit/f197900a8c51113c9bd063cd612712f679ec9c76))
+* **dynupdate:** answer FORMERR for meta-types (TSIG, TKEY, 128-255) and unknown types in an update section ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **dynupdate:** don't bump a serial the UPDATE set itself, and never wrap it to 0 ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **dynupdate:** leave the zone untouched when an UPDATE fails with SERVFAIL ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **dynupdate:** refuse "delete all RRsets from a name" under mutable, which let a TXT-only key delete A/AAAA/MX records ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **dynupdate:** replace the SOA and CNAME on add instead of appending a second one ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **probe:** record RFC 8145 key tags on apex DNSKEY queries, keep every option-14 instance, count only NULL/IN Key Tag queries ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **radnr:** join ff02::2 and validate Router Solicitations per RFC 4861 §6.1.1 ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **radnr:** schedule and rate-limit RAs per RFC 4861 §6.2.6 ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **radnr:** stop the dry-run goroutine leak on reload ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **sni_tls,radnr:** stop goroutines orphaned or leaked by failed reloads ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **sni_tls:** an empty first label is not a wildcard match ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **sni_tls:** fold SNI in ASCII only, refuse with unrecognized_name, ignore invalid wildcard SANs ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **sni_tls:** send missing_extension to QUIC clients refused without SNI ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+* **sni_tls:** serialise cert reloads so an old certificate cannot stick ([5d65673](https://github.com/puredevotion/coredns-plugins/commit/5d656733b9a5addb6e9a7d4f26eea967cc8f5495))
+
+
+### Performance Improvements
+
+* benchmark the request paths and remove the per-query hot spots ([#50](https://github.com/puredevotion/coredns-plugins/issues/50)) ([86b818c](https://github.com/puredevotion/coredns-plugins/commit/86b818c6ada0959f723b7cde14e0605e3b6decbd))
+
 ## [0.4.1](https://github.com/puredevotion/coredns-plugins/compare/v0.4.0...v0.4.1) (2026-08-03)
 
 
