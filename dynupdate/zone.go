@@ -161,8 +161,9 @@ func serialGreater(a, b uint32) bool {
 	return a != b && ((a < b && b-a > 1<<31) || (a > b && a-b < 1<<31))
 }
 
-// bumpSerial advances the SOA after a successful change. RFC 2136 §3.6 leaves
-// this to the server; not doing it means a secondary compares serials, sees no
+// bumpSerial advances the SOA after a successful change that did not set the
+// serial itself. RFC 2136 §3.6: the server "shall increment it
+// automatically"; not doing it means a secondary compares serials, sees no
 // difference, and never transfers the change it was just NOTIFYed about.
 //
 // The SOA is replaced by an incremented copy rather than incremented in
@@ -170,12 +171,20 @@ func serialGreater(a, b uint32) bool {
 // in-place ++ would survive a failed rebuild.
 func bumpSerial(rrs []dns.RR) {
 	for i, rr := range rrs {
-		if soa, ok := rr.(*dns.SOA); ok {
-			next := *soa
-			next.Serial++
-			rrs[i] = &next
-			return
+		soa, ok := rr.(*dns.SOA)
+		if !ok {
+			continue
 		}
+		next := *soa
+		next.Serial++
+		if next.Serial == 0 {
+			// RFC 2136 §7.11: "if the result of the increment is zero (0)
+			// (as will be true when wrapping around 2**32), it is
+			// necessary to increment it again or set it to one (1)".
+			next.Serial = 1
+		}
+		rrs[i] = &next
+		return
 	}
 }
 
@@ -187,9 +196,11 @@ func isMetaType(t uint16) bool {
 	return false
 }
 
-// reply sends the response to an UPDATE. RFC 2136 §3.8 wants the request's
-// sections echoed; miekg's SetReply copies the Zone section, which is what a
-// client matches the response against.
+// reply sends the response to an UPDATE. RFC 2136 §3.8 allows either
+// "copying the ZOCOUNT, PRCOUNT, UPCOUNT, and ADCOUNT fields and associated
+// sections, or placing zeros (0) in the these "count" fields" (sic); miekg's
+// SetReply copies the Zone section only, as BIND does, which is what a client
+// matches the response against.
 func (d *DynUpdate) reply(w dns.ResponseWriter, r *dns.Msg, rcode int) (int, error) {
 	m := new(dns.Msg)
 	m.SetReply(r)

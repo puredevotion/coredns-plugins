@@ -515,17 +515,40 @@ func TestSOAAddReplacesAndSerialKeepsMoving(t *testing.T) {
 	if n := countSOAs(d); n != 1 {
 		t.Fatalf("zone has %d SOAs after an SOA update, want 1", n)
 	}
-	// The update itself is a change, so the serial is bumped past it.
-	if got := servedSerial(t, d); got != 501 {
-		t.Fatalf("served serial = %d, want 501", got)
+	// RFC 2136 §3.6: the update changed the serial itself, so the server
+	// does not increment it on top.
+	if got := servedSerial(t, d); got != 500 {
+		t.Fatalf("served serial = %d, want 500", got)
 	}
 
 	txt := rr(t, `later.example.org. 60 IN TXT "x"`)
 	if got := send(t, d, newUpdate(nil, []dns.RR{txt})); got != dns.RcodeSuccess {
 		t.Fatalf("rcode = %s", dns.RcodeToString[got])
 	}
-	if got := servedSerial(t, d); got != 502 {
-		t.Errorf("served serial = %d after a further change, want 502", got)
+	if got := servedSerial(t, d); got != 501 {
+		t.Errorf("served serial = %d after a further change, want 501", got)
+	}
+}
+
+// RFC 2136 §7.11: an automatic increment that wraps to zero must go on to one.
+func TestSerialIncrementSkipsZero(t *testing.T) {
+	d := newTestPlugin(t, nil)
+	edge := rr(t, "example.org. 300 IN SOA ns.example.org. admin.example.org. 4294967295 3600 900 86400 300")
+	for i, r := range d.rrs {
+		if r.Header().Rrtype == dns.TypeSOA {
+			d.rrs[i] = edge
+		}
+	}
+	if err := d.swap(d.rrs); err != nil {
+		t.Fatal(err)
+	}
+
+	txt := rr(t, `wrap.example.org. 60 IN TXT "x"`)
+	if got := send(t, d, newUpdate(nil, []dns.RR{txt})); got != dns.RcodeSuccess {
+		t.Fatalf("rcode = %s", dns.RcodeToString[got])
+	}
+	if got := servedSerial(t, d); got != 1 {
+		t.Errorf("served serial = %d after wrapping, want 1", got)
 	}
 }
 

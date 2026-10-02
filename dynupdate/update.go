@@ -48,13 +48,20 @@ func (d *DynUpdate) serveUpdate(w dns.ResponseWriter, r *dns.Msg) (int, error) {
 
 	updated, changed := d.apply(r.Ns)
 	if !changed {
-		// RFC 2136 §3.4.2.7: an update that changes nothing is still a
-		// success. Silently doing nothing and reporting NOERROR is correct,
+		// RFC 2136 §2.5.1: "Any duplicate RRs will be silently ignored",
+		// and §3.4.2.5: "Signal NOERROR". An update that changes nothing is
+		// still a success. Silently doing nothing and reporting NOERROR is correct,
 		// and is why an ACME client re-adding an identical TXT does not fail.
 		return d.reply(w, r, dns.RcodeSuccess)
 	}
 
-	bumpSerial(updated)
+	// RFC 2136 §3.6: "If the zone's SOA's SERIAL is not changed as a result
+	// of an update operation, then the server shall increment it
+	// automatically". An UPDATE that replaced the SOA has already moved it
+	// forward, by exactly as much as the client asked.
+	if cur, next := soaOf(d.rrs), soaOf(updated); cur != nil && next != nil && next.Serial == cur.Serial {
+		bumpSerial(updated)
+	}
 	if err := d.swap(updated); err != nil {
 		log.Errorf("rebuilding %s after UPDATE: %v", zone, err)
 		return d.reply(w, r, dns.RcodeServerFailure)
@@ -135,8 +142,9 @@ func (d *DynUpdate) checkPrereqs(prereqs []dns.RR) int {
 // therefore cannot double as a sentinel.
 const rcodeNoVerdict = -1
 
-// checkPrereqExists implements the §3.2.2/§3.2.4 ClassANY forms: "name is in
-// use" (TypeANY) or "this RRset exists" (any other type).
+// checkPrereqExists implements §3.2.1, the ClassANY forms: "name is in use"
+// (§2.4.4, TypeANY) or "RRset exists (value independent)" (§2.4.1, any other
+// type).
 func (d *DynUpdate) checkPrereqExists(h *dns.RR_Header) int {
 	if h.Rdlength != 0 {
 		return dns.RcodeFormatError
@@ -153,8 +161,8 @@ func (d *DynUpdate) checkPrereqExists(h *dns.RR_Header) int {
 	return rcodeNoVerdict
 }
 
-// checkPrereqAbsent implements the §3.2.1/§3.2.5 ClassNONE forms: "name is
-// not in use" (TypeANY) or "this RRset does not exist" (any other type).
+// checkPrereqAbsent implements §3.2.2, the ClassNONE forms: "name is not in
+// use" (§2.4.5, TypeANY) or "RRset does not exist" (§2.4.3, any other type).
 func (d *DynUpdate) checkPrereqAbsent(h *dns.RR_Header) int {
 	if h.Rdlength != 0 {
 		return dns.RcodeFormatError
@@ -256,7 +264,7 @@ func (d *DynUpdate) apply(updates []dns.RR) ([]dns.RR, bool) {
 	return out, changed
 }
 
-// applyAdd implements the ClassINET (add) form of §3.4.2.3: SOA serial
+// applyAdd implements the ClassINET (add) form of §3.4.2.2: SOA serial
 // gating, CNAME exclusivity in both directions, and TTL-only update of an
 // already-present record.
 //
@@ -281,7 +289,7 @@ func applyAdd(out []dns.RR, changed bool, rr dns.RR, h *dns.RR_Header, name stri
 		return append(out, dns.Copy(rr)), true
 	}
 	// CNAME exclusivity, both directions. Silently ignored rather than
-	// rejected, per §3.4.2.3.
+	// rejected, per §3.4.2.2.
 	if h.Rrtype == dns.TypeCNAME && hasNonCNAME(out, name) {
 		return out, changed
 	}
