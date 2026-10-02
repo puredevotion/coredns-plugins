@@ -20,9 +20,10 @@ Labels are byte strings; a byte is a `Nat`. `.` is 46, `-` 45, `_` 95.
 
 RFC 4343 §3 folds ASCII only ("0x41 to 0x5A ... MUST match ... 0x61 to
 0x7A"), and so does `lower` below, matching `toLowerASCII` in labels.go.
-`ParseKeyTagQuery` lower-cases its `_ta-` prefix with `strings.ToLower`
-(Unicode) instead; no non-ASCII character folds into `_ta-`, so the model's
-ASCII prefix check accepts exactly the same labels.
+`ParseKeyTagQuery` checks its `_ta-` prefix with `toLowerASCII` too. (It
+used Unicode `strings.ToLower` until this change; no non-ASCII character
+folds into `_ta-`, so that accepted the same labels, but it was the one
+non-ASCII fold in the package.)
 
 The modifier table and the conflict check are parameters (`names`, `okMods`):
 the case-insensitivity result holds whatever they contain.

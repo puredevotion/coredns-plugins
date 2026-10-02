@@ -103,7 +103,7 @@ invariant really depends on the fix, so the proof is not passing vacuously.
 | File | Go | Proved |
 |---|---|---|
 | `Serial.lean` | `dynupdate` `serialGreater`, `bumpSerial` | exactly RFC 1982 §3.2; irreflexive, asymmetric, total except the undefined antipodes; the automatic increment always advances and never yields 0 (RFC 2136 §7.11), including at 2³²−1; not transitive (and why that's safe here) |
-| `Wildcard.lean` | `sni_tls` `wildcardOf`, `GetCertificate` | exact characterisation of which names a `*.d` key covers: exactly one non-empty label (RFC 9525 §6.3, "can only match one label") — never the apex, never two labels deep, never an empty label; strict mode only returns SAN-matched certs and refuses `.d`; non-strict always returns one; exact match beats wildcard |
+| `Wildcard.lean` | `sni_tls` `wildcardOf`, `GetCertificate` | exact characterisation of which names a `*.d` key covers: exactly one non-empty label (RFC 9525 §6.3, "can only match one label") — never the apex, never two labels deep, never an empty label; strict mode only returns SAN-matched certs and refuses `.d`; non-strict always returns one; exact match beats wildcard; `asciiLower` folds two bytes together only if they are the cases of one ASCII letter, so no non-ASCII SNI folds onto an ASCII SAN (RFC 4343 §3) |
 | `Dnr.lean` | `radnr/pkg/dnr` `Marshal`, `Unmarshal`, `encodeADN`, `decodeADN` | **`Unmarshal(Marshal(o)) = o`** for every option `Marshal` accepts (ADN minus one trailing dot); output is 8-octet aligned with a correct Length octet and fits it (RFC 4861 §4.6, RFC 9463 §6.1) |
 | `DynUpdate.lean` | `dynupdate` `apply`, `applyAdd`, `applyDeleteRRset`, `applyDeleteRecord` | **every update section keeps a zone well-formed** under RFC 2136 §3.4.2.2–4's SOA, CNAME and apex rules: one SOA, at the apex; ≥1 apex NS; CNAME exclusivity; ≤1 CNAME per name. Plus counterexamples, by evaluation, for the v0.4.1 add rules. Not modelled (so not claimed): WKS, case-insensitive names inside RDATA, RRset TTL uniformity |
 | `Probe.lean` | `probe` `ParseQuery`, `parseToken`, `ParseKeyTagQuery`, `FormatKeyTagQuery` | `ParseQuery` is ASCII-case-insensitive exactly as RFC 4343 §3 defines it (safe under 0x20 randomisation) for any modifier table; RFC 8145 §5.1 key-tag labels round-trip, sorted, for every tag list that fits a 63-octet label — 1 to 12 tags (RFC 1035 §2.3.4) |
@@ -178,6 +178,60 @@ code:
    wrap to 0, which §7.11 forbids. (`Serial.lean` `bump_ne_zero`;
    `TestSOAAddReplacesAndSerialKeepsMoving`, `TestSerialIncrementSkipsZero`.)
 
+10. **dynupdate: `mutable` could be bypassed.** A "delete all RRsets from a
+    name" (class ANY, type ANY; RFC 2136 §2.5.3) skipped the type check, so a
+    key limited to `mutable TXT` could delete a name's A, AAAA and MX
+    records. Under `mutable` it is now REFUSED. RFC 3007 §3: "Policy
+    dictates the authorized actions that an authenticated principal can
+    take." (`TestMutableRefusesDeleteAllRRsetsAtName`.)
+11. **dynupdate: the prescan let meta-types and unknown types through.** RFC
+    2136 §3.4.1.2 answers FORMERR for "any other QUERY metatype, or any
+    unrecognized type". Only ANY, AXFR, IXFR, MAILA, MAILB and OPT were
+    caught, so a class-IN TSIG or TKEY record in an update section was added
+    to the zone. Now rejected: type 0, OPT, all of 128–255 (RFC 6895 §3.1,
+    "Q and Meta-TYPEs"), and any type miekg/dns does not know.
+    (`TestPrescanRejectsMetaAndUnknownTypes`.)
+12. **radnr: the socket never joined ff02::2, and accepted any RS.** RFC 4861
+    §6.2.2: "A router MUST join the all-routers multicast address on an
+    advertising interface", which is where hosts send RSes; without it they
+    were heard only if the kernel had joined for other reasons (Linux does
+    with forwarding on). And §6.1.1's checks were not applied, so a
+    forwarded RS (hop limit below 255) was answered. The socket now joins
+    the group and reads the hop limit; an RS needs hop limit 255, ICMP Code
+    0, and no source link-layer address option when sent from `::`.
+    (`TestBecomeRouter_JoinsAllRoutersAndReadsHopLimit`,
+    `TestAdvertise_ForwardedSolicitationIsIgnored`, `TestValidSolicitation`,
+    `TestParseNDP_RejectsNonZeroCode`. The real socket path, `dialNDP`, runs
+    in `TestNdpListen_RealRawSocket_RequiresPrivilege` where the runner has
+    a link-local interface and `CAP_NET_RAW`.)
+13. **radnr: dry-run leaked two goroutines per reload.** The dry-run conn's
+    `ReadFrom` blocked forever and `Close` did nothing, so `Run`, which waits
+    for its reader on shutdown, never returned. (Not an RFC matter.)
+    (`TestDryRunAdvertiserStopsOnCancel`, `TestNopConn_Methods`.)
+14. **sni_tls: three RFC defects in certificate selection.**
+    - SNI was lower-cased with Unicode `strings.ToLower`, so SNI
+      `\u212a.example.com` (KELVIN SIGN) folded onto `k.example.com` and
+      selected its cert, strict mode included. RFC 9525 §6.3 and RFC 4343
+      §3 fold ASCII only. (`Wildcard.lean` `fold_eq_iff`, `kelvin_not_k`;
+      `TestGetCertificate_FoldsASCIIOnly`.)
+    - Strict mode's refusal sent `internal_error(80)`, not RFC 6066 §3's
+      `unrecognized_name(112)`. (`TestSetup_StrictRefusalSendsUnrecognizedName`,
+      a real handshake over TLS 1.2 and 1.3.)
+    - SANs RFC 9525 §6.3 says "MUST be ignored" (`f*.example.com`,
+      `*.*.example.com`) were keyed as literal names, so an SNI spelling one
+      out selected that cert. (`TestLoadCert_IgnoresInvalidWildcardSANs`.)
+15. **probe: RFC 8145 signals recorded in the wrong places.** Option 14 was
+    read only on probe names, where §4.2 forbids senders to put it, and
+    never on the apex DNSKEY queries that §4.2 says carry it. Of several
+    instances (§4.2.2.1 sends two lists "using separate instances") only
+    the last was kept. A `_ta-` name was counted as a Key Tag query whatever
+    its type, where §5.1 defines one as "type NULL and of class IN". Apex
+    DNSKEY queries are now counted (`source="dnskey"`), every instance is
+    kept, and only NULL/IN is counted. (`TestApexDNSKEYQueryCountsEDNSKeyTags`,
+    `TestObserveKeepsEveryEDNSKeyTagInstance`, `TestKeyTagQueryCountedOnlyForNULL`.)
+    The `_ta-` prefix now folds ASCII-only too; no non-ASCII character
+    folds into `_ta-`, so that one changes no behaviour.
+
 ## Open findings
 
 Reading the plugins against the RFC texts also turned up the following,
@@ -185,14 +239,6 @@ which this change documents but does not fix. Each is a behaviour change
 that needs a decision.
 
 **dynupdate**
-- *Security:* `mutable TXT` can be bypassed. An ANY/ANY "delete all RRsets
-  at a name" skips the type check (`update.go` prescan), so a key limited to
-  TXT can delete a name's A/AAAA/MX records. RFC 3007 §3: permissions "MUST
-  be enabled though configuration".
-- The prescan's meta-type check misses TSIG, TKEY and the rest of
-  128–255, and does not reject unknown types: §3.4.1.2 says "any other QUERY
-  metatype, or any unrecognized type, then signal FORMERR". A class-IN TSIG
-  RR in an update section would be added to the zone.
 - RRset TTLs can end up mixed (RFC 2181 §5.2, "the TTLs of all RRs in an
   RRSet must be the same"); domain names inside RDATA are compared
   case-sensitively (RFC 2136 §1.1.2); a wrong ZCLASS gets FORMERR where
@@ -200,19 +246,13 @@ that needs a decision.
   to nonvolatile storage (§3.5), as the README now says.
 
 **radnr**
-- The advertiser never joins ff02::2. RFC 4861 §6.2.2: "A router MUST join
-  the all-routers multicast address on an advertising interface". Hosts send
-  RSes there, so unless the kernel already joined it (Linux does with
-  forwarding enabled), the solicited path never sees an RS.
-- Received RSes are not validated (§6.1.1, "The IP Hop Limit field has a
-  value of 255"); the first three intervals are not capped at 16s (§6.2.4,
+- The first three intervals are not capped at 16s (RFC 4861 §6.2.4,
   SHOULD); an allowed default-router lifetime is not bounded to
   MaxRtrAdvInterval..9000s (§6.2.1); SvcParams presence rules are not
   enforced (RFC 9461 §5: with an HTTP alpn, "dohpath" MUST be present and
   contain `dns`; RFC 9463 §6.1: SvcParams "SHOULD include at least the
   "alpn" SvcParam"); no final RA with lifetime 0 on shutdown (RFC 4861
-  §6.2.5, RFC 9463 §6.1); dry-run mode leaks a goroutine on every reload
-  (not an RFC matter).
+  §6.2.5, RFC 9463 §6.1).
 - The decoder is looser than the RFC: `decodeADN` accepts label lengths
   64–255 and compression pointers (RFC 8415 §10 "MUST NOT be stored in
   compressed form"), a label containing `.`, and trailing octets after the
@@ -228,19 +268,8 @@ that needs a decision.
   instances; serving a configured no-SNI default while still refusing
   unmatched SNI would fix it properly. Also, `loadCert` rejects a
   certificate with only IP-address SANs.
-- SNI is lower-cased with Unicode `strings.ToLower`, so a non-ASCII SNI
-  (KELVIN SIGN `K`) can fold onto an ASCII SAN, even in strict mode; RFC
-  9525 §6.3 and RFC 4343 §3 fold ASCII only.
-- Strict mode's refusal sends `internal_error`, not RFC 6066 §3's
-  `unrecognized_name(112)`; returning `(nil, nil)` would make Go send 112.
-- SANs RFC 9525 §6.3 says "MUST be ignored" (`f*.example.com`,
-  `*.*.example.com`) are loaded as literal keys, and an SNI containing `*`
-  can select them.
-
-**probe**
-- EDNS option 14 is recorded only on probe-token names, where RFC 8145 §4.2
-  forbids it ("MUST NOT include the edns-key-tag option for non-DNSKEY
-  queries"), and not on the apex DNSKEY queries where it legitimately
-  appears; multiple option-14 instances keep only the last (§4.2.2.1 sends
-  two lists in separate instances); Key Tag queries are counted whatever
-  their QTYPE, where §5.1 defines them as "type NULL and of class IN".
+- A TLS 1.3 client that sends no SNI to a strict listener gets
+  `unrecognized_name`. RFC 8446 §9.2: "Servers requiring this extension
+  SHOULD respond to a ClientHello lacking a "server_name" extension by
+  terminating the connection with a "missing_extension" alert", but
+  crypto/tls gives `GetCertificate` no way to choose that alert.

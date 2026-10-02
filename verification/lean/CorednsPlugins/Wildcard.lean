@@ -4,13 +4,13 @@
 ```go
 func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if hello.ServerName != "" {
-		name := strings.ToLower(hello.ServerName)
+		name := asciiLower(hello.ServerName)
 		if cert, ok := s.byName[name]; ok { return cert, nil }
 		if wildcard, ok := wildcardOf(name); ok {
 			if cert, ok := s.byName[wildcard]; ok { return cert, nil }
 		}
 	}
-	if s.strict { return nil, errNoMatchingCert }
+	if s.strict { return nil, nil } // crypto/tls sends unrecognized_name(112)
 	return s.fallback, nil
 }
 
@@ -29,10 +29,12 @@ the complete content of the left-most label". RFC 9525 states it for the
 client; the server applies it so as never to select a certificate a client
 would reject.
 
-Assumption, not proved here: the Go code lower-cases with `strings.ToLower`,
-which is Unicode case folding, while RFC 9525 §6.3 and RFC 4343 §3 fold
-ASCII only. The model's "already lower-cased" therefore hides that a
-non-ASCII SNI (U+212A KELVIN SIGN, say) can fold onto an ASCII SAN.
+Case folding is modelled separately, per byte, at the end (`foldByte`):
+`asciiLower` folds A-Z only, as RFC 9525 §6.3 ("case-insensitive ASCII
+comparison") and RFC 4343 §3 require. The Go code used Unicode
+`strings.ToLower` until this change, under which a non-ASCII SNI (U+212A
+KELVIN SIGN, say) folded onto an ASCII SAN; `fold_nonascii_fixed` and
+`kelvin_not_k` show it no longer can.
 -/
 
 namespace Wildcard
@@ -234,5 +236,36 @@ theorem strict_refuses_empty_label {C : Type} (byName : List Char → Option C) 
     (d : List Char) (h : byName ('.' :: d) = none) :
     getCertificate byName fb true ('.' :: d) = none := by
   simp [getCertificate, lookup, h, empty_label_no_wildcard]
+
+/-! ## ASCII case folding (`asciiLower`) -/
+
+/-- `asciiLower`, per byte. -/
+def foldByte (b : Nat) : Nat := if 65 ≤ b ∧ b ≤ 90 then b + 32 else b
+
+/-- Every byte of a UTF-8 encoded non-ASCII character is ≥ 0x80, and such
+a byte folds to itself. -/
+theorem fold_nonascii_fixed {b : Nat} (h : 128 ≤ b) : foldByte b = b := by
+  unfold foldByte; split <;> omega
+
+/-- Two bytes fold equal exactly when they are equal or are the two cases
+of one ASCII letter: nothing else is case-insensitively equal. -/
+theorem fold_eq_iff (a b : Nat) :
+    foldByte a = foldByte b ↔
+      a = b ∨ (65 ≤ a ∧ a ≤ 90 ∧ b = a + 32) ∨ (65 ≤ b ∧ b ≤ 90 ∧ a = b + 32) := by
+  unfold foldByte; split <;> split <;> omega
+
+/-- So an ASCII byte and a non-ASCII byte never fold together. -/
+theorem fold_separates_ascii {a b : Nat} (ha : a < 128) (hb : 128 ≤ b) :
+    foldByte a ≠ foldByte b := by
+  rw [Ne, fold_eq_iff]; omega
+
+/-- SNI `\u212a...` (KELVIN SIGN, UTF-8 `E2 84 AA`) no longer folds onto a
+SAN starting `k`, whatever follows either: the first bytes already differ
+after folding. -/
+theorem kelvin_not_k (s t : List Nat) :
+    List.map foldByte (0xE2 :: s) ≠ List.map foldByte (0x6B :: t) := by
+  intro h
+  simp only [List.map_cons, List.cons.injEq] at h
+  exact fold_separates_ascii (a := 0x6B) (b := 0xE2) (by decide) (by decide) h.1.symm
 
 end Wildcard
