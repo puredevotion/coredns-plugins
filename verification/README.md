@@ -245,6 +245,18 @@ code:
     `TestSetup_StrictWithNoSNICert_Handshakes`,
     `TestSetup_StrictWithNoSNIFallback_Handshakes`,
     `TestLiveStore_NoSNICertHotReload`.)
+17. **sni_tls: a refused client without SNI got the wrong alert over QUIC.**
+    RFC 8446 §9.2: "Servers requiring this extension SHOULD respond to a
+    ClientHello lacking a "server_name" extension by terminating the
+    connection with a "missing_extension" alert". Over QUIC (DoQ, DoH3),
+    crypto/tls hands the error `GetCertificate` returns to the QUIC stack,
+    and quic-go sends the first `tls.AlertError` in it as CRYPTO_ERROR
+    0x0100+alert (RFC 9001 §4.8). So the refusal there now returns an error
+    wrapping `missing_extension(109)`; quic-go marks the connection by giving
+    `ClientHelloInfo.Conn` a UDP local address. Over TCP the refusal stays
+    `(nil, nil)`, because crypto/tls sends any other error as
+    `internal_error`. (`TestSetup_QUICHandshakeAlerts`, real quic-go
+    handshakes; `TestGetCertificate_NoSNIRefusalOverQUICIsMissingExtension`.)
 
 ## Open findings
 
@@ -276,9 +288,10 @@ that needs a decision.
   this matters only to anything reusing the codec.
 
 **sni_tls**
-- A TLS 1.3 client that sends no SNI and is refused (`no_sni refuse`, or
-  `strict` with no `no_sni`) gets
-  `unrecognized_name`. RFC 8446 §9.2: "Servers requiring this extension
-  SHOULD respond to a ClientHello lacking a "server_name" extension by
-  terminating the connection with a "missing_extension" alert", but
-  crypto/tls gives `GetCertificate` no way to choose that alert.
+- Over TCP (DoT, DoH), a TLS 1.3 client that sends no SNI and is refused
+  still gets `unrecognized_name`, not RFC 8446 §9.2's `missing_extension`.
+  On the TCP path, crypto/tls (checked in go1.27.1, the 1.27 release notes
+  and master) sends `unrecognized_name` for its own "no certificates"
+  error and `internal_error` for any other `GetCertificate`,
+  `GetConfigForClient` or `GetEncryptedClientHelloKeys` error. QUIC is
+  fixed (finding 17).

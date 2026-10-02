@@ -121,8 +121,16 @@ absent SNI it returns no cert, and since the config carries no static
 `Certificates`, Go's TLS server aborts the handshake with a fatal
 `unrecognized_name(112)` alert, the one RFC 6066 §3 says a server that "does
 not recognize the server name" SHOULD send. The client sees a refused
-handshake instead of a silent downgrade. Exact and wildcard SNI matches are unaffected; `strict` only
-removes the guess-on-miss path.
+handshake instead of a silent downgrade. Exact and wildcard SNI matches are
+unaffected; `strict` only removes the guess-on-miss path.
+
+A client that sent no SNI at all and is refused gets `missing_extension(109)`
+instead over QUIC (DoQ, DoH3): RFC 8446 §9.2, "Servers requiring this
+extension SHOULD respond to a ClientHello lacking a "server_name" extension
+by terminating the connection with a "missing_extension" alert". Over TCP
+(DoT, DoH) it still gets `unrecognized_name`: crypto/tls sends every other
+`GetCertificate` error as `internal_error`, so 112 is the best a refusal can
+do there.
 
 ### Clients without SNI: the `no_sni` option
 
@@ -136,7 +144,7 @@ case separately, in the same block:
 | Setting | A ClientHello without SNI gets |
 |---|---|
 | *(unset)* | the same as an unmatched SNI: refused with `strict`, the fallback (first-loaded) cert without |
-| `no_sni refuse` | refused (`unrecognized_name`), with or without `strict` |
+| `no_sni refuse` | refused (`missing_extension` over QUIC, `unrecognized_name` over TCP), with or without `strict` |
 | `no_sni fallback` | the fallback (first-loaded) cert, with or without `strict` |
 | `no_sni cert <cert> <key>` | that cert, with or without `strict` |
 

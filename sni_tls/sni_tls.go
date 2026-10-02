@@ -83,19 +83,27 @@ func (c storeConfig) files() [][2]string {
 // unrecognized_name(112) alert, which RFC 6066 §3 says a server that "does
 // not recognize the server name" SHOULD send. Any error would go out as
 // internal_error(80) instead, telling the client the server is broken
-// rather than that it asked for a name this listener does not serve.
+// rather than that it asked for a name this listener does not serve. A
+// client that sent no SNI at all is refused by refuseNoSNI, which over QUIC
+// can do better.
 //
 //nolint:misspell,nilnil // RFC 6066 §3's alert name and wording are quoted verbatim, in US spelling; (nil, nil) is the strict refusal described above.
 func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	if hello.ServerName == "" {
 		switch s.noSNI {
 		case noSNIRefuse:
-			return nil, nil
+			return refuseNoSNI(hello)
 		case noSNIFallback:
 			return s.fallback, nil
 		case noSNICertificate:
-			return s.noSNICert, nil // Nil, so refused, while its files are missing.
+			if s.noSNICert == nil { // Its files are missing.
+				return refuseNoSNI(hello)
+			}
+			return s.noSNICert, nil
 		case noSNIAsUnmatched:
+			if s.strict {
+				return refuseNoSNI(hello)
+			}
 		}
 	} else {
 		name := asciiLower(hello.ServerName)
@@ -112,6 +120,43 @@ func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 		return nil, nil
 	}
 	return s.fallback, nil
+}
+
+// alertMissingExtension is TLS alert 109, missing_extension (RFC 8446 §6). Over
+// QUIC it travels as CRYPTO_ERROR 0x0100+109 (RFC 9001 §4.8).
+const alertMissingExtension = tls.AlertError(109)
+
+// refuseNoSNI refuses a ClientHello that carried no server_name extension.
+// RFC 8446 §9.2: "Servers requiring this extension SHOULD respond to a
+// ClientHello lacking a "server_name" extension by terminating the
+// connection with a "missing_extension" alert".
+//
+// That is only possible over QUIC (DoQ, DoH3). There crypto/tls hands the
+// error GetCertificate returns to the QUIC stack, and quic-go sends the
+// first tls.AlertError it finds in it as the CRYPTO_ERROR. Over TCP (DoT,
+// DoH) every GetCertificate error goes out as internal_error(80), so the
+// refusal stays (nil, nil) and the client gets unrecognized_name(112), the
+// only other alert a GetCertificate refusal can produce there.
+//
+//nolint:misspell,nilnil // The TLS alert name is quoted verbatim, in US spelling; (nil, nil) is the TCP refusal described above.
+func refuseNoSNI(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if overQUIC(hello) {
+		return nil, fmt.Errorf("sni_tls: refusing a QUIC handshake without SNI: %w", alertMissingExtension)
+	}
+	return nil, nil
+}
+
+// overQUIC reports whether hello arrived over QUIC. The quic-go stack sets
+// ClientHelloInfo.Conn to a stand-in whose LocalAddr is the UDP socket's (via
+// tls.QUICConfig.ClientHelloInfoConn on Go 1.27); over TCP it is the real
+// TCP connection. With no Conn there is no evidence, and the TCP-safe answer
+// is kept.
+func overQUIC(hello *tls.ClientHelloInfo) bool {
+	if hello.Conn == nil {
+		return false
+	}
+	addr := hello.Conn.LocalAddr()
+	return addr != nil && addr.Network() == "udp"
 }
 
 // asciiLower folds A-Z to a-z and leaves every other byte alone. DNS names
