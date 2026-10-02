@@ -64,12 +64,12 @@ func TestDigestPairs_MissingFileIsStableSentinel(t *testing.T) {
 func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	before, err := live.GetCertificate(&tls.ClientHelloInfo{ServerName: testSNIPrimary})
 	if err != nil {
@@ -95,12 +95,12 @@ func TestLiveStore_ReloadOnce_SwapsOnRotation(t *testing.T) {
 // rebuild/swap — steady-state should be cheap and quiet.
 func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	before := live.current.Load()
 	live.reloadOnce()
@@ -116,12 +116,12 @@ func TestLiveStore_ReloadOnce_NoopWhenUnchanged(t *testing.T) {
 // listener must keep serving the last-good cert, not lose it.
 func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	before := live.current.Load()
 
@@ -148,12 +148,12 @@ func TestLiveStore_ReloadOnce_KeepsOldStoreOnLoadFailure(t *testing.T) {
 // produce; must not deadlock, panic, or leak the poll goroutine.
 func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	if err := live.OnStartup(); err != nil {
 		t.Fatalf("OnStartup: %v", err)
@@ -176,12 +176,12 @@ func TestLiveStore_Lifecycle_StartStopRestart(t *testing.T) {
 // goroutine may be left running.
 func TestLiveStore_Lifecycle_RestartFailedWithoutRestart(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
-	store, err := buildCertStore([][2]string{{certPath, keyPath}}, false)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certPath, keyPath}}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
 	pairs := [][2]string{{certPath, keyPath}}
-	live := newLiveStore(pairs, false, store, digestPairs(pairs))
+	live := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 
 	baseline := runtime.NumGoroutine()
 	if err := live.OnStartup(); err != nil {
@@ -211,13 +211,13 @@ func TestLiveStore_Lifecycle_RestartFailedWithoutRestart(t *testing.T) {
 func TestLiveStore_Lifecycle_ReclaimsDroppedInstance(t *testing.T) {
 	certPath, keyPath := writeTestCert(t, "primary", testSNIPrimary)
 	pairs := [][2]string{{certPath, keyPath}}
-	store, err := buildCertStore(pairs, false)
+	store, err := buildCertStore(storeConfig{pairs: pairs})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
-	oldInst := newLiveStore(pairs, false, store, digestPairs(pairs))
+	oldInst := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 	oldInst.owner = new(int)
-	newInst := newLiveStore(pairs, false, store, digestPairs(pairs))
+	newInst := newLiveStore(storeConfig{pairs: pairs}, store, digestPairs(pairs))
 	newInst.owner = new(int)
 
 	baseline := runtime.NumGoroutine()

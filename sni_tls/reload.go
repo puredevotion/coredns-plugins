@@ -44,9 +44,8 @@ type liveStore struct {
 	// server-type context), compared by identity; see pollers.
 	owner    any
 	running  *pollerHandle
-	pairs    [][2]string
+	cfg      storeConfig
 	reloadMu sync.Mutex
-	strict   bool
 }
 
 // pollerHandle is one running poll loop, and the instance that started it.
@@ -75,8 +74,8 @@ var (
 
 // newLiveStore wraps an already-loaded certStore for polling; setup() still
 // fails loudly on the initial buildCertStore error before reaching this.
-func newLiveStore(pairs [][2]string, strict bool, initial *certStore, initialDigest [32]byte) *liveStore {
-	l := &liveStore{pairs: pairs, strict: strict}
+func newLiveStore(cfg storeConfig, initial *certStore, initialDigest [32]byte) *liveStore {
+	l := &liveStore{cfg: cfg}
 	l.current.Store(initial)
 	l.digest.Store(&initialDigest)
 	return l
@@ -154,18 +153,18 @@ func (l *liveStore) reloadOnce() {
 	l.reloadMu.Lock()
 	defer l.reloadMu.Unlock()
 
-	newDigest := digestPairs(l.pairs)
+	newDigest := digestPairs(l.cfg.files())
 	if newDigest == *l.digest.Load() {
 		return
 	}
-	store, err := buildCertStore(l.pairs, l.strict)
+	store, err := buildCertStore(l.cfg)
 	if err != nil {
 		log.Warningf("cert reload skipped, keeping previous store: %v", err)
 		return
 	}
 	l.current.Store(store)
 	l.digest.Store(&newDigest)
-	log.Infof("reloaded %d configured cert/key pair(s) from disk", len(l.pairs))
+	log.Infof("reloaded %d configured cert/key pair(s) from disk", len(l.cfg.files()))
 }
 
 // digestPairs hashes every configured cert/key file's raw bytes, in order. A

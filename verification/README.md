@@ -103,7 +103,7 @@ invariant really depends on the fix, so the proof is not passing vacuously.
 | File | Go | Proved |
 |---|---|---|
 | `Serial.lean` | `dynupdate` `serialGreater`, `bumpSerial` | exactly RFC 1982 §3.2; irreflexive, asymmetric, total except the undefined antipodes; the automatic increment always advances and never yields 0 (RFC 2136 §7.11), including at 2³²−1; not transitive (and why that's safe here) |
-| `Wildcard.lean` | `sni_tls` `wildcardOf`, `GetCertificate` | exact characterisation of which names a `*.d` key covers: exactly one non-empty label (RFC 9525 §6.3, "can only match one label") — never the apex, never two labels deep, never an empty label; strict mode only returns SAN-matched certs and refuses `.d`; non-strict always returns one; exact match beats wildcard; `asciiLower` folds two bytes together only if they are the cases of one ASCII letter, so no non-ASCII SNI folds onto an ASCII SAN (RFC 4343 §3) |
+| `Wildcard.lean` | `sni_tls` `wildcardOf`, `GetCertificate` | exact characterisation of which names a `*.d` key covers: exactly one non-empty label (RFC 9525 §6.3, "can only match one label") — never the apex, never two labels deep, never an empty label; to a client that sent SNI, strict mode only returns SAN-matched certs, whatever `no_sni` says, and refuses `.d`; `no_sni` affects only clients without SNI, which get exactly the configured policy's cert (RFC 9462 §6.3); non-strict always returns one; exact match beats wildcard; `asciiLower` folds two bytes together only if they are the cases of one ASCII letter, so no non-ASCII SNI folds onto an ASCII SAN (RFC 4343 §3) |
 | `Dnr.lean` | `radnr/pkg/dnr` `Marshal`, `Unmarshal`, `encodeADN`, `decodeADN` | **`Unmarshal(Marshal(o)) = o`** for every option `Marshal` accepts (ADN minus one trailing dot); output is 8-octet aligned with a correct Length octet and fits it (RFC 4861 §4.6, RFC 9463 §6.1) |
 | `DynUpdate.lean` | `dynupdate` `apply`, `applyAdd`, `applyDeleteRRset`, `applyDeleteRecord` | **every update section keeps a zone well-formed** under RFC 2136 §3.4.2.2–4's SOA, CNAME and apex rules: one SOA, at the apex; ≥1 apex NS; CNAME exclusivity; ≤1 CNAME per name. Plus counterexamples, by evaluation, for the v0.4.1 add rules. Not modelled (so not claimed): WKS, case-insensitive names inside RDATA, RRset TTL uniformity |
 | `Probe.lean` | `probe` `ParseQuery`, `parseToken`, `ParseKeyTagQuery`, `FormatKeyTagQuery` | `ParseQuery` is ASCII-case-insensitive exactly as RFC 4343 §3 defines it (safe under 0x20 randomisation) for any modifier table; RFC 8145 §5.1 key-tag labels round-trip, sorted, for every tag list that fits a 63-octet label — 1 to 12 tags (RFC 1035 §2.3.4) |
@@ -231,6 +231,20 @@ code:
     `TestObserveKeepsEveryEDNSKeyTagInstance`, `TestKeyTagQueryCountedOnlyForNULL`.)
     The `_ta-` prefix now folds ASCII-only too; no non-ASCII character
     folds into `_ta-`, so that one changes no behaviour.
+16. **sni_tls: strict mode could not serve DDR-by-IP clients.** RFC 9462
+    §6.3: resolvers "that support discovery using IP addresses will need to
+    be configured to present the appropriate TLS certificate when no SNI is
+    present", and strict mode refused every ClientHello without SNI. The new
+    `no_sni` option sets that case on its own: `refuse`, `fallback` (the
+    first-loaded cert), or `cert <cert> <key>` (a cert for no-SNI clients
+    alone, which may carry only IP-address SANs). With `strict`, an
+    unmatched SNI is still refused under every policy. Unset, nothing
+    changes. (`Wildcard.lean` `strict_only_matched`,
+    `noSNI_irrelevant_with_sni`, `default_absent`, `noSNI_cert_absent`;
+    `TestGetCertificate_NoSNIPolicies`,
+    `TestSetup_StrictWithNoSNICert_Handshakes`,
+    `TestSetup_StrictWithNoSNIFallback_Handshakes`,
+    `TestLiveStore_NoSNICertHotReload`.)
 
 ## Open findings
 
@@ -262,13 +276,8 @@ that needs a decision.
   this matters only to anything reusing the codec.
 
 **sni_tls**
-- `strict` conflicts with DDR by IP (RFC 9462 §6.3: resolvers "will need to
-  be configured to present the appropriate TLS certificate when no SNI is
-  present"). The design doc no longer recommends `strict` for verified-DDR
-  instances; serving a configured no-SNI default while still refusing
-  unmatched SNI would fix it properly. Also, `loadCert` rejects a
-  certificate with only IP-address SANs.
-- A TLS 1.3 client that sends no SNI to a strict listener gets
+- A TLS 1.3 client that sends no SNI and is refused (`no_sni refuse`, or
+  `strict` with no `no_sni`) gets
   `unrecognized_name`. RFC 8446 §9.2: "Servers requiring this extension
   SHOULD respond to a ClientHello lacking a "server_name" extension by
   terminating the connection with a "missing_extension" alert", but

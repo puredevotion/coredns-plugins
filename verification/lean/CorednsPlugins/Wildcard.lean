@@ -3,7 +3,14 @@
 
 ```go
 func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	if hello.ServerName != "" {
+	if hello.ServerName == "" {
+		switch s.noSNI { // The `no_sni` option.
+		case noSNIRefuse:      return nil, nil
+		case noSNIFallback:    return s.fallback, nil
+		case noSNICertificate: return s.noSNICert, nil
+		case noSNIAsUnmatched: // The default: fall through.
+		}
+	} else {
 		name := asciiLower(hello.ServerName)
 		if cert, ok := s.byName[name]; ok { return cert, nil }
 		if wildcard, ok := wildcardOf(name); ok {
@@ -22,7 +29,7 @@ func wildcardOf(name string) (string, bool) {
 ```
 
 Names are modelled as `List Char` already lower-cased, and `byName` as a
-partial function. The rule formalised is RFC 9525 §6.3 (which obsoletes
+partial function, and the refusal `(nil, nil)` as `none`. The rule formalised is RFC 9525 §6.3 (which obsoletes
 RFC 6125): "A wildcard in a presented identifier can only match one label
 in a reference identifier", with "the wildcard character [appearing] only as
 the complete content of the left-most label". RFC 9525 states it for the
@@ -188,53 +195,100 @@ def lookup {C : Type} (byName : List Char → Option C) (sni : List Char) : Opti
     | some c => some c
     | none => (wildcardOf sni).bind byName
 
+/-- The `no_sni` option: what a ClientHello without SNI gets. -/
+inductive NoSNI
+  | asUnmatched  -- default: like an unmatched SNI
+  | refuse
+  | fallback
+  | cert         -- the separately configured `no_sni cert`
+
 /-- `GetCertificate`, with the `byName` map as a partial function. `none`
-is the handshake-aborting error. -/
+is the handshake refusal; `noSNICert` is `none` while that cert's files are
+missing. -/
 def getCertificate {C : Type} (byName : List Char → Option C) (fallback : C)
-    (strict : Bool) (sni : List Char) : Option C :=
-  match lookup byName sni with
-  | some c => some c
-  | none => if strict then none else some fallback
+    (strict : Bool) (noSNI : NoSNI) (noSNICert : Option C) (sni : List Char) : Option C :=
+  let unmatched := if strict then none else some fallback
+  if sni = [] then
+    match noSNI with
+    | .refuse => none
+    | .fallback => some fallback
+    | .cert => noSNICert
+    | .asUnmatched => unmatched
+  else match lookup byName sni with
+    | some c => some c
+    | none => unmatched
 
-/-- Strict mode never answers with a cert that wasn't selected by an exact or
-wildcard SAN key, so the fallback can't leak out to an unmatched name. -/
+/-- Strict mode never answers a client that sent SNI with a cert that wasn't
+selected by an exact or wildcard SAN key, whatever `no_sni` says, so the
+fallback can't leak out to an unmatched name. -/
 theorem strict_only_matched {C : Type} (byName : List Char → Option C) (fb : C)
-    (sni : List Char) (c : C) (h : getCertificate byName fb true sni = some c) :
-    sni ≠ [] ∧ (byName sni = some c ∨ ∃ w, wildcardOf sni = some w ∧ byName w = some c) := by
+    (p : NoSNI) (nc : Option C) (sni : List Char) (c : C) (hne : sni ≠ [])
+    (h : getCertificate byName fb true p nc sni = some c) :
+    byName sni = some c ∨ ∃ w, wildcardOf sni = some w ∧ byName w = some c := by
   have hl : lookup byName sni = some c := by
-    unfold getCertificate at h
+    simp only [getCertificate, hne, if_false] at h
     cases hl : lookup byName sni <;> simp_all
-  unfold lookup at hl
-  by_cases he : sni = []
-  · simp [he] at hl
-  · refine ⟨he, ?_⟩
-    simp only [he, if_false] at hl
-    cases hb : byName sni with
-    | some c' => simp_all
-    | none =>
-      simp only [hb] at hl
-      cases hw : wildcardOf sni with
-      | none => simp [hw] at hl
-      | some w => simp only [hw, Option.bind_some] at hl; exact Or.inr ⟨w, rfl, hl⟩
+  simp only [lookup, hne, if_false] at hl
+  cases hb : byName sni with
+  | some c' => simp_all
+  | none =>
+    simp only [hb] at hl
+    cases hw : wildcardOf sni with
+    | none => simp [hw] at hl
+    | some w => simp only [hw, Option.bind_some] at hl; exact Or.inr ⟨w, rfl, hl⟩
 
-/-- Non-strict mode always produces a certificate: the handshake never fails
-for want of one. -/
+/-- `no_sni` changes nothing for a client that sent SNI. -/
+theorem noSNI_irrelevant_with_sni {C : Type} (byName : List Char → Option C) (fb : C)
+    (strict : Bool) (p q : NoSNI) (nc nd : Option C) (sni : List Char) (hne : sni ≠ []) :
+    getCertificate byName fb strict p nc sni = getCertificate byName fb strict q nd sni := by
+  simp [getCertificate, hne]
+
+/-- The default reproduces the behaviour before `no_sni` existed: an absent
+SNI is refused in strict mode and gets the fallback otherwise. -/
+theorem default_absent {C : Type} (byName : List Char → Option C) (fb : C)
+    (strict : Bool) (nc : Option C) :
+    getCertificate byName fb strict .asUnmatched nc [] = if strict then none else some fb := by
+  simp [getCertificate]
+
+/-- RFC 9462 §6.3 ("present the appropriate TLS certificate when no SNI is
+present"), together with strict mode: under `no_sni cert` a client without
+SNI gets exactly the configured cert, in either mode, and under `no_sni
+fallback` exactly the fallback. -/
+theorem noSNI_cert_absent {C : Type} (byName : List Char → Option C) (fb : C)
+    (strict : Bool) (nc : Option C) :
+    getCertificate byName fb strict .cert nc [] = nc := by
+  simp [getCertificate]
+
+theorem noSNI_fallback_absent {C : Type} (byName : List Char → Option C) (fb : C)
+    (strict : Bool) (nc : Option C) :
+    getCertificate byName fb strict .fallback nc [] = some fb := by
+  simp [getCertificate]
+
+theorem noSNI_refuse_absent {C : Type} (byName : List Char → Option C) (fb : C)
+    (strict : Bool) (nc : Option C) :
+    getCertificate byName fb strict .refuse nc [] = none := by
+  simp [getCertificate]
+
+/-- Non-strict mode always produces a certificate for a client that sent
+SNI: the handshake never fails for want of one. -/
 theorem nonstrict_total {C : Type} (byName : List Char → Option C) (fb : C)
-    (sni : List Char) : (getCertificate byName fb false sni).isSome := by
-  unfold getCertificate
+    (p : NoSNI) (nc : Option C) (sni : List Char) (hne : sni ≠ []) :
+    (getCertificate byName fb false p nc sni).isSome := by
+  simp only [getCertificate, hne, if_false]
   cases lookup byName sni <;> simp
 
 /-- An exact SAN match always wins over a wildcard, in either mode. -/
 theorem exact_wins {C : Type} (byName : List Char → Option C) (fb : C) (strict : Bool)
-    (sni : List Char) (c : C) (hne : sni ≠ []) (h : byName sni = some c) :
-    getCertificate byName fb strict sni = some c := by
+    (p : NoSNI) (nc : Option C) (sni : List Char) (c : C) (hne : sni ≠ [])
+    (h : byName sni = some c) :
+    getCertificate byName fb strict p nc sni = some c := by
   simp [getCertificate, lookup, hne, h]
 
 /-- So strict mode refuses SNI `.example.com` unless a SAN is literally
 `.example.com`, even when a `*.example.com` cert is loaded. -/
 theorem strict_refuses_empty_label {C : Type} (byName : List Char → Option C) (fb : C)
-    (d : List Char) (h : byName ('.' :: d) = none) :
-    getCertificate byName fb true ('.' :: d) = none := by
+    (p : NoSNI) (nc : Option C) (d : List Char) (h : byName ('.' :: d) = none) :
+    getCertificate byName fb true p nc ('.' :: d) = none := by
   simp [getCertificate, lookup, h, empty_label_no_wildcard]
 
 /-! ## ASCII case folding (`asciiLower`) -/

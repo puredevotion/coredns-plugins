@@ -24,7 +24,7 @@ func TestStrict_EndToEnd_RealTLSHandshake(t *testing.T) {
 	certA, keyA := writeTestCert(t, "sevenwoods", sniA)
 	certB, keyB := writeTestCert(t, "homearpa", sniB)
 
-	store, err := buildCertStore([][2]string{{certA, keyA}, {certB, keyB}}, true)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{certA, keyA}, {certB, keyB}}, strict: true})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 	wildcardCert, wildcardKey := writeTestCert(t, "wildcard", wildcardSAN)
 	otherCert, otherKey := writeTestCert(t, "homearpa", otherSNI)
 
-	store, err := buildCertStore([][2]string{{wildcardCert, wildcardKey}, {otherCert, otherKey}}, true)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{wildcardCert, wildcardKey}, {otherCert, otherKey}}, strict: true})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}

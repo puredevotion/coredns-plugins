@@ -124,16 +124,53 @@ not recognize the server name" SHOULD send. The client sees a refused
 handshake instead of a silent downgrade. Exact and wildcard SNI matches are unaffected; `strict` only
 removes the guess-on-miss path.
 
-**Caution: `strict` conflicts with DDR by IP address.** RFC 9462 §6.3:
-"resolvers that support discovery using IP addresses will need to be
-configured to present the appropriate TLS certificate when no SNI is
-present for DoT, DoQ, and DoH." `strict` refuses exactly those clients,
-because it treats an absent SNI like an unmatched one. So `strict` suits an
-instance whose clients always send SNI, and is wrong for one that clients
-discover by IP. (Distinguishing the two — refusing an unmatched SNI but
-serving a configured no-SNI default — is an open design question; see
-verification/README.md.) A single-cert instance has no reason to set it:
-there is only ever one cert to serve.
+### Clients without SNI: the `no_sni` option
+
+RFC 9462 §6.3: "resolvers that support discovery using IP addresses will
+need to be configured to present the appropriate TLS certificate when no
+SNI is present for DoT, DoQ, and DoH." A client that discovered this
+resolver by IP address may send no SNI at all, and on its own `strict`
+refuses it exactly as it refuses an unmatched name. `no_sni` decides that
+case separately, in the same block:
+
+| Setting | A ClientHello without SNI gets |
+|---|---|
+| *(unset)* | the same as an unmatched SNI: refused with `strict`, the fallback (first-loaded) cert without |
+| `no_sni refuse` | refused (`unrecognized_name`), with or without `strict` |
+| `no_sni fallback` | the fallback (first-loaded) cert, with or without `strict` |
+| `no_sni cert <cert> <key>` | that cert, with or without `strict` |
+
+A client that sends SNI is not affected: it gets its exact or wildcard
+match, and if there is none, the fallback cert (non-strict) or a refusal
+(`strict`), under every `no_sni` setting.
+
+For a strict instance that is also discovered by IP:
+
+```
+tls://.:853 {
+  sni_tls /etc/coredns/tls/primary.crt   /etc/coredns/tls/primary.key
+  sni_tls /etc/coredns/tls/secondary.crt /etc/coredns/tls/secondary.key
+  sni_tls {
+    strict
+    no_sni cert /etc/coredns/tls/vip.crt /etc/coredns/tls/vip.key
+  }
+  forward . 127.0.0.1:53
+  cache 30
+  errors
+}
+```
+
+The `no_sni cert` is used only for clients without SNI. It is not keyed by
+its DNS names, and it may carry only IP-address SANs, which is what RFC
+9462 §4.2 verification looks for: "the IP address of the designating
+Unencrypted DNS Resolver in an iPAddress entry of the subjectAltName
+extension". It is polled and hot-reloaded like the other certs. If its files
+are missing, clients without SNI are refused until they appear; a present
+but broken pair fails setup. With `fallback` or `cert`, a warning is logged
+when the cert served without SNI has no IP-address SAN.
+
+A single-cert instance has no reason to set `strict`: there is only ever one
+cert to serve.
 
 ## Cert hot-reload (resolved)
 

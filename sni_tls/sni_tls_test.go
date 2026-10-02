@@ -259,7 +259,7 @@ func TestGetCertificate_NonStrict_StillFallsBack(t *testing.T) {
 func TestBuildCertStore_Strict_PropagatesToGetCertificate(t *testing.T) {
 	primaryCert, primaryKey := writeTestCert(t, "primary", testSNIPrimary)
 
-	store, err := buildCertStore([][2]string{{primaryCert, primaryKey}}, true)
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{{primaryCert, primaryKey}}, strict: true})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
@@ -389,10 +389,10 @@ func TestBuildCertStore_EndToEnd(t *testing.T) {
 	primaryCert, primaryKey := writeTestCert(t, "primary", testSNIPrimary)
 	secondaryCert, secondaryKey := writeTestCert(t, "secondary", testSNISecondary)
 
-	store, err := buildCertStore([][2]string{
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{
 		{primaryCert, primaryKey},
 		{secondaryCert, secondaryKey},
-	}, false)
+	}})
 	if err != nil {
 		t.Fatalf("buildCertStore: %v", err)
 	}
@@ -424,7 +424,7 @@ func TestBuildCertStore_EndToEnd(t *testing.T) {
 // Corefile listing certs that never materialise should fail loudly, not
 // silently produce a store with no fallback and no certs.
 func TestBuildCertStore_PropagatesLoadError(t *testing.T) {
-	_, err := buildCertStore([][2]string{{"/nonexistent/cert.pem", "/nonexistent/key.pem"}}, false)
+	_, err := buildCertStore(storeConfig{pairs: [][2]string{{"/nonexistent/cert.pem", "/nonexistent/key.pem"}}})
 	if err == nil || !strings.Contains(err.Error(), "sni_tls") {
 		t.Fatalf("expected wrapped sni_tls error, got %v", err)
 	}
@@ -440,10 +440,10 @@ func TestBuildCertStore_PropagatesLoadError(t *testing.T) {
 func TestBuildCertStore_TolerantOfMissingSecondCert(t *testing.T) {
 	primaryCert, primaryKey := writeTestCert(t, "primary", testSNIPrimary)
 
-	store, err := buildCertStore([][2]string{
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{
 		{primaryCert, primaryKey},
 		{"/etc/coredns/tls/secondary.crt", "/etc/coredns/tls/secondary.key"}, // Never copied by the gate.
-	}, false)
+	}})
 	if err != nil {
 		t.Fatalf("buildCertStore must tolerate one missing pair when another loads: %v", err)
 	}
@@ -466,10 +466,10 @@ func TestBuildCertStore_TolerantOfMissingSecondCert(t *testing.T) {
 func TestBuildCertStore_TolerantOfMissingFirstCert(t *testing.T) {
 	secondaryCert, secondaryKey := writeTestCert(t, "secondary", testSNISecondary)
 
-	store, err := buildCertStore([][2]string{
+	store, err := buildCertStore(storeConfig{pairs: [][2]string{
 		{"/etc/coredns/tls/primary.crt", "/etc/coredns/tls/primary.key"}, // Never copied.
 		{secondaryCert, secondaryKey},
-	}, false)
+	}})
 	if err != nil {
 		t.Fatalf("buildCertStore must tolerate the first pair missing when a later one loads: %v", err)
 	}
@@ -483,7 +483,7 @@ func TestBuildCertStore_TolerantOfMissingFirstCert(t *testing.T) {
 // empty slice reaching buildCertStore directly is a valid input with nothing
 // to load — not an error, just a store with no fallback.
 func TestBuildCertStore_Empty(t *testing.T) {
-	store, err := buildCertStore(nil, false)
+	store, err := buildCertStore(storeConfig{})
 	if err != nil {
 		t.Fatalf("buildCertStore(nil): %v", err)
 	}

@@ -15,11 +15,54 @@ import (
 // more than one cert loaded, an unmatched-SNI client could get served a cert
 // without the required IP-SAN, silently defeating RFC 9462 §4.2 verified
 // discovery. Set strict to refuse the fallback entirely on such an instance —
-// see the `strict` Corefile option in setup.go.
+// see the `strict` Corefile option in setup.go. A ClientHello with no SNI is
+// handled by noSNI, the `no_sni` option.
 type certStore struct {
-	byName   map[string]*tls.Certificate
-	fallback *tls.Certificate
-	strict   bool
+	byName    map[string]*tls.Certificate
+	fallback  *tls.Certificate
+	noSNICert *tls.Certificate // The cert noSNICertificate serves; nil until it loads.
+	noSNI     noSNIPolicy
+	strict    bool
+}
+
+// noSNIPolicy is what a ClientHello without SNI gets: the `no_sni` option.
+// RFC 9462 §6.3: "resolvers that support discovery using IP addresses will
+// need to be configured to present the appropriate TLS certificate when no
+// SNI is present for DoT, DoQ, and DoH." Strict mode alone refuses those
+// clients, so a strict instance that clients discover by IP sets one of the
+// other policies.
+type noSNIPolicy int
+
+const (
+	// The default treats an absent SNI like an unmatched one: refused in
+	// strict mode, the fallback cert otherwise.
+	noSNIAsUnmatched noSNIPolicy = iota
+	// The `no_sni refuse` policy always refuses the handshake.
+	noSNIRefuse
+	// The `no_sni fallback` policy always serves the fallback (first
+	// loaded) cert, strict mode included.
+	noSNIFallback
+	// The `no_sni cert <cert> <key>` policy serves a cert configured for
+	// no-SNI clients alone, strict mode included.
+	noSNICertificate
+)
+
+// storeConfig is everything buildCertStore needs: the parsed Corefile
+// options, kept by liveStore so every reload rebuilds the same way.
+type storeConfig struct {
+	noSNIPair [2]string // The no_sni cert and key, for noSNICertificate.
+	pairs     [][2]string
+	noSNI     noSNIPolicy
+	strict    bool
+}
+
+// files lists every cert/key pair the store reads, the no_sni one included,
+// so a rotation of any of them triggers a reload.
+func (c storeConfig) files() [][2]string {
+	if c.noSNI != noSNICertificate {
+		return c.pairs
+	}
+	return append(append(make([][2]string, 0, len(c.pairs)+1), c.pairs...), c.noSNIPair)
 }
 
 // GetCertificate implements the tls.Config.GetCertificate callback: look up the
@@ -31,7 +74,9 @@ type certStore struct {
 // "*.sevenwoods.nl", which no real ClientHello ever sends), falling through
 // to the fallback cert on every connection instead. Falls back to the
 // first-loaded cert if neither matches, unless strict is set, in which case
-// an unmatched or absent SNI fails the handshake instead of guessing.
+// an unmatched SNI fails the handshake instead of guessing. An absent SNI
+// gets whatever the no_sni policy says, by default the same as an unmatched
+// one.
 //
 // The strict refusal is (nil, nil), not an error. Since setup() leaves
 // tls.Config.Certificates empty, crypto/tls then aborts with a fatal
@@ -42,7 +87,17 @@ type certStore struct {
 //
 //nolint:misspell,nilnil // RFC 6066 §3's alert name and wording are quoted verbatim, in US spelling; (nil, nil) is the strict refusal described above.
 func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	if hello.ServerName != "" {
+	if hello.ServerName == "" {
+		switch s.noSNI {
+		case noSNIRefuse:
+			return nil, nil
+		case noSNIFallback:
+			return s.fallback, nil
+		case noSNICertificate:
+			return s.noSNICert, nil // Nil, so refused, while its files are missing.
+		case noSNIAsUnmatched:
+		}
+	} else {
 		name := asciiLower(hello.ServerName)
 		if cert, ok := s.byName[name]; ok {
 			return cert, nil
@@ -136,6 +191,7 @@ func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
 	if len(names) == 0 {
 		return nil, nil, fmt.Errorf("sni_tls: %s has no usable SAN DNS names to key SNI lookup on", certFile)
 	}
+	cert.Leaf = leaf
 	return &cert, names, nil
 }
 
@@ -143,8 +199,9 @@ func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
 // keyed by every loaded cert's SAN DNS names. The first SUCCESSFULLY LOADED
 // pair's cert becomes the fallback for absent/unmatched SNI, matching the
 // stock tls plugin's SNI-agnostic single-cert behaviour for those cases (see
-// design doc step 2) — unless strict is set, in which case no fallback is
-// installed at all and unmatched/absent SNI hard-fails in GetCertificate.
+// design doc step 2). In strict mode GetCertificate never serves it for an
+// unmatched SNI, and serves it for an absent one only under `no_sni
+// fallback`.
 //
 // A pair whose cert or key FILE IS ABSENT is skipped, not fatal — this is the
 // "partial cert set is fine, whatever loaded loads" tolerance design doc step
@@ -158,8 +215,9 @@ func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
 // materialise is worth failing loudly on, unlike a genuinely empty
 // configuration (setup() already rejects zero pairs before calling this; an
 // empty slice here is a valid input with no fallback, not an error).
-func buildCertStore(pairs [][2]string, strict bool) (*certStore, error) {
-	store := &certStore{byName: make(map[string]*tls.Certificate), strict: strict}
+func buildCertStore(cfg storeConfig) (*certStore, error) {
+	pairs := cfg.pairs
+	store := &certStore{byName: make(map[string]*tls.Certificate), strict: cfg.strict, noSNI: cfg.noSNI}
 	var loadErrs []error
 	for _, p := range pairs {
 		cert, names, err := loadCert(p[0], p[1])
@@ -180,7 +238,59 @@ func buildCertStore(pairs [][2]string, strict bool) (*certStore, error) {
 	if store.fallback == nil && len(pairs) > 0 && len(loadErrs) == len(pairs) {
 		return nil, fmt.Errorf("sni_tls: no cert/key pairs could be loaded (all %d missing): %w", len(loadErrs), loadErrs[0])
 	}
+	if err := store.loadNoSNI(cfg); err != nil {
+		return nil, err
+	}
 	return store, nil
+}
+
+// loadNoSNI loads the no_sni cert, and warns when the cert no-SNI clients
+// will get carries no IP-address SAN: such a client connected by IP, and
+// RFC 9462 §4.2 has it "verify that the certificate contains the IP address
+// of the designating Unencrypted DNS Resolver in an iPAddress entry of the
+// subjectAltName extension". A missing no_sni file is tolerated like any
+// other (design doc step 5): no-SNI clients are refused until it appears.
+func (s *certStore) loadNoSNI(cfg storeConfig) error {
+	var served *tls.Certificate
+	switch cfg.noSNI {
+	case noSNICertificate:
+		cert, err := loadAnyCert(cfg.noSNIPair[0], cfg.noSNIPair[1])
+		if err != nil {
+			if !isMissingFile(err) {
+				return err
+			}
+			log.Warningf("no_sni cert not loaded, refusing clients without SNI until it is: %v", err)
+			return nil
+		}
+		s.noSNICert, served = cert, cert
+	case noSNIFallback:
+		served = s.fallback
+	case noSNIAsUnmatched, noSNIRefuse:
+		return nil
+	}
+	if served != nil && served.Leaf != nil && len(served.Leaf.IPAddresses) == 0 {
+		log.Warningf("the cert served without SNI has no IP-address SAN, so clients that discovered this resolver by IP (RFC 9462 §4.2) cannot verify it")
+	}
+	return nil
+}
+
+// loadAnyCert loads a cert/key pair without requiring DNS SANs. The no_sni
+// cert is not looked up by name, and the cert RFC 9462 §4.2 asks for there
+// may well carry only IP addresses. Leaf is set so loadNoSNI can read them.
+func loadAnyCert(certFile, keyFile string) (*tls.Certificate, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("sni_tls: could not load no_sni cert/key pair (%s, %s): %w", certFile, keyFile, err)
+	}
+	if len(cert.Certificate) == 0 {
+		return nil, fmt.Errorf("sni_tls: %s contains no certificate", certFile)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return nil, fmt.Errorf("sni_tls: could not parse leaf certificate %s: %w", certFile, err)
+	}
+	cert.Leaf = leaf
+	return &cert, nil
 }
 
 // isMissingFile reports whether err (as returned by loadCert, which wraps
