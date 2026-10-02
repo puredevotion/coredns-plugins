@@ -5,11 +5,18 @@
 func serialGreater(a, b uint32) bool {
 	return a != b && ((a < b && b-a > 1<<31) || (a > b && a-b < 1<<31))
 }
-func bumpSerial(rrs []dns.RR) { ... soa.Serial++ }
+func bumpSerial(rrs []dns.RR) {
+	... next.Serial++; if next.Serial == 0 { next.Serial = 1 } ...
+}
 ```
 
 A `uint32` is modelled as a `Nat` below `2^32`. Under the guard `a < b`,
 Go's wrapping `b-a` equals natural subtraction, so the model is exact.
+
+RFC 1982 §3.2 defines the comparison; RFC 2136 §3.6 says an UPDATE that did
+not itself change the serial must be followed by an automatic increment,
+and §7.11 that "if the result of the increment is zero (0) ... it is
+necessary to increment it again or set it to one (1)".
 -/
 
 namespace Serial
@@ -74,15 +81,27 @@ theorem add_is_greater (a n : Nat) (ha : a < M) (hn1 : 1 ≤ n) (hn2 : n < H) :
   unfold rfcLt
   omega
 
-/-- What `bumpSerial` relies on: `soa.Serial++` (Go's wrapping uint32
-increment) always moves the serial forward, including at `2^32 - 1`, so a
-secondary that was NOTIFYed always sees a newer serial. -/
-theorem bump_is_greater (a : Nat) (ha : a < M) :
-    serialGreater ((a + 1) % M) a = true :=
-  add_is_greater a 1 ha (by decide) (by decide)
+/-- `bumpSerial`'s increment: Go's wrapping `Serial++`, then RFC 2136
+§7.11's step past zero. -/
+def bump (a : Nat) : Nat := if (a + 1) % M = 0 then 1 else (a + 1) % M
 
-/-- The wrap case the Go test pins down, proved for the model. -/
-example : serialGreater 0 4294967295 = true := by decide
+/-- §7.11: the automatic increment never produces serial 0. -/
+theorem bump_ne_zero (a : Nat) : bump a ≠ 0 := by
+  unfold bump; split <;> omega
+
+/-- Each automatic increment moves the serial forward in RFC 1982 order,
+including across the wrap at `2^32 - 1` (to 1, not 0). This is about one
+increment from the serial the zone had; it does not cover an UPDATE that
+sets the serial itself, which §3.6 exempts from the increment. -/
+theorem bump_is_greater (a : Nat) (ha : a < M) :
+    serialGreater (bump a) a = true := by
+  rw [serialGreater_iff_rfc]
+  unfold bump rfcLt
+  split <;> omega
+
+/-- The wrap case `TestSerialIncrementSkipsZero` pins down. -/
+example : bump 4294967295 = 1 ∧ serialGreater (bump 4294967295) 4294967295 = true := by
+  decide
 
 /-- RFC 1982 serial comparison is NOT transitive, so code must never chain
 comparisons (e.g. "newer than the newest I saw, which was newer than X").

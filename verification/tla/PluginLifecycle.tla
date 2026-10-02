@@ -36,9 +36,10 @@
 (* Variant picks the plugin's OnStartup:                                   *)
 (*   "original"   -- v0.4.1: overwrite cancel, start a goroutine;          *)
 (*   "idempotent" -- now: cancel what this instance already runs, first;   *)
-(*   "registry"   -- proposed: also hand over a process-wide slot, so a    *)
-(*                   newer OnStartup cancels a goroutine left behind by an *)
-(*                   instance caddy dropped without telling it.            *)
+(*   "registry"   -- now: also stop every goroutine a DIFFERENT instance   *)
+(*                   started (the process-wide registry in radnr.go and    *)
+(*                   reload.go), so OnRestartFailed reclaims what an       *)
+(*                   instance caddy dropped without telling it left behind.*)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
 
@@ -70,13 +71,11 @@ VARIABLES
     \* @type: Int;
     nextG,     \* next unused goroutine id
     \* @type: Int;
-    slot,      \* "registry" variant: the process-wide current goroutine, or 0
-    \* @type: Int;
     restarts,  \* reloads attempted
     \* @type: Str;
     phase      \* "serving" | "done"
 
-vars == <<live, nInst, cancel, running, owner, nextG, slot, restarts, phase>>
+vars == <<live, nInst, cancel, running, owner, nextG, restarts, phase>>
 
 TypeOK ==
     /\ live \in Insts /\ nInst \in Insts
@@ -84,16 +83,15 @@ TypeOK ==
     /\ running \subseteq Gs
     /\ owner \in [Gs -> Insts \cup {0}]
     /\ nextG \in 1..(2 * MaxInst + 1)
-    /\ slot \in Gs \cup {0}
     /\ restarts \in 0..MaxRestarts
     /\ phase \in {"serving", "done"}
 
 -----------------------------------------------------------------------------
 (* The plugin's callbacks, as state transformers on                        *)
-(* s = [cancel, running, owner, nextG, slot].                             *)
+(* s = [cancel, running, owner, nextG].                                   *)
 
 \* The plugin-visible state, as one record. (Apalache type alias.)
-\* @typeAlias: st = { cancel: Int -> Int, running: Set(Int), owner: Int -> Int, nextG: Int, slot: Int };
+\* @typeAlias: st = { cancel: Int -> Int, running: Set(Int), owner: Int -> Int, nextG: Int };
 PluginLifecycle_typedefs == TRUE
 
 \* @type: ($st, Int) => $st;
@@ -104,35 +102,34 @@ OnStartup(s, i) ==
     LET g  == s.nextG
         s1 == IF Variant # "original" /\ s.cancel[i] # 0
                 THEN Stop(s, s.cancel[i]) ELSE s
-        s2 == IF Variant = "registry" /\ s1.slot # 0
-                THEN Stop(s1, s1.slot) ELSE s1
+        \* registry: for h := range registry { if h.owner != r.owner ... }
+        s2 == IF Variant = "registry"
+                THEN [s1 EXCEPT !.running = {x \in @ : s1.owner[x] = i}]
+                ELSE s1
     IN [s2 EXCEPT !.cancel  = [@ EXCEPT ![i] = g],
                   !.running = @ \cup {g},
                   !.owner   = [@ EXCEPT ![g] = i],
-                  !.nextG   = @ + 1,
-                  !.slot    = IF Variant = "registry" THEN g ELSE @]
+                  !.nextG   = @ + 1]
 
 \* @type: ($st, Int) => $st;
 OnShutdown(s, i) ==
     IF s.cancel[i] = 0 THEN s
     ELSE LET g == s.cancel[i] IN
-         [Stop(s, g) EXCEPT !.cancel = [@ EXCEPT ![i] = 0],
-                            !.slot   = IF @ = g THEN 0 ELSE @]
+         [Stop(s, g) EXCEPT !.cancel = [@ EXCEPT ![i] = 0]]
 
-St == [cancel |-> cancel, running |-> running, owner |-> owner,
-       nextG |-> nextG, slot |-> slot]
+St == [cancel |-> cancel, running |-> running, owner |-> owner, nextG |-> nextG]
 
 \* @type: ($st) => Bool;
 SetSt(s) ==
     /\ cancel' = s.cancel /\ running' = s.running /\ owner' = s.owner
-    /\ nextG' = s.nextG /\ slot' = s.slot
+    /\ nextG' = s.nextG
 
 -----------------------------------------------------------------------------
 (* caddy. A restart is sequential on one goroutine and nothing observes    *)
 (* the plugin halfway through it, so each outcome is one atomic step.      *)
 
 Empty == [cancel |-> [i \in Insts |-> 0], running |-> {},
-          owner |-> [g \in Gs |-> 0], nextG |-> 1, slot |-> 0]
+          owner |-> [g \in Gs |-> 0], nextG |-> 1]
 
 \* First startup. Any failure there exits the process, so only success is
 \* interesting.
@@ -140,7 +137,7 @@ Init ==
     LET s == OnStartup(Empty, 1) IN
     /\ live = 1 /\ nInst = 1
     /\ cancel = s.cancel /\ running = s.running /\ owner = s.owner
-    /\ nextG = s.nextG /\ slot = s.slot
+    /\ nextG = s.nextG
     /\ restarts = 0 /\ phase = "serving"
 
 CanRestart == phase = "serving" /\ restarts < MaxRestarts
@@ -232,8 +229,8 @@ CleanShutdown == phase = "done" => running = {}
 -----------------------------------------------------------------------------
 (* Inductive invariant for the "registry" variant, checked by Apalache in  *)
 (* inductive/ for many more restarts than TLC explores: while serving,     *)
-(* exactly one goroutine runs, it is the one in the handover slot, and the *)
-(* live instance owns it and holds its cancel func.                        *)
+(* exactly one goroutine runs, the live instance started it, and the live  *)
+(* instance holds its cancel func.                                         *)
 
 IndInv ==
     /\ live \in Insts /\ nInst \in Insts
@@ -241,16 +238,15 @@ IndInv ==
     /\ running \in SUBSET Gs
     /\ owner \in [Gs -> Insts \cup {0}]
     /\ nextG \in 1..(2 * MaxInst + 1)
-    /\ slot \in Gs \cup {0}
     /\ restarts \in 0..MaxRestarts
     /\ phase \in {"serving", "done"}
     \* Fresh ids: instances and goroutines are numbered in creation order.
     /\ live <= nInst /\ nInst <= restarts + 1
     /\ nextG <= 2 + 2 * restarts
     /\ phase = "serving" =>
-         /\ slot # 0 /\ slot < nextG
-         /\ running = {slot}
-         /\ owner[slot] = live /\ cancel[live] = slot
+         /\ cancel[live] # 0 /\ cancel[live] < nextG
+         /\ running = {cancel[live]}
+         /\ owner[cancel[live]] = live
     /\ phase = "done" => running = {}
 
 =============================================================================

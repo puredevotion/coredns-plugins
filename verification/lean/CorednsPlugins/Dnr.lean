@@ -13,6 +13,19 @@ length in units of 8 octets, covering the whole option).
 Abstracted: `netip.Addr` is its 16-byte `As16()` form, and `Marshal`'s
 "is IPv6" check is replaced by the hypothesis that every address is 16
 bytes.
+
+What this does and does not say about RFC 9463. The layout `marshal`
+produces is the §6.1 RA option with all its fields: Type 144, Length "in
+units of 8 octets" counting Type and Length, Service Priority, Lifetime, ADN
+Length, ADN, Addr Length, the addresses, SvcParams Length, SvcParams, and
+padding ("The option MUST be padded with zeros so that the full enclosed
+data is a multiple of 8 octets"). The round trip is proved for that layout,
+which is the one radnr sends: its config always has at least one address.
+§6.1's ADN-only form, where "the "Addr Length", "ipv6-address(es)", and
+"Service Parameters (SvcParams)" fields are not present", is not modelled:
+`Marshal` never produces it (given no addresses it still writes both length
+fields, as zero), and `Unmarshal` does not accept it unless at least four
+octets of padding happen to stand in for those fields.
 -/
 
 namespace Dnr

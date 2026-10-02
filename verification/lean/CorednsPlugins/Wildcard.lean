@@ -16,42 +16,65 @@ func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 
 func wildcardOf(name string) (string, bool) {
 	i := strings.IndexByte(name, '.')
-	if i < 0 { return "", false }
+	if i <= 0 { return "", false }
 	return "*" + name[i:], true
 }
 ```
 
-Names are modelled as `List Char` already lower-cased (`strings.ToLower`
-is applied before any lookup, and SAN keys are lower-cased at load), and
-`byName` as a partial function.
+Names are modelled as `List Char` already lower-cased, and `byName` as a
+partial function. The rule formalised is RFC 9525 §6.3 (which obsoletes
+RFC 6125): "A wildcard in a presented identifier can only match one label
+in a reference identifier", with "the wildcard character [appearing] only as
+the complete content of the left-most label". RFC 9525 states it for the
+client; the server applies it so as never to select a certificate a client
+would reject.
+
+Assumption, not proved here: the Go code lower-cases with `strings.ToLower`,
+which is Unicode case folding, while RFC 9525 §6.3 and RFC 4343 §3 fold
+ASCII only. The model's "already lower-cased" therefore hides that a
+non-ASCII SNI (U+212A KELVIN SIGN, say) can fold onto an ASCII SAN.
 -/
 
 namespace Wildcard
 
-/-- `wildcardOf`: replace everything before the first `.` with `*`. -/
+/-- `"*" + name[i:]` for the first `.` at `i`, whatever `i` is. -/
+def fromFirstDot : List Char → Option (List Char)
+  | [] => none
+  | c :: cs => if c = '.' then some ('*' :: '.' :: cs) else fromFirstDot cs
+
+/-- `wildcardOf`: replace the first label with `*`, provided there is a
+first label, i.e. `i > 0`. -/
 def wildcardOf : List Char → Option (List Char)
   | [] => none
-  | c :: cs => if c = '.' then some ('*' :: '.' :: cs) else wildcardOf cs
+  | c :: cs => if c = '.' then none else fromFirstDot cs
 
-/-- The result, when there is one, always has the shape `*.<suffix>`. -/
-theorem wildcardOf_shape {s w : List Char} (h : wildcardOf s = some w) :
+theorem fromFirstDot_shape {s w : List Char} (h : fromFirstDot s = some w) :
     ∃ d, w = '*' :: '.' :: d := by
   induction s with
-  | nil => simp [wildcardOf] at h
+  | nil => simp [fromFirstDot] at h
   | cons c cs ih =>
-    unfold wildcardOf at h
+    unfold fromFirstDot at h
     split at h
     · exact ⟨cs, (Option.some.inj h).symm⟩
     · exact ih h
 
-/-- Exact characterisation: `wildcardOf s` is `*.d` precisely when `s` is a
-dot-free first label `l`, a dot, then `d`. -/
-theorem wildcardOf_eq_iff (s d : List Char) :
-    wildcardOf s = some ('*' :: '.' :: d) ↔ ∃ l, '.' ∉ l ∧ s = l ++ '.' :: d := by
+/-- The result, when there is one, always has the shape `*.<suffix>`. -/
+theorem wildcardOf_shape {s w : List Char} (h : wildcardOf s = some w) :
+    ∃ d, w = '*' :: '.' :: d := by
+  cases s with
+  | nil => simp [wildcardOf] at h
+  | cons c cs =>
+    unfold wildcardOf at h
+    by_cases hc : c = '.'
+    · simp [hc] at h
+    · simp only [hc, if_false] at h; exact fromFirstDot_shape h
+
+theorem fromFirstDot_eq_iff (s d : List Char) :
+    fromFirstDot s = some ('*' :: '.' :: d) ↔ ∃ l, '.' ∉ l ∧ s = l ++ '.' :: d := by
   induction s with
-  | nil => simp [wildcardOf]
+  | nil => simp [fromFirstDot]
   | cons c cs ih =>
-    unfold wildcardOf
+    unfold fromFirstDot
     by_cases hc : c = '.'
     · subst hc
       simp only [if_true, Option.some.injEq, List.cons.injEq, true_and]
@@ -75,21 +98,53 @@ theorem wildcardOf_eq_iff (s d : List Char) :
           simp only [List.cons_append, List.cons.injEq] at he
           exact ⟨xs, fun h => hl (List.mem_cons_of_mem _ h), he.2⟩
 
-/-- RFC 6125 §6.4.3: `*.example.com` must not cover `example.com` itself. -/
+/-- Exact characterisation: `wildcardOf s` is `*.d` precisely when `s` is a
+non-empty, dot-free first label `l`, a dot, then `d`. -/
+theorem wildcardOf_eq_iff (s d : List Char) :
+    wildcardOf s = some ('*' :: '.' :: d) ↔
+      ∃ l, l ≠ [] ∧ '.' ∉ l ∧ s = l ++ '.' :: d := by
+  cases s with
+  | nil => simp [wildcardOf]
+  | cons c cs =>
+    unfold wildcardOf
+    by_cases hc : c = '.'
+    · subst hc
+      simp only [if_true, reduceCtorEq, false_iff, not_exists, not_and]
+      intro l hne hl he
+      cases l with
+      | nil => exact hne rfl
+      | cons x xs =>
+        simp only [List.cons_append, List.cons.injEq] at he
+        exact hl (he.1 ▸ List.mem_cons_self)
+    · simp only [if_neg hc]
+      rw [fromFirstDot_eq_iff]
+      constructor
+      · rintro ⟨l, hl, he⟩
+        exact ⟨c :: l, by simp, by simp [hl, Ne.symm hc], by simp [he]⟩
+      · rintro ⟨l, _, hl, he⟩
+        cases l with
+        | nil => simp at he; exact absurd he.1 hc
+        | cons x xs =>
+          simp only [List.cons_append, List.cons.injEq] at he
+          exact ⟨xs, fun h => hl (List.mem_cons_of_mem _ h), he.2⟩
+
+/-- RFC 9525 §6.3, one label: `*.example.com` must not cover `example.com`
+itself (zero labels). -/
 theorem wildcard_not_apex (d : List Char) :
     wildcardOf d ≠ some ('*' :: '.' :: d) := by
   intro h
-  obtain ⟨l, _, he⟩ := (wildcardOf_eq_iff d d).1 h
+  obtain ⟨l, _, _, he⟩ := (wildcardOf_eq_iff d d).1 h
   have := congrArg List.length he
   simp at this
   omega
 
-/-- RFC 6125 §6.4.3: one label only. `*.example.com` does not cover
-`a.b.example.com`: any name the wildcard covers has a single extra label. -/
+/-- RFC 9525 §6.3, one label: `*.example.com` does not cover
+`a.b.example.com` (two labels): any name the wildcard covers has exactly one
+extra label. -/
 theorem wildcard_single_label (l₁ l₂ d : List Char) (h₁ : '.' ∉ l₁) :
     wildcardOf (l₁ ++ '.' :: l₂ ++ '.' :: d) ≠ some ('*' :: '.' :: d) := by
   intro h
-  obtain ⟨l, hl, he⟩ := (wildcardOf_eq_iff _ d).1 h
+  obtain ⟨l, _, hl, he⟩ := (wildcardOf_eq_iff _ d).1 h
   -- Both sides split at their first dot; l₁ and l are dot-free, so l = l₁.
   have key : ∀ (a b : List Char) (x y : List Char), '.' ∉ a → '.' ∉ b →
       a ++ '.' :: x = b ++ '.' :: y → a = b ∧ x = y := by
@@ -118,14 +173,10 @@ theorem wildcard_single_label (l₁ l₂ d : List Char) (h₁ : '.' ∉ l₁) :
   simp at hlen
   omega
 
-/-- The empty first label is the one place the implementation is looser than
-RFC 6125, which only lets `*` stand for a whole, non-empty label: a
-ClientHello with SNI `.example.com` selects the `*.example.com` cert, even
-in strict mode. Harmless for authentication (the client then fails to match
-the cert against its own name), but it is a non-match that strict mode does
-not refuse. -/
-theorem empty_label_selects_wildcard (d : List Char) :
-    wildcardOf ('.' :: d) = some ('*' :: '.' :: d) := by
+/-- RFC 9525 §6.3, one label: an empty first label is not a label, so
+`.example.com` has no wildcard form. (Before the `i <= 0` check,
+`wildcardOf` returned `*.example.com` here.) -/
+theorem empty_label_no_wildcard (d : List Char) : wildcardOf ('.' :: d) = none := by
   simp [wildcardOf]
 
 /-- The SAN lookup half of `GetCertificate`: exact key, then wildcard key. -/
@@ -176,5 +227,12 @@ theorem exact_wins {C : Type} (byName : List Char → Option C) (fb : C) (strict
     (sni : List Char) (c : C) (hne : sni ≠ []) (h : byName sni = some c) :
     getCertificate byName fb strict sni = some c := by
   simp [getCertificate, lookup, hne, h]
+
+/-- So strict mode refuses SNI `.example.com` unless a SAN is literally
+`.example.com`, even when a `*.example.com` cert is loaded. -/
+theorem strict_refuses_empty_label {C : Type} (byName : List Char → Option C) (fb : C)
+    (d : List Char) (h : byName ('.' :: d) = none) :
+    getCertificate byName fb true ('.' :: d) = none := by
+  simp [getCertificate, lookup, h, empty_label_no_wildcard]
 
 end Wildcard

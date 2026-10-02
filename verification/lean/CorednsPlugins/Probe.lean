@@ -8,8 +8,21 @@ Labels are byte strings; a byte is a `Nat`. `.` is 46, `-` 45, `_` 95.
   case of every query they send, so anything else would make a measurement
   depend on a coin flip.
 * `parseKeyTag_format`: `ParseKeyTagQuery(FormatKeyTagQuery(tags))` returns
-  the tags (sorted, as the format requires) for every legal tag list, i.e.
-  the RFC 8145 §5.2 label the server emits is the label it accepts.
+  the tags sorted smallest to largest, for every tag list that fits in a DNS
+  label: the RFC 8145 §5.1 label the server emits is the label it accepts.
+  RFC 8145 §5.1: "Hexadecimal values MUST be zero-padded to four hexadecimal
+  digits", and "When representing multiple Key Tag values, they MUST be
+  sorted in order from smallest to largest".
+* `renderLabel_length`, `fits_label_iff`: that label is `5n + 3` octets for
+  `n` tags, so RFC 1035 §2.3.4 ("labels 63 octets or less") allows at most
+  12. The code's own cap of 16 (`maxKeyTagsPerQuery`) is never reached on
+  the wire.
+
+RFC 4343 §3 folds ASCII only ("0x41 to 0x5A ... MUST match ... 0x61 to
+0x7A"), and so does `lower` below, matching `toLowerASCII` in labels.go.
+`ParseKeyTagQuery` lower-cases its `_ta-` prefix with `strings.ToLower`
+(Unicode) instead; no non-ASCII character folds into `_ta-`, so the model's
+ASCII prefix check accepts exactly the same labels.
 
 The modifier table and the conflict check are parameters (`names`, `okMods`):
 the case-insensitivity result holds whatever they contain.
@@ -248,8 +261,13 @@ theorem parseTag_formatTag (n : Nat) (h : n < 65536) : parseTag (formatTag n) = 
 /-- `_ta-`. -/
 def prefix_ : List Nat := [95, 116, 97, 45]
 
-/-- `FormatKeyTagQuery`, on the already-sorted copy it renders. -/
-def formatLabel (ts : List Nat) : List Nat := prefix_ ++ joinWith 45 (ts.map formatTag)
+/-- The rendering half of `FormatKeyTagQuery`: `_ta-` and the tags as
+`%04x`, hyphen-separated, in the order given. -/
+def renderLabel (ts : List Nat) : List Nat := prefix_ ++ joinWith 45 (ts.map formatTag)
+
+/-- `FormatKeyTagQuery`: `slices.Sort` a copy, then render it. -/
+def formatKeyTagQuery (ts : List Nat) : List Nat :=
+  renderLabel (ts.mergeSort (fun a b => decide (a ≤ b)))
 
 /-- `ParseKeyTagQuery`. -/
 def parseKeyTag (label : List Nat) : Option (List Nat) :=
@@ -293,33 +311,32 @@ theorem mapM_parseTag (ts : List Nat) (h : ∀ t ∈ ts, t < 65536) :
 
 /-- `_TA-4444` (any case): one tag, 0x4444. -/
 example : parseKeyTag [95, 84, 65, 45, 52, 52, 52, 52] = some [0x4444] := by decide
-/-- `_ta-635` is refused: RFC 8145 says MUST zero-pad. -/
+/-- `_ta-635` is refused: RFC 8145 §5.1 says MUST zero-pad. -/
 example : parseKeyTag [95, 116, 97, 45, 54, 51, 53] = none := by decide
-/-- `_ta-0635-7aae-aa1b`, the docstring example. -/
-example : parseKeyTag (formatLabel [0x0635, 0x7aae, 0xaa1b]) = some [0x0635, 0x7aae, 0xaa1b] := by
+/-- `_ta-0635-7aae-aa1b`, the RFC 8145 §5.1 example. -/
+example : parseKeyTag (renderLabel [0x0635, 0x7aae, 0xaa1b]) = some [0x0635, 0x7aae, 0xaa1b] := by
   decide
 
-/-- **Round trip.** For every list of 1 to 16 key tags (`maxKeyTagsPerQuery`)
-the label `FormatKeyTagQuery` renders is one `ParseKeyTagQuery` accepts, and
-it decodes to exactly the tags rendered. -/
-theorem parseKeyTag_format (ts : List Nat) (h1 : ts ≠ []) (h16 : ts.length ≤ 16)
-    (hr : ∀ t ∈ ts, t < 65536) : parseKeyTag (formatLabel ts) = some ts := by
+/-- Rendered tags decode to exactly the tags rendered, in their order, for
+1 to 16 (`maxKeyTagsPerQuery`) of them. -/
+theorem parseKeyTag_render (ts : List Nat) (h1 : ts ≠ []) (h16 : ts.length ≤ 16)
+    (hr : ∀ t ∈ ts, t < 65536) : parseKeyTag (renderLabel ts) = some ts := by
   have hne : ts.map formatTag ≠ [] := by simpa using h1
   have hnodash : ∀ l ∈ ts.map formatTag, 45 ∉ l := by
     intro l hl m
     obtain ⟨t, _, rfl⟩ := List.mem_map.1 hl
     have := formatTag_hex m; omega
-  have hnodot : 46 ∉ formatLabel ts := by
-    simp only [formatLabel, prefix_, List.cons_append, List.nil_append, List.mem_cons,
+  have hnodot : 46 ∉ renderLabel ts := by
+    simp only [renderLabel, prefix_, List.cons_append, List.nil_append, List.mem_cons,
       not_or]
     refine ⟨by decide, by decide, by decide, by decide, ?_⟩
     apply not_mem_joinWith (by decide)
     intro l hl m
     obtain ⟨t, _, rfl⟩ := List.mem_map.1 hl
     have := formatTag_hex m; omega
-  have hrest : (formatLabel ts).drop 4 = joinWith 45 (ts.map formatTag) := by
-    simp [formatLabel, prefix_]
-  have hpre : (formatLabel ts).take 4 = prefix_ := by simp [formatLabel, prefix_]
+  have hrest : (renderLabel ts).drop 4 = joinWith 45 (ts.map formatTag) := by
+    simp [renderLabel, prefix_]
+  have hpre : (renderLabel ts).take 4 = prefix_ := by simp [renderLabel, prefix_]
   have hrestne : joinWith 45 (ts.map formatTag) ≠ [] := by
     cases ts with
     | nil => exact absurd rfl h1
@@ -331,5 +348,51 @@ theorem parseKeyTag_format (ts : List Nat) (h1 : ts ≠ []) (h16 : ts.length ≤
   rw [if_neg hnodot, hpre, if_neg (by decide), hrest, if_neg hrestne,
     splitOn_joinWith 45 _ hne hnodash, if_neg (by simpa using h16)]
   exact mapM_parseTag ts hr
+
+theorem joinWith_tags_length (ts : List Nat) (h : ts ≠ []) :
+    (joinWith 45 (ts.map formatTag)).length = 5 * ts.length - 1 := by
+  induction ts with
+  | nil => exact absurd rfl h
+  | cons t ts ih =>
+    cases ts with
+    | nil => simp [joinWith, formatTag]
+    | cons t' ts' =>
+      have := ih (by simp)
+      simp only [List.map_cons, joinWith, List.length_append, List.length_cons] at this ⊢
+      rw [this]; simp [formatTag]; omega
+
+/-- The label for `n` tags is `5n + 3` octets: `_ta-`, four digits per tag,
+and `n - 1` hyphens. -/
+theorem renderLabel_length (ts : List Nat) (h : ts ≠ []) :
+    (renderLabel ts).length = 5 * ts.length + 3 := by
+  have hl : ts.length ≥ 1 := by cases ts with
+    | nil => exact absurd rfl h
+    | cons _ _ => simp
+  simp only [renderLabel, prefix_, List.length_append, joinWith_tags_length ts h]
+  simp; omega
+
+/-- RFC 1035 §2.3.4, "labels 63 octets or less": a Key Tag query label
+exists for 1 to 12 tags, and for no more. -/
+theorem fits_label_iff (ts : List Nat) (h : ts ≠ []) :
+    (renderLabel ts).length ≤ 63 ↔ ts.length ≤ 12 := by
+  rw [renderLabel_length ts h]; omega
+
+/-- **Round trip.** For every list of 1 to 12 key tags (all that fit in a
+label), `ParseKeyTagQuery(FormatKeyTagQuery(tags))` succeeds and returns the
+tags sorted smallest to largest, as RFC 8145 §5.1 requires of the sender. -/
+theorem parseKeyTag_format (ts : List Nat) (h1 : ts ≠ []) (h12 : ts.length ≤ 12)
+    (hr : ∀ t ∈ ts, t < 65536) :
+    parseKeyTag (formatKeyTagQuery ts) = some (ts.mergeSort (fun a b => decide (a ≤ b))) ∧
+    (ts.mergeSort (fun a b => decide (a ≤ b))).Pairwise (fun a b => a ≤ b) := by
+  have hlen := List.length_mergeSort (le := fun a b => decide (a ≤ b)) ts
+  refine ⟨parseKeyTag_render _ ?_ (by omega) ?_, ?_⟩
+  · intro e; rw [e] at hlen; cases ts with
+    | nil => exact h1 rfl
+    | cons _ _ => simp at hlen
+  · intro t ht; exact hr t (List.mem_mergeSort.1 ht)
+  · have := List.sorted_mergeSort (le := fun a b => decide (a ≤ b))
+      (fun a b c hab hbc => by simp at hab hbc ⊢; omega)
+      (fun a b => by simp; omega) ts
+    simpa using this
 
 end Probe

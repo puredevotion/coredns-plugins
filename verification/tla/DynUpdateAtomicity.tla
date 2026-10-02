@@ -123,8 +123,12 @@ Spec == Init /\ [][Next]_vars
 
 -----------------------------------------------------------------------------
 
-\* An UPDATE answered SERVFAIL left the zone exactly as it was. (RFC 2136
-\* §3.4.2.1: either all of an update lands, or none of it.)
+\* An UPDATE answered SERVFAIL left the zone exactly as it was. RFC 2136
+\* §3.4.2.1: "If any system failure ... occurs during the processing of this
+\* section, signal SERVFAIL to the requestor and undo all updates applied to
+\* the zone during this transaction." (§3.7, that a concurrent QUERY never
+\* sees a half-applied update, is not modelled: there is no query process.
+\* The Go code gets it from the lock and the snapshot swap.)
 FailedUpdateChangesNothing == pc = "idle" => Content(rrs) = committed
 
 \* Between UPDATEs, the records prerequisites are checked against are the

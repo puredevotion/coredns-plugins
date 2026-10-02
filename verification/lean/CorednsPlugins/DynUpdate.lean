@@ -17,15 +17,32 @@ evaluation):
 * an UPDATE adding a CNAME where one already exists leaves **two** CNAMEs,
   where RFC 2136 §3.4.2.2 says to replace it.
 
-`applyAddRFC` is RFC 2136 §3.4.2.2, and what `applyAdd` now does: an SOA or CNAME update *replaces* the
-existing one, and an SOA anywhere but the apex is ignored. For it,
-`apply_preserves_wf` proves that every sequence of update records keeps a
-well-formed zone well-formed: exactly one SOA, at the apex; at least one
-apex NS; no CNAME next to other data; at most one CNAME per name.
+`applyAddRFC` is what `applyAdd` now does, and follows the SOA and CNAME
+rules of RFC 2136 §3.4.2.2: "In case of duplicate RDATAs (which for SOA RRs
+is always the case ...), the Zone RR is replaced by Update RR. If the TYPE is
+SOA and there is no Zone SOA RR, or the new SOA.SERIAL is lower (according
+to [RFC1982]) than or equal to the current Zone SOA RR's SERIAL, the Update
+RR is ignored. In the case of a CNAME Update RR and a non-CNAME Zone RRset
+or vice versa, ignore the CNAME Update RR, otherwise replace the CNAME Zone
+RR with the CNAME Update RR." An SOA anywhere but the apex is ignored:
+§1.1.5 compares SOAs on "NAME, CLASS and TYPE", so one at another name
+could only be added beside the zone's, and "it is not possible to have more
+than one SOA per zone". The deletes follow §3.4.2.3
+(RRset; SOA and NS survive at the apex) and §3.4.2.4 (one RR; the apex SOA
+and the last apex NS are kept).
 
-TTL refresh is modelled as rewriting the TTL of every record with the same
-key; the Go code rewrites the first one. No property here mentions TTLs, so
-the difference cannot matter to them.
+For it, `apply_preserves_wf` proves that every sequence of update records
+keeps a well-formed zone well-formed: exactly one SOA, at the apex; at least
+one apex NS; no CNAME next to other data; at most one CNAME per name.
+
+Not modelled, so not claimed:
+* §3.4.2.2's WKS replacement rule (WKS is obsolete; `applyAdd` has none).
+* Case-insensitive comparison of domain names inside RDATA (RFC 2136
+  §1.1.2, via RFC 1035 §2.3.3): RDATA here is an atom, compared exactly,
+  while the Go code compares presentation forms case-sensitively.
+* RFC 2181 §5.2, "the TTLs of all RRs in an RRSet must be the same". TTL
+  refresh is modelled as rewriting the TTL of every record with the same
+  key; the Go code rewrites the first one. No property here mentions TTLs.
 -/
 
 namespace DynUpdate
@@ -133,11 +150,12 @@ def apply (addFn : Nat → List RR → RR → List RR) (apex : Nat) (z : List RR
     (us : List Upd) : List RR :=
   us.foldl (step addFn apex) z
 
-/-- `bumpSerial`: increment the first SOA's serial, wrapping. -/
+/-- `bumpSerial`: increment the first SOA's serial, wrapping and stepping
+past zero (RFC 2136 §7.11, `Serial.bump`). -/
 def bumpSerial : List RR → List RR
   | [] => []
   | r :: rs =>
-    if isSOA r then { r with data := (r.data + 1) % 4294967296 } :: rs
+    if isSOA r then { r with data := Serial.bump r.data } :: rs
     else r :: bumpSerial rs
 
 /-- The serial secondaries see. `file.Zone.Insert` stores each SOA it is
