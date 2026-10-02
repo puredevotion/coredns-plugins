@@ -3,6 +3,7 @@ package dynupdate
 import (
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/miekg/dns"
 )
@@ -16,8 +17,56 @@ func keyOf(name string, rrtype uint16) rrsetKey {
 	return rrsetKey{name: strings.ToLower(dns.CanonicalName(name)), rrtype: rrtype}
 }
 
+// sameName reports whether rr's owner name, canonicalised, is canonical.
+//
+// Compared in place rather than by canonicalising the record's name first:
+// that built two strings per record, and every §3.2 prerequisite and every
+// §3.4 update runs this over the whole zone. The canonical form is the fully
+// qualified name folded to lower case, so the comparison is a case-folded
+// equality that tolerates a missing trailing dot. Only a name made of
+// non-ASCII bytes, which strings.ToLower folds differently from an ASCII
+// fold, goes through the original construction.
 func sameName(rr dns.RR, canonical string) bool {
-	return strings.ToLower(dns.CanonicalName(rr.Header().Name)) == canonical
+	name := rr.Header().Name
+	if !isASCII(name) {
+		return strings.ToLower(dns.CanonicalName(name)) == canonical
+	}
+	if name == "" || name[len(name)-1] != '.' {
+		// Fqdn appends the dot, except to a bare "." which is already one.
+		return len(canonical) == len(name)+1 && canonical[len(name)] == '.' && equalFoldASCII(name, canonical[:len(name)])
+	}
+	return equalFoldASCII(name, canonical)
+}
+
+// isASCII reports whether s has no byte with the high bit set.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
+}
+
+// equalFoldASCII compares a and b byte for byte, folding A-Z onto a-z. The
+// same fold strings.ToLower applies to ASCII input, without the copy.
+func equalFoldASCII(a, b string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		ca, cb := a[i], b[i]
+		if 'A' <= ca && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+		if 'A' <= cb && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+		if ca != cb {
+			return false
+		}
+	}
+	return true
 }
 
 // inZone reports whether name is at or below the served origin. RFC 2136 calls
@@ -70,9 +119,25 @@ func rdataKey(rr dns.RR) string {
 	return c.String()
 }
 
+// indexOfRR finds want in rrs by RFC 2136's record identity: name, type and
+// RDATA, not TTL or class.
+//
+// Type and owner are compared first and the RDATA rendering is reached only
+// for records that share both. The rendering (rdataKey) copies the record
+// and formats it as text, so doing that for every record in the zone made
+// one add against a 10 000-record zone cost 300 000 allocations; almost all
+// of them differed in type or name and never needed rendering.
 func indexOfRR(rrs []dns.RR, want dns.RR) int {
-	k := rdataKey(want)
+	wh := want.Header()
+	canonical := strings.ToLower(dns.CanonicalName(wh.Name))
+	k := ""
 	for i, rr := range rrs {
+		if rr.Header().Rrtype != wh.Rrtype || !sameName(rr, canonical) {
+			continue
+		}
+		if k == "" {
+			k = rdataKey(want)
+		}
 		if rdataKey(rr) == k {
 			return i
 		}

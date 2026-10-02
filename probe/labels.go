@@ -115,7 +115,29 @@ var modifierNames = map[string]Modifier{
 func (m Modifier) Has(want Modifier) bool { return m&want == want }
 
 // String renders the set in a stable order for logging and tests.
+//
+// Read from a table built once: String runs on every observed query (it is
+// Observation.Mods), and rendering it there cost a slice and a Join per
+// query. Nine modifiers give 512 possible sets, small enough to render all of
+// them up front.
 func (m Modifier) String() string {
+	if int(m) < len(modStrings) {
+		return modStrings[m]
+	}
+	return renderModifier(m)
+}
+
+// modStrings is every modifier set's rendering, indexed by the set.
+var modStrings = func() [1 << len(modifierOrder)]string {
+	var table [1 << len(modifierOrder)]string
+	for m := range table {
+		table[m] = renderModifier(Modifier(m))
+	}
+	return table
+}()
+
+// renderModifier is the rendering modStrings is built from.
+func renderModifier(m Modifier) string {
 	if m == 0 {
 		return modLabelNone
 	}
@@ -130,7 +152,8 @@ func (m Modifier) String() string {
 }
 
 // modifierOrder fixes String()'s output order (map iteration is randomised).
-var modifierOrder = []string{
+// An array rather than a slice so modStrings can be sized from it.
+var modifierOrder = [...]string{
 	modLabelUnsigned, modLabelBadSig, "expiredsig", "futuresig",
 	modLabelTruncate, modLabelNXDOMAIN, modLabelNXNAME, modLabelServfail, modLabelBig,
 }
@@ -174,18 +197,30 @@ func ParseQuery(sub string) (Query, bool) {
 		return Query{}, false
 	}
 
-	labels := strings.Split(sub, ".")
-	// The token is the rightmost label (closest to the zone).
-	tokenLabel := labels[len(labels)-1]
-	modLabels := labels[:len(labels)-1]
+	// The token is the rightmost label (closest to the zone). Labels are cut
+	// off the string from the right rather than split into a slice: this runs
+	// on every query, and the slice was the one allocation on the baseline
+	// path.
+	mods, tokenLabel := sub, sub
+	if i := strings.LastIndexByte(sub, '.'); i >= 0 {
+		mods, tokenLabel = sub[:i], sub[i+1:]
+	} else {
+		mods = ""
+	}
 
 	token, ok := parseToken(tokenLabel)
 	if !ok {
 		return Query{}, false
 	}
 
-	var mods Modifier
-	for _, l := range modLabels {
+	var set Modifier
+	for mods != "" {
+		var l string
+		if i := strings.IndexByte(mods, '.'); i >= 0 {
+			l, mods = mods[:i], mods[i+1:]
+		} else {
+			l, mods = mods, ""
+		}
 		name, isMod := strings.CutPrefix(l, "_")
 		if !isMod {
 			// A bare extra label is not part of this grammar. Refusing beats
@@ -193,23 +228,47 @@ func ParseQuery(sub string) (Query, bool) {
 			// query would report a measurement the caller did not ask for.
 			return Query{}, false
 		}
-		m, known := modifierNames[toLowerASCII(name)]
+		m, known := lookupModifier(name)
 		if !known {
 			return Query{}, false
 		}
-		if mods.Has(m) {
+		if set.Has(m) {
 			return Query{}, false // Repeated.
 		}
-		mods |= m
+		set |= m
 	}
 
 	for _, group := range conflicts {
-		if bits := mods & group; bits != 0 && bits != bits&-bits {
+		if bits := set & group; bits != 0 && bits != bits&-bits {
 			return Query{}, false // More than one bit from a mutually exclusive group.
 		}
 	}
 
-	return Query{Token: token, Mods: mods}, true
+	return Query{Token: token, Mods: set}, true
+}
+
+// maxModifierLabel bounds the lowercase buffer lookupModifier folds into. The
+// longest modifier label is ten bytes; anything longer cannot be one.
+const maxModifierLabel = 16
+
+// lookupModifier resolves a modifier label, folding ASCII case the way
+// toLowerASCII does but into a stack buffer, so a 0x20-randomised query costs
+// no allocation to parse. The compiler recognises a map index by
+// string(buf) and does not materialise the string.
+func lookupModifier(name string) (Modifier, bool) {
+	if len(name) > maxModifierLabel {
+		return 0, false
+	}
+	var buf [maxModifierLabel]byte
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		buf[i] = c
+	}
+	m, ok := modifierNames[string(buf[:len(name)])]
+	return m, ok
 }
 
 // parseToken validates the correlation label: hex only, bounded length. Hex

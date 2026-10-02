@@ -16,8 +16,8 @@ const testZone = "check.example.com."
 // file layout LoadSigner expects, and loads it back. Going through the files
 // rather than constructing a Signer directly means these tests also cover the
 // loader, which is where a misconfiguration would actually bite.
-func newTestSigner(t *testing.T, validity time.Duration) *Signer {
-	t.Helper()
+func newTestSigner(tb testing.TB, validity time.Duration) *Signer {
+	tb.Helper()
 
 	key := &dns.DNSKEY{
 		Hdr: dns.RR_Header{
@@ -30,21 +30,21 @@ func newTestSigner(t *testing.T, validity time.Duration) *Signer {
 	}
 	priv, err := key.Generate(256)
 	if err != nil {
-		t.Fatalf("generating key: %v", err)
+		tb.Fatalf("generating key: %v", err)
 	}
 
-	dir := t.TempDir()
+	dir := tb.TempDir()
 	base := filepath.Join(dir, "Kcheck.example.com.+013+00000")
 	if writeErr := os.WriteFile(base+".key", []byte(key.String()+"\n"), 0o600); writeErr != nil {
-		t.Fatalf("writing .key: %v", writeErr)
+		tb.Fatalf("writing .key: %v", writeErr)
 	}
 	if writeErr := os.WriteFile(base+".private", []byte(key.PrivateKeyString(priv)), 0o600); writeErr != nil {
-		t.Fatalf("writing .private: %v", writeErr)
+		tb.Fatalf("writing .private: %v", writeErr)
 	}
 
 	s, err := LoadSigner(base, validity)
 	if err != nil {
-		t.Fatalf("LoadSigner: %v", err)
+		tb.Fatalf("LoadSigner: %v", err)
 	}
 	signerBasenames[s] = base
 	return s
@@ -316,5 +316,41 @@ func TestRRSIGTimeMatchesLibraryRoundTrip(t *testing.T) {
 	}
 	if back := dns.TimeToString(got); back != "20260730123456" {
 		t.Errorf("rrsigTime(%v) = %d, which renders as %q, want 20260730123456", when, got, back)
+	}
+
+	// RrsigTime does dns.StringToTime's arithmetic without the string round
+	// trip, so it must agree with the library at every point that arithmetic
+	// has a corner: the epoch, now, sub-second times (the string form has no
+	// fraction), the 2^31 and 2^32 second boundaries where RFC 1982 wraps, and
+	// a date past 2106 that only serial arithmetic can express.
+	for _, tc := range []time.Time{
+		time.Unix(0, 0).UTC(),
+		time.Unix(1, 0).UTC(),
+		time.Now().UTC(),
+		time.Date(2026, 7, 30, 12, 34, 56, 789_000_000, time.UTC),
+		time.Unix(1<<31-1, 0).UTC(),
+		time.Unix(1<<31, 0).UTC(),
+		time.Unix(1<<31+1, 0).UTC(),
+		time.Unix(1<<32-1, 0).UTC(),
+		time.Unix(1<<32, 0).UTC(),
+		time.Unix(1<<32+12345, 0).UTC(),
+		time.Date(2150, 1, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2300, 6, 15, 1, 2, 3, 0, time.UTC),
+	} {
+		want, err := dns.StringToTime(tc.Format("20060102150405"))
+		if err != nil {
+			t.Fatalf("dns.StringToTime(%v): %v", tc, err)
+		}
+		got, err := rrsigTime(tc)
+		if err != nil {
+			t.Fatalf("rrsigTime(%v): %v", tc, err)
+		}
+		if got != want {
+			t.Errorf("rrsigTime(%v) = %d, dns.StringToTime = %d", tc, got, want)
+		}
+	}
+
+	if _, err := rrsigTime(time.Unix(-1, 0)); err == nil {
+		t.Error("rrsigTime accepted a time before the epoch")
 	}
 }

@@ -31,6 +31,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/coredns/coredns/plugin"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
@@ -57,6 +59,11 @@ type Probe struct {
 	// signature-related modifiers become no-ops, which is worth saying out
 	// loud because it silently guts most of the point of the zone.
 	Signer *Signer
+
+	// SoaSigs caches the signature over the apex SOA, one slot per signature
+	// modifier set — see signSOA. Zero value is an empty cache. Placed with
+	// the pointer-bearing fields so the struct's pointer data stays leading.
+	soaSigs [signatureMods + 1]atomic.Pointer[cachedSig]
 
 	// Zone is the origin this plugin is authoritative for, normalised and
 	// fully qualified.
@@ -105,11 +112,11 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	// token that provoked it without a second process or a shared database.
 	// Tested first only for readability; setup guarantees the two zones cannot
 	// overlap, so the order carries no meaning.
-	if p.AgentDomain != "" && plugin.Name(p.AgentDomain).Matches(qname) {
+	if p.AgentDomain != "" && zoneMatches(p.AgentDomain, qname) {
 		return p.serveReport(state, w, r)
 	}
 
-	if !plugin.Name(p.Zone).Matches(qname) {
+	if !zoneMatches(p.Zone, qname) {
 		next, err := plugin.NextOrFailure(p.Name(), p.Next, ctx, w, r)
 		if err != nil {
 			return next, fmt.Errorf("call next plugin: %w", err)
@@ -199,7 +206,7 @@ func (p *Probe) observeAndRecord(state *request.Request, w dns.ResponseWriter, r
 	// tags means "did not say", not "does not have it" — hence the guard on
 	// len(KeyTags) rather than an unconditional comparison.
 	if len(obs.KeyTags) > 0 && p.Signer != nil {
-		obs.KnowsZoneKey = hasKeyTag(obs.KeyTags, p.Signer.DNSKEY().KeyTag())
+		obs.KnowsZoneKey = hasKeyTag(obs.KeyTags, p.Signer.KeyTag())
 	}
 
 	// Before Record, and unconditionally: the aggregate must not depend on
@@ -363,7 +370,13 @@ func (p *Probe) serveApex(state *request.Request, w dns.ResponseWriter, r *dns.M
 		// Apex records are never spoiled: a broken DNSKEY or SOA signature
 		// would make the whole zone bogus and every per-query variant below it
 		// unmeasurable. Modifiers apply to probe names only.
-		if sig := p.sign(answer, 0); sig != nil {
+		var sig dns.RR
+		if soa, ok := answer[0].(*dns.SOA); ok {
+			sig = p.signSOA(soa, 0)
+		} else {
+			sig = p.sign(answer, 0)
+		}
+		if sig != nil {
 			answer = append(answer, sig)
 		}
 	}
@@ -391,7 +404,7 @@ func (p *Probe) zoneKeyLabel(tags []uint16) string {
 	if p.Signer == nil {
 		return labelUnknown
 	}
-	if hasKeyTag(tags, p.Signer.DNSKEY().KeyTag()) {
+	if hasKeyTag(tags, p.Signer.KeyTag()) {
 		return labelYes
 	}
 	return "no"
@@ -570,7 +583,8 @@ func (p *Probe) compactDenial(name string, mods Modifier, do bool) []dns.RR {
 
 // denial is the shared body of the two above.
 func (p *Probe) denial(name string, mods Modifier, do bool, bitmap []uint16) []dns.RR {
-	auth := []dns.RR{p.soa()}
+	soa := p.soa()
+	auth := []dns.RR{soa}
 	if !do {
 		// Without DO there is nothing to prove to anyone, and shipping an NSEC
 		// to a client that did not ask for DNSSEC is wasted bytes on a zone
@@ -588,10 +602,55 @@ func (p *Probe) denial(name string, mods Modifier, do bool, bitmap []uint16) []d
 	if sig := p.sign([]dns.RR{nsec}, mods); sig != nil {
 		auth = append(auth, sig)
 	}
-	if sig := p.sign([]dns.RR{auth[0]}, mods); sig != nil {
+	if sig := p.signSOA(soa, mods); sig != nil {
 		auth = append(auth, sig)
 	}
 	return auth
+}
+
+// SignatureMods masks the modifiers that change a signature's bytes: no
+// signature, a corrupt one, or a shifted validity window. The other modifiers
+// change the answer, not how it is signed.
+const signatureMods = ModUnsigned | ModBadSig | ModExpiredSig | ModFutureSig
+
+// soaSigMaxAge is how long a cached SOA signature is reused. The signature's
+// own validity window is an hour either side of when it was made, so a
+// resolver that receives a thirty-second-old one sees nothing different from
+// a fresh one, and the deliberately expired and future variants stay expired
+// and future. Short enough that a key rotation shows up within a minute.
+const soaSigMaxAge = 30 * time.Second
+
+// cachedSig is one slot of the SOA signature cache. Sig is kept as the
+// interface p.sign returns, so a "no signature" result (ModUnsigned) caches
+// as a nil interface rather than a non-nil interface holding a nil pointer.
+type cachedSig struct {
+	made time.Time
+	sig  dns.RR
+}
+
+// signSOA signs the apex SOA, reusing a recent signature where one exists.
+//
+// Every negative answer this zone gives — NODATA, both denial variants, the
+// apex itself when asked for a type it lacks — signs two RRsets: the NSEC,
+// which names the queried name and so differs per query, and the SOA, which
+// is the same record every time. ECDSA signing is three quarters of the cost
+// of such an answer, and half of it was spent re-signing identical bytes.
+// Caching that half makes a signed denial cost one signature instead of two.
+//
+// The slot is per signature-modifier set, since those change the bytes; the
+// race between two refreshers is benign, both produce a valid signature.
+func (p *Probe) signSOA(soa *dns.SOA, mods Modifier) dns.RR {
+	if p.Signer == nil {
+		return nil
+	}
+	slot := &p.soaSigs[mods&signatureMods]
+	now := time.Now()
+	if c := slot.Load(); c != nil && now.Sub(c.made) < soaSigMaxAge {
+		return c.sig
+	}
+	sig := p.sign([]dns.RR{soa}, mods)
+	slot.Store(&cachedSig{made: now, sig: sig})
+	return sig
 }
 
 // sign is a nil-safe wrapper: an unsigned zone is a valid configuration.
@@ -683,8 +742,40 @@ func (p *Probe) respond(state *request.Request, w dns.ResponseWriter, r *dns.Msg
 	return dns.RcodeSuccess, nil
 }
 
+// zoneMatches reports whether qname is zone or a name below it. Both are
+// normalised by CoreDNS (lower case, fully qualified) so this is a suffix test
+// on a label boundary; plugin.Name.Matches computes the same answer by
+// splitting both names into label offsets, two slices per call on every query.
+// A name carrying an escaped character is left to the library, since a
+// backslash before the boundary dot would make the byte test lie.
+func zoneMatches(zone, qname string) bool {
+	if zone == "." || qname == zone {
+		return true
+	}
+	if strings.IndexByte(qname, '\\') >= 0 {
+		return plugin.Name(zone).Matches(qname)
+	}
+	n := len(qname) - len(zone)
+	return n > 0 && qname[n-1] == '.' && qname[n:] == zone
+}
+
 // addrOf extracts the source address as a netip.Addr.
+//
+// Read off the net.Addr's bytes when it is one of the two kinds a DNS server
+// hands out, which is every query: CoreDNS's state.IP() renders the address to
+// text and this used to parse it straight back, two allocations and a parse
+// per query for a value the kernel delivered as sixteen bytes.
 func addrOf(state *request.Request) netip.Addr {
+	var ip net.IP
+	switch a := state.W.RemoteAddr().(type) {
+	case *net.UDPAddr:
+		ip = a.IP
+	case *net.TCPAddr:
+		ip = a.IP
+	}
+	if addr, ok := netip.AddrFromSlice(ip); ok {
+		return addr.Unmap()
+	}
 	if addr, err := netip.ParseAddr(state.IP()); err == nil {
 		return addr.Unmap()
 	}

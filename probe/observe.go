@@ -3,8 +3,9 @@ package probe
 import (
 	"errors"
 	"net/netip"
+	"slices"
+	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -311,71 +312,83 @@ func isCaseRandomized(name string) bool {
 // user gets the same readout as the web page without any correlation store
 // being involved at all. Deliberately a flat key=value list: it has to survive
 // being read in a terminal, split across 255-byte TXT strings.
+//
+// Built in one byte buffer with the Append variants of the formatters, so the
+// whole readout is two allocations (the buffer and the string) instead of one
+// per rendered address, prefix and number.
 func (o *Observation) Summary() string {
-	var b strings.Builder
-	b.WriteString("resolver=")
-	b.WriteString(o.ResolverAddr.String())
-	b.WriteString(" prefix=")
-	b.WriteString(o.ResolverPrefix.String())
-	b.WriteString(" proto=")
-	b.WriteString(string(o.Transport))
-	b.WriteString(" ipv6=")
-	b.WriteString(boolStr(o.IPv6))
-	b.WriteString(" edns=")
-	b.WriteString(boolStr(o.EDNS))
-	b.WriteString(" do=")
-	b.WriteString(boolStr(o.DO))
-	b.WriteString(" bufsize=")
-	b.WriteString(strconv.Itoa(int(o.UDPSize)))
-	b.WriteString(" cookie=")
-	b.WriteString(boolStr(o.Cookie))
-	b.WriteString(" ecs=")
-	b.WriteString(boolStr(o.ECS))
+	b := make([]byte, 0, summaryCap)
+	b = append(b, "resolver="...)
+	b = o.ResolverAddr.AppendTo(b)
+	b = append(b, " prefix="...)
+	b = o.ResolverPrefix.AppendTo(b)
+	b = append(b, " proto="...)
+	b = append(b, o.Transport...)
+	b = appendFlag(b, " ipv6=", o.IPv6)
+	b = appendFlag(b, " edns=", o.EDNS)
+	b = appendFlag(b, " do=", o.DO)
+	b = append(b, " bufsize="...)
+	b = strconv.AppendInt(b, int64(o.UDPSize), decimal)
+	b = appendFlag(b, " cookie=", o.Cookie)
+	b = appendFlag(b, " ecs=", o.ECS)
 	// Ecs_src is what separates "declined" from "leaked", and a bare ecs= flag
 	// cannot: `ecs=1 ecs_src=0` is a resolver explicitly refusing to disclose,
 	// which is the opposite finding from `ecs=1 ecs_src=24`. Emitted always, so
 	// the terminal readout carries all three states the JSON does.
-	b.WriteString(" ecs_src=")
-	b.WriteString(strconv.Itoa(int(o.ECSScope)))
+	b = append(b, " ecs_src="...)
+	b = strconv.AppendInt(b, int64(o.ECSScope), decimal)
 	if o.ECSPrefix.IsValid() {
-		b.WriteString(" ecs_prefix=")
-		b.WriteString(o.ECSPrefix.String())
+		b = append(b, " ecs_prefix="...)
+		b = o.ECSPrefix.AppendTo(b)
 	}
-	b.WriteString(" co=")
-	b.WriteString(boolStr(o.CompactAware))
-	b.WriteString(" deleg=")
-	b.WriteString(boolStr(o.DELEGAware))
-	b.WriteString(" zoneversion=")
-	b.WriteString(boolStr(o.ZoneVersionAsked))
+	b = appendFlag(b, " co=", o.CompactAware)
+	b = appendFlag(b, " deleg=", o.DELEGAware)
+	b = appendFlag(b, " zoneversion=", o.ZoneVersionAsked)
 	// RFC 9539: encrypted= is redundant with proto= above, and deliberately so.
 	// Proto= is the transport; encrypted= is the question a reader actually has,
 	// and making them work it out from a list of transport names is how a
 	// terminal readout gets misread.
-	b.WriteString(" encrypted=")
-	b.WriteString(boolStr(o.Encrypted()))
-	writeTLSSummary(&b, o.TLS)
-	b.WriteString(" case0x20=")
-	b.WriteString(boolStr(o.CaseRandomized))
-	b.WriteString(" seen=")
-	b.WriteString(strconv.Itoa(o.Seen))
-	return b.String()
+	b = appendFlag(b, " encrypted=", o.Encrypted())
+	b = appendTLSSummary(b, o.TLS)
+	b = appendFlag(b, " case0x20=", o.CaseRandomized)
+	b = append(b, " seen="...)
+	b = strconv.AppendInt(b, int64(o.Seen), decimal)
+	return string(b)
 }
 
-// writeTLSSummary appends the TLS fields of the in-band summary, if the
+// decimal is the base the numbers in the summary are rendered in.
+const decimal = 10
+
+// summaryCap is the buffer Summary starts from: a full IPv6 readout with TLS
+// details is around 230 bytes, so this fits every summary in one allocation.
+const summaryCap = 256
+
+// appendFlag appends a " key=" label and a 0/1 flag.
+func appendFlag(b []byte, key string, v bool) []byte {
+	b = append(b, key...)
+	return append(b, boolStr(v)...)
+}
+
+// appendTLSSummary appends the TLS fields of the in-band summary, if the
 // observation carries any (see Observation.TLS). Split out of Summary purely
 // to keep that function's length down.
-func writeTLSSummary(b *strings.Builder, tls *TLSInfo) {
+func appendTLSSummary(b []byte, tls *TLSInfo) []byte {
 	if tls == nil {
-		return
+		return b
 	}
-	b.WriteString(" tls=")
-	b.WriteString(strings.ReplaceAll(tls.Version, " ", ""))
+	b = append(b, " tls="...)
+	// "TLS 1.3" renders as "TLS1.3": the readout is split on spaces by its
+	// readers, so the version must not carry one.
+	for i := 0; i < len(tls.Version); i++ {
+		if tls.Version[i] != ' ' {
+			b = append(b, tls.Version[i])
+		}
+	}
 	if tls.NamedGroup != "" {
-		b.WriteString(" group=")
-		b.WriteString(tls.NamedGroup)
+		b = append(b, " group="...)
+		b = append(b, tls.NamedGroup...)
 	}
-	b.WriteString(" resumed=")
-	b.WriteString(boolStr(tls.DidResume))
+	return appendFlag(b, " resumed=", tls.DidResume)
 }
 
 func boolStr(v bool) string {
@@ -433,6 +446,14 @@ type MemStore struct {
 	// resolver reports after it gives up — and folding the two together would
 	// make the report's retention depend on the visitor still being around.
 	reports map[string]*memReports
+	// Order and reportOrder hold the live entries sorted by first-seen time.
+	// Expiry is keyed on first-seen and the TTL is one constant, so the entries
+	// due to expire are always at the front: expiry pops from there and stops at
+	// the first live entry, instead of sweeping the whole map on every query. At
+	// the 10 000-token ceiling the sweep cost 180 µs per query under the mutex,
+	// three times what signing the answer cost; this is amortised O(1).
+	order       queue[*memEntry]
+	reportOrder queue[*memReports]
 	// TTL bounds how long a token remains readable. Short by design: this is
 	// transient diagnostic state about someone's network, not a record to keep.
 	TTL time.Duration
@@ -446,14 +467,61 @@ type MemStore struct {
 	mu sync.Mutex
 }
 
-type memEntry struct {
+// expiry is the part of a store entry that decides when it goes: which key
+// it sits under and when it was first seen.
+type expiry struct {
 	first time.Time
-	obs   []Observation
+	token string
+}
+
+func (e *expiry) age() *expiry { return e }
+
+type memEntry struct {
+	expiry
+	obs []Observation
 }
 
 type memReports struct {
-	first time.Time
-	recs  []ReportRecord
+	expiry
+	recs []ReportRecord
+}
+
+// aged is implemented by both entry types, so one queue serves both maps.
+type aged interface{ age() *expiry }
+
+// queue is the first-seen-ordered view of one map's entries.
+type queue[E aged] []E
+
+// push appends e, keeping the queue sorted by first-seen. Entries arrive in
+// time order from the handler, so this is an append; the sorted insert only
+// runs when a caller supplies an At earlier than the newest entry's, which
+// keeps the queue exact rather than assuming the clock is monotonic.
+func (q *queue[E]) push(e E) {
+	if n := len(*q); n > 0 && e.age().first.Before((*q)[n-1].age().first) {
+		i := sort.Search(n, func(i int) bool { return (*q)[i].age().first.After(e.age().first) })
+		*q = slices.Insert(*q, i, e)
+		return
+	}
+	*q = append(*q, e)
+}
+
+// expire pops every entry first seen more than ttl before now and hands it to
+// drop. Because the queue is sorted, the first live entry ends the scan: every
+// entry behind it was seen later still.
+func (q *queue[E]) expire(now time.Time, ttl time.Duration, drop func(E)) {
+	i := 0
+	for ; i < len(*q) && now.Sub((*q)[i].age().first) > ttl; i++ {
+		drop((*q)[i])
+	}
+	if i == 0 {
+		return
+	}
+	// Reslicing from the front leaks the dropped prefix's capacity until the
+	// next growth copies the live tail into a fresh array, which bounds the
+	// backing store at roughly twice the live count. Clearing the prefix lets
+	// the dropped entries be collected in the meantime.
+	clear((*q)[:i])
+	*q = (*q)[i:]
 }
 
 // ErrStoreFull means the token ceiling was reached, so this observation was not
@@ -511,8 +579,9 @@ func (s *MemStore) Record(obs *Observation) (Observation, error) {
 			obs.Seen = 1
 			return *obs, ErrStoreFull
 		}
-		e = &memEntry{first: now}
+		e = &memEntry{first: now, token: obs.Token}
 		s.entries[obs.Token] = e
+		s.order.push(e)
 	}
 
 	obs.Seen = len(e.obs) + 1
@@ -565,8 +634,9 @@ func (s *MemStore) RecordReport(rec *ReportRecord) error {
 		if len(s.reports) >= s.MaxTokens {
 			return ErrStoreFull
 		}
-		e = &memReports{first: now}
+		e = &memReports{first: now, token: rec.Token}
 		s.reports[rec.Token] = e
+		s.reportOrder.push(e)
 	}
 	if len(e.recs) >= limit {
 		return ErrStoreFull
@@ -593,17 +663,21 @@ func (s *MemStore) LookupReports(token string) ([]ReportRecord, error) {
 // expireLocked drops entries whose first observation is older than TTL. Expiry
 // is keyed on first-seen, not last-seen, so a token cannot be kept alive
 // indefinitely by continuing to query it.
+//
+// The map is only cleared of an entry the queue still owns: a token that
+// expired and was then seen again has a fresh entry under the same key, and
+// the stale one's turn at the front of the queue must not take it down.
 func (s *MemStore) expireLocked(now time.Time) {
-	for token, e := range s.entries {
-		if now.Sub(e.first) > s.TTL {
-			delete(s.entries, token)
+	s.order.expire(now, s.TTL, func(e *memEntry) {
+		if s.entries[e.token] == e {
+			delete(s.entries, e.token)
 		}
-	}
-	for token, e := range s.reports {
-		if now.Sub(e.first) > s.TTL {
-			delete(s.reports, token)
+	})
+	s.reportOrder.expire(now, s.TTL, func(e *memReports) {
+		if s.reports[e.token] == e {
+			delete(s.reports, e.token)
 		}
-	}
+	})
 }
 
 // Len reports the number of live tokens. For tests and metrics.

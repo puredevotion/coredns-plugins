@@ -18,7 +18,13 @@ import (
 // see the `strict` Corefile option in setup.go. A ClientHello with no SNI is
 // handled by noSNI, the `no_sni` option.
 type certStore struct {
-	byName    map[string]*tls.Certificate
+	byName map[string]*tls.Certificate
+	// BySuffix holds the wildcard certs again, keyed by the part of the SAN
+	// after the "*": "*.example.net" sits under ".example.net". GetCertificate
+	// can then look a name's wildcard form up by slicing the name, where
+	// building the "*.example.net" key allocated on every wildcard match. Nil
+	// in a store built by hand (tests), which falls back to byName.
+	bySuffix  map[string]*tls.Certificate
 	fallback  *tls.Certificate
 	noSNICert *tls.Certificate // The cert noSNICertificate serves; nil until it loads.
 	noSNI     noSNIPolicy
@@ -110,16 +116,34 @@ func (s *certStore) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate
 		if cert, ok := s.byName[name]; ok {
 			return cert, nil
 		}
-		if wildcard, ok := wildcardOf(name); ok {
-			if cert, ok := s.byName[wildcard]; ok {
-				return cert, nil
-			}
+		if cert, ok := s.wildcardFor(name); ok {
+			return cert, nil
 		}
 	}
 	if s.strict {
 		return nil, nil
 	}
 	return s.fallback, nil
+}
+
+// wildcardFor looks up the certificate for name's RFC 9525 §6.3 wildcard form
+// (see wildcardOf). The suffix index answers it without building the wildcard
+// string; a store without one is searched by name.
+func (s *certStore) wildcardFor(name string) (*tls.Certificate, bool) {
+	if s.bySuffix != nil {
+		i := strings.IndexByte(name, '.')
+		if i <= 0 {
+			return nil, false
+		}
+		cert, ok := s.bySuffix[name[i:]]
+		return cert, ok
+	}
+	wildcard, ok := wildcardOf(name)
+	if !ok {
+		return nil, false
+	}
+	cert, ok := s.byName[wildcard]
+	return cert, ok
 }
 
 // alertMissingExtension is TLS alert 109, missing_extension (RFC 8446 §6). Over
@@ -164,10 +188,20 @@ func overQUIC(hello *tls.ClientHelloInfo) bool {
 // "case-insensitive ASCII comparison"). The strings.ToLower this replaces
 // folds Unicode too, so an SNI of "\u212a.example.com" (KELVIN SIGN) used to become
 // "k.example.com" and select that name's certificate, strict mode included.
+//
+// Nothing is copied unless there is something to fold: the common ClientHello
+// already carries a lowercase name, and this runs on every handshake.
 func asciiLower(s string) string {
+	i := 0
+	for i < len(s) && (s[i] < 'A' || s[i] > 'Z') {
+		i++
+	}
+	if i == len(s) {
+		return s
+	}
 	b := []byte(s)
-	for i, c := range b {
-		if 'A' <= c && c <= 'Z' {
+	for ; i < len(b); i++ {
+		if c := b[i]; 'A' <= c && c <= 'Z' {
 			b[i] = c + ('a' - 'A')
 		}
 	}
@@ -262,7 +296,12 @@ func loadCert(certFile, keyFile string) (*tls.Certificate, []string, error) {
 // empty slice here is a valid input with no fallback, not an error).
 func buildCertStore(cfg storeConfig) (*certStore, error) {
 	pairs := cfg.pairs
-	store := &certStore{byName: make(map[string]*tls.Certificate), strict: cfg.strict, noSNI: cfg.noSNI}
+	store := &certStore{
+		byName:   make(map[string]*tls.Certificate),
+		bySuffix: make(map[string]*tls.Certificate),
+		strict:   cfg.strict,
+		noSNI:    cfg.noSNI,
+	}
 	var loadErrs []error
 	for _, p := range pairs {
 		cert, names, err := loadCert(p[0], p[1])
@@ -278,6 +317,9 @@ func buildCertStore(cfg storeConfig) (*certStore, error) {
 		}
 		for _, name := range names {
 			store.byName[name] = cert
+			if suffix, ok := strings.CutPrefix(name, "*"); ok {
+				store.bySuffix[suffix] = cert
+			}
 		}
 	}
 	if store.fallback == nil && len(pairs) > 0 && len(loadErrs) == len(pairs) {
