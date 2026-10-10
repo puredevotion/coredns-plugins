@@ -2,12 +2,12 @@ module github.com/puredevotion/coredns-plugins/dynupdate
 
 go 1.27.0
 
-toolchain go1.27.1
+toolchain go1.27.2
 
 require (
 	github.com/coredns/caddy v1.1.4
 	github.com/coredns/coredns v1.14.7
-	github.com/miekg/dns v1.1.72
+	github.com/miekg/dns v1.1.73
 )
 
 require (
