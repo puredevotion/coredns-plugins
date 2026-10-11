@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/puredevotion/coredns-plugins/compare/v0.5.0...v0.6.0) (2026-10-11)
+
+
+### Features
+
+* **cookie:** DNS Cookies (RFC 7873, RFC 9018) plugin ([#55](https://github.com/puredevotion/coredns-plugins/issues/55)) ([6fafab1](https://github.com/puredevotion/coredns-plugins/commit/6fafab1ebda9d1259cfc5532f7ef4329019ecdc4))
+
 ## [0.5.0](https://github.com/puredevotion/coredns-plugins/compare/v0.4.1...v0.5.0) (2026-10-11)
 
 
