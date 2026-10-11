@@ -104,6 +104,19 @@ var pluginCfgPatches = map[string]struct {
 		insertAfterLine: "hosts:hosts",
 		modulePath:      "github.com/puredevotion/coredns-plugins/dynupdate",
 	},
+	// DNS Cookies (RFC 7873, RFC 9018). Slot: immediately AFTER tsig:tsig and
+	// BEFORE cache:cache in v1.14.6's plugin.cfg (docs/cookie-plugin.md):
+	//
+	//   - before cache => a cache hit does not skip cookie handling, the same
+	//     trap docs/rrl-plugin.md records for rrl;
+	//   - before rrl   => unvalidated cookie-bearing UDP requests in enforce
+	//     mode get a tiny BADCOOKIE before rate limiting spends state on them;
+	//   - after tsig   => the cookie is on the response before TSIG signs it.
+	"cookie": {
+		cfgLine:         "cookie:github.com/puredevotion/coredns-plugins/cookie",
+		insertAfterLine: "tsig:tsig",
+		modulePath:      "github.com/puredevotion/coredns-plugins/cookie",
+	},
 	// Response Rate Limiting — the amplification-abuse mitigation that gates
 	// any public exposure of an authoritative zone we serve (homelab
 	// docs/plans/authoritative-dns-hivre.md Phase 2). That plan assumed this

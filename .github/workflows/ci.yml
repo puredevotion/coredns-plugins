@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
@@ -107,12 +107,23 @@ jobs:
       - name: Fuzz SNI lookup (60s)
         working-directory: sni_tls
         run: go test -run=NONE -fuzz=FuzzGetCertificate -fuzztime=60s ./...
+      - name: Fuzz cookie verification (30s)
+        working-directory: cookie
+        run: go test -run=NONE -fuzz=FuzzVerify -fuzztime=30s ./...
+      - name: Fuzz cookie request handling (30s)
+        working-directory: cookie
+        run: go test -run=NONE -fuzz=FuzzServeDNS -fuzztime=30s ./...
+      - name: Fuzz cookie option classification (10s)
+        working-directory: cookie
+        run: go test -run=NONE -fuzz=FuzzClassify -fuzztime=10s ./...
       - name: Upload crashers
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
           name: fuzz-crashers
-          path: sni_tls/testdata/fuzz/
+          path: |
+            sni_tls/testdata/fuzz/
+            cookie/testdata/fuzz/
 
   formal-verification:
     # TLA+ models of the lifecycle and concurrency paths, checked three ways
@@ -157,7 +168,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -265,7 +276,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -330,7 +341,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
