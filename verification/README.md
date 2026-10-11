@@ -35,7 +35,8 @@ Every property is stated against the RFC it comes from, quoted verbatim in
 the spec or proof that checks it, and the models were audited against the
 RFC texts themselves, section by section: RFC 1035, 1982, 2136, 2181, 3007,
 4034, 4343, 4861, 6066, 8106, 8145, 8415, 8945, 9460, 9461, 9462, 9463 and
-9525 (which obsoletes 6125). Where the plugins cite a section, the citation
+9525 (which obsoletes 6125), plus RFC 7873 and 9018 for the `cookie` plugin
+(the sections it implements: 7873 §4-§7.1, 9018 §3-§6 and Appendix A). Where the plugins cite a section, the citation
 was checked too. What the audit found that this change does not fix is
 listed at the end, under "Open findings".
 
@@ -58,6 +59,8 @@ differs from the old one exactly where it should.
 | `PluginLifecycle.tla` | caddy's `Restart` / `startWithListenerFds` driving the `OnStartup`/`OnRestart`/`OnRestartFailed`/`OnFinalShutdown` hooks of `sni_tls` and `radnr`, with another plugin's callbacks failing at each point; variants for v0.4.1, an intermediate fix, and the process-wide registry they now use | no orphaned goroutine; at most one per instance; at most one per process; nothing survives shutdown |
 | `RadnrRA.tla` | `radnr` `Advertiser.Run` scheduling with its real constants (30s interval, 3s `MIN_DELAY_BETWEEN_RAS`, 0.5s `MAX_RA_DELAY_TIME`) in half-second ticks, RSes at any instant, every random draw | RFC 4861 §6.2.6's three MUSTs: the rate limit across *all* triggers; every RS answered by the §6.2.6 deadline (its random delay, after the rate-limit window if inside one); unsolicited RAs never more often than MinRtrAdvInterval |
 | `DynUpdateAtomicity.tla` | `dynupdate` `serveUpdate` with records as shared heap cells, and a zone rebuild that can fail | a SERVFAIL'd UPDATE changes nothing; the records prerequisites see are the records served |
+| `CookieRollout.tla` | `cookie` RFC 9018 §5 three-stage Server Secret rollout across an anycast set (3 servers, a config reload per step), with a variant that switches to the new secret before every server has learned it, one that forgets the old secret before the 1-hour window has passed, and one where a reload only adds to the verify list | every cookie inside its window is accepted by every server of the set; a removed secret never verifies |
+| `CookieBootstrap.tla` | `cookie` RFC 7873 §5.2.3 / §5.3 client bootstrap and retry against a server in permissive or enforce mode, over UDP and TCP, with server restarts (secret changes) and an inconsistent anycast set; plus the BADCOOKIE-over-TCP loop §5.2.3 warns about | no BADCOOKIE over TCP; at most 2 BADCOOKIEs per query; a query in flight is eventually answered |
 
 ### Three checkers
 
@@ -106,6 +109,7 @@ invariant really depends on the fix, so the proof is not passing vacuously.
 | `Wildcard.lean` | `sni_tls` `wildcardOf`, `GetCertificate` | exact characterisation of which names a `*.d` key covers: exactly one non-empty label (RFC 9525 §6.3, "can only match one label") — never the apex, never two labels deep, never an empty label; to a client that sent SNI, strict mode only returns SAN-matched certs, whatever `no_sni` says, and refuses `.d`; `no_sni` affects only clients without SNI, which get exactly the configured policy's cert (RFC 9462 §6.3); non-strict always returns one; exact match beats wildcard; `asciiLower` folds two bytes together only if they are the cases of one ASCII letter, so no non-ASCII SNI folds onto an ASCII SAN (RFC 4343 §3) |
 | `Dnr.lean` | `radnr/pkg/dnr` `Marshal`, `Unmarshal`, `encodeADN`, `decodeADN` | **`Unmarshal(Marshal(o)) = o`** for every option `Marshal` accepts (ADN minus one trailing dot); output is 8-octet aligned with a correct Length octet and fits it (RFC 4861 §4.6, RFC 9463 §6.1) |
 | `DynUpdate.lean` | `dynupdate` `apply`, `applyAdd`, `applyDeleteRRset`, `applyDeleteRecord` | **every update section keeps a zone well-formed** under RFC 2136 §3.4.2.2–4's SOA, CNAME and apex rules: one SOA, at the apex; ≥1 apex NS; CNAME exclusivity; ≤1 CNAME per name. Plus counterexamples, by evaluation, for the v0.4.1 add rules. Not modelled (so not claimed): WKS, case-insensitive names inside RDATA, RRset TTL uniformity |
+| `Cookie.lean` | `cookie` `classify`, `hashInput`, `serverCookie`, `verify`, `inWindow` | option lengths 8 and 16..40 exactly (RFC 7873 §5.2.2); the 20/32-byte SipHash input is injective in (client cookie, version, reserved, timestamp, IP), also across IPv4/IPv6, and without the 24-byte length gate a 36-byte IPv4 option collides with an IPv6 input (RFC 9018 §4.4); the timestamp window (1 h back, 5 min ahead) under RFC 1982 equals the unbounded-integer rule across the 2³² wrap, with exact edges (§4.3); construct-then-verify succeeds inside the window, Reserved is hashed but not enforced (§4.2), a bad length or version never verifies; a cookie never verifies for another IP or secret, **conditional on a collision-free hash (stated as `HInj`)**; SipHash-2-4 (little-endian output) reproduces the SipHash paper and RFC 9018 Appendix A.1 to A.4 vectors, kernel-checked, no `native_decide` |
 | `Probe.lean` | `probe` `ParseQuery`, `parseToken`, `ParseKeyTagQuery`, `FormatKeyTagQuery` | `ParseQuery` is ASCII-case-insensitive exactly as RFC 4343 §3 defines it (safe under 0x20 randomisation) for any modifier table; RFC 8145 §5.1 key-tag labels round-trip, sorted, for every tag list that fits a 63-octet label — 1 to 12 tags (RFC 1035 §2.3.4) |
 
 Every theorem depends only on Lean's standard axioms (`propext`,
@@ -257,6 +261,50 @@ code:
     `(nil, nil)`, because crypto/tls sends any other error as
     `internal_error`. (`TestSetup_QUICHandshakeAlerts`, real quic-go
     handshakes; `TestGetCertificate_NoSNIRefusalOverQUICIsMissingExtension`.)
+
+## What the cookie models and proofs showed
+
+The `cookie` plugin was specified and verified before it was written
+([`docs/cookie-plugin.md`](../docs/cookie-plugin.md)), so these are findings
+about the design and the RFC, not bugs fixed in existing code:
+
+1. **RFC 9018's own Appendix A.3 is outside its own window.** The request
+   cookie is stamped 1559727985 and the reply 1559734700, so at the time the
+   server answers it the cookie is 6715 s (1 h 52 min) old, past the 1 hour
+   §4.3 says a server SHOULD allow, yet the example calls it valid. The hash
+   and the non-zero Reserved bytes are correct (`vector_A3`); only the age
+   disagrees (`A3_stale`). The plugin enforces 1 hour; the Go tests check A.3
+   inside the window.
+2. **BADCOOKIE gives a client at most two refusals per query, however often
+   the secret changes** (`BoundedBadCookies`): the third attempt goes over TCP
+   and TCP is never refused. A server that *does* answer BADCOOKIE over TCP
+   does not loop forever by itself: the cookie in each refusal is accepted next
+   time, and the single-server variant answers (`BadOverTCPSingleServer`). The
+   endless loop §5.2.3 warns about needs an inconsistent anycast set
+   (`BadOverTCP`, `BadOverTCPLoop`, `BadOverTCPLoopLiveness`). RFC 7873 §5.3 is
+   silent on what a client does after BADCOOKIE over TCP; the model gives up,
+   and the plugin never sends it.
+3. **The 24-byte length gate is load-bearing.** Everything hashed before the IP
+   has a fixed width, so the input is injective without any hypothesis on the
+   IP, but only if the server cookie has a fixed width too: without the gate a
+   36-byte IPv4 option and a 24-byte IPv6 option produce the same hash input
+   (`lenient_collision`, RFC 9018 §4.4).
+4. **Rolling a secret has an order, and a reload must replace.** Switching to
+   the new secret before every server has learned it, or forgetting the old one
+   before the window has passed, each makes a server reject another server's
+   valid cookie (`SwitchEarly`, `ForgetEarly`). A reload that only *adds* to the
+   verify list keeps a removed secret verifying forever (`ReloadKeepsOld`): the
+   plugin builds its whole configuration afresh on every reload, so it cannot.
+   The model's one-hour wait is a lower bound; the design doc asks for the
+   longest zone TTL plus an hour.
+5. **Exactly 2³¹ seconds away is rejected**, a case RFC 1982 leaves undefined
+   and the design left implicit (`window_antipode`).
+
+Two things the models and proofs do not cover: IPv4-mapped IPv6 clients (the
+Lean model takes the 4 or 16 address bytes already unmapped; the Go test
+`TestIPv4MappedIsIPv4` covers it) and the **Apalache run of
+`CookieRollout_Fixed`**, which did not finish in 580 s locally and is marked
+`slow`; TLC checks its three properties exhaustively.
 
 ## Open findings
 

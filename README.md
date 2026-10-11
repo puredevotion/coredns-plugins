@@ -1,16 +1,23 @@
 # coredns-plugins
 
-External CoreDNS plugins for encrypted-DNS discovery and multi-certificate TLS,
-plus a Dagger pipeline that builds a CoreDNS binary with them compiled in.
+External CoreDNS plugins for encrypted-DNS discovery, multi-certificate TLS,
+DNS Cookies, RFC 2136 dynamic update and DNS measurement, plus a Dagger pipeline
+that builds a CoreDNS binary with them compiled in.
 
 | Plugin | What it does | Status |
 |---|---|---|
 | [`sni_tls`](sni_tls/) | Replaces the stock `tls` directive with SNI-based certificate selection, so one listener can serve several hostnames whose certs come from different issuers | Implemented, tested, **running in production** |
 | [`radnr`](radnr/) | Advertises an encrypted DNS resolver on the LAN via the RFC 9463 DNR option in IPv6 Router Advertisements, plus optional RFC 8106 RDNSS | Wire/protocol layer complete and RFC-conformant; **running in production** |
+| [`cookie`](cookie/) | DNS Cookies (RFC 7873) with the interoperable SipHash-2-4 server cookie of RFC 9018: validates and issues cookies, BADCOOKIE in `enforce` mode, three-stage secret rollover, per-case counters | Implemented and tested; protocol rules modelled in TLA+ and Lean. **Not yet deployed anywhere** |
+| [`dynupdate`](dynupdate/) | Serves a zone from memory and accepts RFC 2136 dynamic updates for it, e.g. from an ACME client's DNS-01 solver, with a `mutable` type allow-list | Implemented and tested; update rules proved in Lean. In-memory only, see its README |
+| [`probe`](probe/) | A per-visitor synthetic measurement zone that records what each resolver's query reveals and can answer wrong on purpose (DNSSEC failure modes), plus an RFC 9567 error-report receiver | Implemented and tested |
 
-Both plugins run in production in the author's homelab (as `coredns-radnr`,
-serving real LAN DNS over DoT/DoH/DoQ). They have real-world mileage now, but
-only in one deployment and one topology — treat "works here" accordingly.
+`sni_tls` and `radnr` run in production in the author's homelab (as
+`coredns-radnr`, serving real LAN DNS over DoT/DoH/DoQ). They have real-world
+mileage now, but only in one deployment and one topology — treat "works here"
+accordingly. The other plugins are covered by tests, and by the models
+and proofs in [`verification/`](verification/), but a model checks the
+model, not the deployment.
 
 The Dagger pipeline can also compile in **third-party** plugins that don't live
 in this repo, pinned by module version. Currently: upstream's
@@ -34,6 +41,16 @@ resolver's authentication domain name directly, so DoT/DoH/DoQ works with no
 per-device configuration. Support exists client-side (systemd-resolved ≥ 256,
 Windows 11) but router-side emitters are scarce. This plugin makes CoreDNS one.
 
+**`cookie`** — CoreDNS has no DNS Cookie support: up to v1.14.6 it copies a
+request's COOKIE option into the response unvalidated, which RFC 7873 §5.2 does
+not allow, and upstream issue [#6187] asking for real support has been open since
+2023. This plugin issues and validates RFC 9018 server cookies so a cookie-bearing
+client can prove its source address; it is a signal and an `enforce` mode, not
+access control, because a client that sends no cookie cannot be made to. Design,
+limits and what each rule is checked by: [`docs/cookie-plugin.md`](docs/cookie-plugin.md).
+
+[#6187]: https://github.com/coredns/coredns/issues/6187
+
 [RFC 9463]: https://www.rfc-editor.org/rfc/rfc9463.html
 
 ## Building
@@ -45,11 +62,14 @@ pulled into a CoreDNS build with a `go.mod replace` directive.
 Test a plugin on its own:
 
 ```sh
-cd sni_tls && go test -race ./...
-cd radnr   && go test -race ./...
+cd sni_tls   && go test -race ./...
+cd radnr     && go test -race ./...
+cd cookie    && go test -race ./...
+cd dynupdate && go test -race ./...
+cd probe     && go test -race ./...
 ```
 
-Build a CoreDNS binary with both compiled in, via Dagger (from `ci/`):
+Build a CoreDNS binary with all of them compiled in, via Dagger (from `ci/`):
 
 ```sh
 dagger call test-plugin   --source=.. --plugin-dir=sni_tls
@@ -60,7 +80,9 @@ dagger call containerize  --source=.. --coredns-version=1.14.6 \
 ```
 
 `BuildCoredns` clones the pinned upstream CoreDNS tag, patches `plugin.cfg`
-(`sni_tls` replaces stock `tls`; `radnr` is inserted next to `health`), runs
+(`sni_tls` replaces stock `tls`; `radnr` is inserted next to `health`; each
+other plugin gets the slot its README and `ci/main.go` explain, `cookie` for
+instance right after `tsig` and before `cache`), runs
 `go generate` to regenerate `zplugin.go`, and builds. `Containerize` wraps the
 binary in a distroless base and returns an OCI tarball — it does not push. See
 [`ci/main.go`](ci/main.go) for why pushing is left to the caller.
@@ -101,7 +123,7 @@ Advertisements.
 
 ## Testing
 
-Both plugins are covered by unit tests, and `sni_tls` additionally has:
+Every plugin is covered by unit tests, and `sni_tls` additionally has:
 
 - a real loopback TLS 1.3 handshake asserting ML-KEM (post-quantum) negotiation
   (`pqc_test.go`)
@@ -113,7 +135,13 @@ Both plugins are covered by unit tests, and `sni_tls` additionally has:
 rules, and covers Router Solicitation responses (RFC 4861 §6.2.6, rate-limited)
 and interval jitter (§6.2.1).
 
-Everything runs offline — `GOPROXY=off go test ./...` passes in both modules.
+`cookie` reproduces every server cookie RFC 9018 Appendix A prints, byte for
+byte, checks the 1-hour/5-minute window across the 2106 timestamp wrap, runs a
+request through the handler for each RFC 7873 §5.2 case in both modes and both
+transports, and carries fuzz targets over option classification, cookie
+verification and request handling.
+
+Everything runs offline — `GOPROXY=off go test ./...` passes in every module.
 
 Each plugin also carries benchmarks for its request path (`bench_test.go`);
 [`docs/performance.md`](docs/performance.md) records where the time goes, what
@@ -121,9 +149,10 @@ was changed and what each change bought.
 
 [`verification/`](verification/) holds TLA+ models of the lifecycle and
 concurrency paths (cert reload, caddy restart hooks, RA scheduling, update
-atomicity) and Lean proofs of the pure parts (the RFC 9463 option codec,
-SNI wildcard selection, RFC 1982 serials, RFC 2136 update rules). CI runs
-both: `verification/run.sh`.
+atomicity, DNS Cookie secret rollout and client bootstrap) and Lean proofs of
+the pure parts (the RFC 9463 option codec, SNI wildcard selection, RFC 1982
+serials, RFC 2136 update rules, the DNS Cookie option shapes, timestamp window
+and SipHash-2-4). CI runs both: `verification/run.sh`.
 
 ## Contributing
 
