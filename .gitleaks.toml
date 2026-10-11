@@ -1,0 +1,17 @@
+# Extends gitleaks' default rules; the only addition is the allowlist below.
+[extend]
+useDefault = true
+
+# RFC 9018 Appendix A prints these three server secrets as test vectors, and
+# the cookie plugin's tests reproduce the RFC's cookies with them. They are
+# public values from the RFC, not credentials, so they are allowed by value
+# alone: nothing else is excused, in these files or any other. Matching on the
+# value rather than a commit fingerprint also survives a squash merge
+# rewriting the commit hash.
+[[allowlists]]
+description = "RFC 9018 Appendix A test secrets"
+regexes = [
+  '''e5e973e5a6b2a43f48e7dc849e37bfcf''',
+  '''445536bcd2513298075a5d379663c962''',
+  '''dd3bdf9344b678b185a6f5cb60fca715''',
+]
