@@ -1,0 +1,3 @@
+# Test fixture, not a secret: the valid hex token "0123456789abcdef" in
+# TestReportKeyNamespacing (probe/valkey_test.go).
+3e76cef170243bab2305eb4194511ac113cb25e7:probe/valkey_test.go:generic-api-key:298
