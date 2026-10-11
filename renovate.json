@@ -1,11 +1,12 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
+  "postUpdateOptions": ["gomodTidy"],
   "customManagers": [
     {
       "description": "golangci-lint image pinned as a named const in ci/main.go — not a file Renovate's built-in managers look inside.",
       "customType": "regex",
-      "fileMatch": ["^ci/main\\.go$"],
+      "managerFilePatterns": ["/^ci\\/main\\.go$/"],
       "matchStrings": [
         "golangciLintImage = \"(?<depName>golangci/golangci-lint):(?<currentValue>v[^\"]+)\""
       ],
@@ -14,7 +15,7 @@
     {
       "description": "gitleaks image, same pin dafs's own ci/main.go tracks — kept in lockstep across the ecosystem, so bump both repos together when Renovate opens either PR.",
       "customType": "regex",
-      "fileMatch": ["^ci/main\\.go$"],
+      "managerFilePatterns": ["/^ci\\/main\\.go$/"],
       "matchStrings": [
         "gitleaksImage = \"(?<depName>ghcr\\.io/gitleaks/gitleaks):(?<currentValue>v[^\"]+)\""
       ],
@@ -23,7 +24,7 @@
     {
       "description": "cyclonedx-gomod version used to generate the SBOM.",
       "customType": "regex",
-      "fileMatch": ["^ci/main\\.go$"],
+      "managerFilePatterns": ["/^ci\\/main\\.go$/"],
       "matchStrings": [
         "cyclonedxGomodVersion = \"(?<currentValue>v[^\"]+)\""
       ],
@@ -33,7 +34,7 @@
     {
       "description": "Opengrep release binary + rules ref.",
       "customType": "regex",
-      "fileMatch": ["^ci/main\\.go$"],
+      "managerFilePatterns": ["/^ci\\/main\\.go$/"],
       "matchStrings": [
         "opengrepVersion = \"(?<currentValue>v[^\"]+)\""
       ],
@@ -48,6 +49,12 @@
       "matchDatasources": ["docker"],
       "matchPackageNames": ["golang"],
       "enabled": false
+    },
+    {
+      "description": "github.com/coredns/caddy's v2.x tags declare their own module path as github.com/caddyserver/caddy/v2 (the real, much larger upstream Caddy web server) rather than github.com/coredns/caddy/v2 — a path collision, not a genuine v2 release of this fork's tiny Caddyfile-tokenizer library, which is still v1.1.x. Renovate can't tell the difference and keeps reopening a bump that fails go mod tidy and would pull in the wrong dependency entirely if forced through.",
+      "matchDatasources": ["go"],
+      "matchPackageNames": ["github.com/coredns/caddy"],
+      "allowedVersions": "<2.0.0"
     }
   ]
 }
