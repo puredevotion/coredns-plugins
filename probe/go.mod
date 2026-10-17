@@ -9,8 +9,8 @@ require (
 	github.com/coredns/coredns v1.14.7
 	github.com/miekg/dns v1.1.73
 	github.com/prometheus/client_golang v1.25.0
-	github.com/prometheus/common v0.72.0
-	github.com/valkey-io/valkey-go v1.0.78
+	github.com/prometheus/common v0.72.1
+	github.com/valkey-io/valkey-go v1.0.79
 )
 
 require (
