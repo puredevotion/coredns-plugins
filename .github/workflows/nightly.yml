@@ -207,23 +207,61 @@ jobs:
       - run: grype "sbom:${{ matrix.plugin }}/sbom.cdx.json" --fail-on high
 
   fuzz:
-    # Longer window than ci.yml's 60s push-time smoke — an actual campaign,
-    # not just a check that the target still builds and runs.
+    # Longer window than ci.yml's push-time smoke: an actual campaign, not
+    # just a check that the targets still build and run. The Go fuzz cache
+    # (the generated corpus, which is what coverage-guided fuzzing builds on)
+    # is restored and re-saved per package, so each night starts where the
+    # last one stopped instead of from the seeds.
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {id: sni_tls, plugin: sni_tls, pkg: ".", targets: "FuzzGetCertificate:900 FuzzLoadCert:300"}
+          - {id: cookie, plugin: cookie, pkg: ".", targets: "FuzzVerify:300 FuzzServeDNS:600 FuzzClassify:60"}
+          - {id: dynupdate, plugin: dynupdate, pkg: ".", targets: "FuzzServeUpdate:900"}
+          - {id: probe, plugin: probe, pkg: ".", targets: "FuzzParseQuery:180 FuzzParseDNSSD:120 FuzzParseKeyTagQuery:120 FuzzParseEDNSKeyTags:60 FuzzParseReport:180 FuzzParseECHConfigList:120 FuzzECHBuildParse:120"}
+          - {id: radnr, plugin: radnr, pkg: ".", targets: "FuzzParseNDP:120"}
+          - {id: radnr-dnr, plugin: radnr, pkg: "./pkg/dnr", targets: "FuzzUnmarshal:300 FuzzMarshalUnmarshal:300"}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
         with:
-          go-version-file: sni_tls/go.mod
-          cache-dependency-path: sni_tls/go.sum
-      - name: Fuzz SNI lookup (900s)
-        working-directory: sni_tls
-        run: go test -run=NONE -fuzz=FuzzGetCertificate -fuzztime=900s ./...
+          go-version-file: ${{ matrix.plugin }}/go.mod
+          cache-dependency-path: ${{ matrix.plugin }}/go.sum
+      - name: Locate the Go fuzz cache
+        id: fuzzcache
+        run: echo "dir=$(go env GOCACHE)/fuzz" >> "$GITHUB_OUTPUT"
+      - name: Restore fuzz corpus cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
+        with:
+          path: ${{ steps.fuzzcache.outputs.dir }}
+          # Unique key per run so the corpus is re-saved every night; the
+          # prefix restores the newest previous one.
+          key: fuzz-corpus-${{ matrix.id }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.id }}-
+      - name: Fuzz
+        working-directory: ${{ matrix.plugin }}
+        env:
+          TARGETS: ${{ matrix.targets }}
+          PKG: ${{ matrix.pkg }}
+        run: |
+          set -euo pipefail
+          for entry in $TARGETS; do
+            name="${entry%%:*}"
+            secs="${entry##*:}"
+            echo "::group::${name} (${secs}s)"
+            go test -run=NONE -fuzz="^${name}\$" -fuzztime="${secs}s" "$PKG"
+            echo "::endgroup::"
+          done
       - if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
-          name: nightly-fuzz-crashers
-          path: sni_tls/testdata/fuzz/
+          name: nightly-fuzz-crashers-${{ matrix.id }}
+          path: |
+            ${{ matrix.plugin }}/testdata/fuzz/
+            ${{ matrix.plugin }}/pkg/*/testdata/fuzz/
 
   containerize:
     runs-on: ubuntu-latest
