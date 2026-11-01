@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/puredevotion/coredns-plugins/compare/v0.6.0...v0.6.1) (2026-11-01)
+
+
+### Bug Fixes
+
+* **deps:** update patch/minor dependency updates ([#59](https://github.com/puredevotion/coredns-plugins/issues/59)) ([e7f3078](https://github.com/puredevotion/coredns-plugins/commit/e7f307847604a5d2bed2f8f2b2fb446f56c86058))
+
 ## [0.6.0](https://github.com/puredevotion/coredns-plugins/compare/v0.5.0...v0.6.0) (2026-10-24)
 
 
