@@ -328,7 +328,7 @@ func (m *CorednsPluginsCi) SbomScan(ctx context.Context, source *dagger.Director
 // opengrepVersion pins the same Opengrep release homelab's ci/dagger module
 // already uses — one version across the ecosystem, same reasoning as every
 // other pinned tool here.
-const opengrepVersion = "v1.32.0"
+const opengrepVersion = "v1.33.1"
 
 // OpengrepScan runs Opengrep (the OSS fork of Semgrep) against this repo's Go
 // source — broad static-analysis coverage beyond golangci-lint's gosec linter
