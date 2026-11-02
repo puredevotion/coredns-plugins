@@ -255,12 +255,15 @@ func TestDecodeADN_RejectsUnrepresentable(t *testing.T) {
 // Marshal refuses IPv4-mapped addresses, so Unmarshal must too; otherwise an
 // accepted option could not be re-encoded.
 func TestUnmarshal_RejectsIPv4MappedAddr(t *testing.T) {
-	b := []byte{144, 5, 0, 1, 0, 0, 0, 1, 0, 3, 1, 'a', 0, 0, 16,
-		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2, 3, 4, 0, 0}
-	for len(b)%8 != 0 {
-		b = append(b, 0)
+	// 5 units of 8 octets: header, ADN "a", one ::ffff:1.2.3.4 address, no SvcParams.
+	b := []byte{
+		144, 5, 0, 1, 0, 0, 0, 1, // Type, Length, priority, lifetime.
+		0, 3, 1, 'a', 0, // ADNLength and ADN.
+		0, 16, // AddrLength.
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2, 3, 4,
+		0, 0, // SvcParamsLength.
+		0, 0, 0, 0, 0, 0, 0, // Pad to 40 octets.
 	}
-	b[1] = byte(len(b) / 8)
 	if o, err := Unmarshal(b); err == nil || !strings.Contains(err.Error(), "not IPv6") {
 		t.Fatalf("want not-IPv6 error, got %+v, %v", o, err)
 	}
