@@ -10,26 +10,11 @@ import (
 	"testing"
 )
 
-// renderQuery builds the sub-zone name ParseQuery accepts for q, from the
-// canonical modifier order.
-func renderQuery(q Query) string {
-	var b strings.Builder
-	for _, name := range modifierOrder {
-		if q.Mods.Has(modifierNames[name]) {
-			b.WriteString("_" + name + ".")
-		}
-	}
-	b.WriteString(q.Token)
-	return b.String()
-}
-
 // FuzzParseQuery: the probe-label grammar is parsed from every query name an
 // untrusted resolver sends. Whatever the input: no panic; an accepted query
 // has a lowercase hex token of bounded length and no conflicting modifiers;
 // rendering it back and reparsing yields the same query (round trip); and the
 // same name in different ASCII case parses to the same query (RFC 4343).
-//
-//nolint:gocognit // A fuzz target is a flat list of invariants; splitting it only hides them.
 func FuzzParseQuery(f *testing.F) {
 	for _, s := range []string{
 		"", "deadbeef", "DEADBEEF", "_badsig.deadbeef", "_unsigned._truncate.deadbeef",
@@ -50,26 +35,13 @@ func FuzzParseQuery(f *testing.F) {
 			}
 			return
 		}
-		if n := len(q.Token); n < minTokenLen || n > maxTokenLen {
-			t.Fatalf("token %q has length %d outside [%d,%d]", q.Token, n, minTokenLen, maxTokenLen)
-		}
-		for _, c := range []byte(q.Token) {
-			if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-				t.Fatalf("token %q is not lowercase hex", q.Token)
-			}
-		}
-		for _, group := range conflicts {
-			if bits := q.Mods & group; bits != bits&-bits {
-				t.Fatalf("accepted conflicting modifiers %s in %q", q.Mods, sub)
-			}
-		}
-		if q.Mods>>len(modifierOrder) != 0 {
-			t.Fatalf("modifier bits %b outside the defined set", q.Mods)
+		if err := q.Validate(); err != nil {
+			t.Fatalf("ParseQuery(%q) accepted a query that fails Validate: %v", sub, err)
 		}
 
-		again, ok := ParseQuery(renderQuery(q))
+		again, ok := ParseQuery(q.Sub())
 		if !ok || again != q {
-			t.Fatalf("round trip of %q: rendered %q, reparsed %+v ok=%v, want %+v", sub, renderQuery(q), again, ok, q)
+			t.Fatalf("round trip of %q: rendered %q, reparsed %+v ok=%v, want %+v", sub, q.Sub(), again, ok, q)
 		}
 		upper, ok := ParseQuery(strings.ToUpper(sub))
 		if !ok || upper != q {
