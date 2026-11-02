@@ -39,6 +39,9 @@ func FuzzParseQuery(f *testing.F) {
 	} {
 		f.Add(s)
 	}
+	for _, s := range stringSeeds(f) {
+		f.Add(s)
+	}
 	f.Fuzz(func(t *testing.T, sub string) {
 		q, ok := ParseQuery(sub)
 		if !ok {
@@ -89,6 +92,9 @@ func FuzzParseDNSSD(f *testing.F) {
 	} {
 		f.Add(s)
 	}
+	for _, s := range stringSeeds(f) {
+		f.Add(s)
+	}
 	f.Fuzz(func(t *testing.T, sub string) {
 		kind, token := parseDNSSD(sub)
 		if kind == dnssdNone {
@@ -116,6 +122,9 @@ func FuzzParseKeyTagQuery(f *testing.F) {
 		"", "_ta-4444", "_ta-0635-7aae-aa1b", "_TA-ABCD", "_ta-635", "_ta-", "_ta-4444.x",
 		"_ta-aa1b-0635", "_ta-+123", "_ta-0x12", "_ta-" + strings.Repeat("0000-", 17),
 	} {
+		f.Add(s)
+	}
+	for _, s := range stringSeeds(f) {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, sub string) {
@@ -188,6 +197,9 @@ func FuzzParseReport(f *testing.F) {
 	f.Add("_er.99999.x.7._er."+agent, agent, "")
 	f.Add("_er.+1.x.7._er."+agent, agent, "")
 	f.Add("garbage", agent, "x.")
+	for _, s := range stringSeeds(f) {
+		f.Add(s, agent, "")
+	}
 	f.Fuzz(func(t *testing.T, qname, agentDomain, zone string) {
 		r, err := ParseReport(qname, agentDomain, zone)
 		if err != nil {
@@ -262,6 +274,9 @@ func FuzzECHBuildParse(f *testing.F) {
 	f.Add(byte(1), bytes.Repeat([]byte{7}, x25519PubKeyLen), "example.org")
 	f.Add(byte(0), []byte{}, "")
 	f.Add(byte(255), make([]byte, 33), strings.Repeat("a", 256))
+	for _, s := range stringSeeds(f) {
+		f.Add(byte(1), bytes.Repeat([]byte{7}, x25519PubKeyLen), s)
+	}
 	f.Fuzz(func(t *testing.T, id byte, pub []byte, name string) {
 		list, err := BuildECHConfigList(id, pub, name)
 		if err != nil {

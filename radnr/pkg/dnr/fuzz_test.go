@@ -61,6 +61,9 @@ func FuzzMarshalUnmarshal(f *testing.F) {
 	f.Add(testADN, []byte("\x20\x01\x0d\xb8\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01"), []byte{0, 1, 0, 3, 2, 'h', '2'}, uint16(1), uint32(300))
 	f.Add("", []byte{}, []byte{}, uint16(0), uint32(0))
 	f.Add("a..b", []byte{1}, []byte(nil), uint16(65535), uint32(1<<32-1))
+	for _, s := range stringSeeds(f) {
+		f.Add(s, []byte(nil), []byte(nil), uint16(1), uint32(300))
+	}
 	f.Fuzz(func(t *testing.T, adn string, addrBytes, svc []byte, prio uint16, life uint32) {
 		o := EncryptedDNS{ADN: adn, SvcParams: svc, ServicePriority: prio, Lifetime: life}
 		for ; len(addrBytes) >= ipv6Size; addrBytes = addrBytes[ipv6Size:] {

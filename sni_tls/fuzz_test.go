@@ -91,6 +91,9 @@ func FuzzGetCertificate(f *testing.F) {
 	} {
 		f.Add(s)
 	}
+	for _, s := range stringSeeds(f) {
+		f.Add(s)
+	}
 
 	f.Fuzz(func(t *testing.T, serverName string) {
 		got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: serverName})
