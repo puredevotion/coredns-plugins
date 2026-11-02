@@ -35,19 +35,11 @@ func FuzzUnmarshal(f *testing.F) {
 		if err != nil {
 			return
 		}
-		// A wire label may legally contain a '.' byte, which the dotted
-		// presentation form cannot express; such a name is decoded but not
-		// faithfully re-encodable, so only dot-canonical names are checked.
-		w, err := encodeADN(o.ADN)
-		if err != nil {
-			return
-		}
-		if back, derr := decodeADN(w); derr != nil || back != o.ADN {
-			return
-		}
+		// Unmarshal only accepts what Marshal can express, so a decoded
+		// option must always re-encode.
 		enc, err := o.Marshal()
 		if err != nil {
-			return
+			t.Fatalf("Unmarshal accepted an option Marshal rejects: %v\n%+v", err, o)
 		}
 		if enc[0] != OptionType || len(enc)%octetUnit != 0 || int(enc[1])*octetUnit != len(enc) {
 			t.Fatalf("Marshal produced a malformed header/length: % x", enc)

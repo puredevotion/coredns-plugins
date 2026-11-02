@@ -145,7 +145,12 @@ func parseAddrs(p []byte, addrLen uint16) ([]netip.Addr, []byte, error) {
 	for i := 0; i < int(addrLen); i += ipv6Size {
 		var a16 [ipv6Size]byte
 		copy(a16[:], p[i:i+ipv6Size])
-		addrs = append(addrs, netip.AddrFrom16(a16))
+		a := netip.AddrFrom16(a16)
+		// Mirror Marshal, which only emits native IPv6 addresses.
+		if a.Is4In6() {
+			return nil, nil, fmt.Errorf("dnr: address %s is not IPv6", a)
+		}
+		addrs = append(addrs, a)
 	}
 	return addrs, p[addrLen:], nil
 }
@@ -268,12 +273,21 @@ func decodeADN(b []byte) (string, error) {
 		n := int(b[0])
 		b = b[1:]
 		if n == 0 {
+			if len(labels) == 0 {
+				return "", fmt.Errorf("dnr: empty ADN")
+			}
 			return strings.Join(labels, "."), nil
 		}
 		if n > len(b) {
 			return "", fmt.Errorf("dnr: ADN label length %d exceeds remaining", n)
 		}
-		labels = append(labels, string(b[:n]))
+		label := string(b[:n])
+		// A '.' inside a wire label cannot be expressed in the dotted form
+		// ADN is carried in, and would re-encode as a different name.
+		if strings.Contains(label, ".") {
+			return "", fmt.Errorf("dnr: ADN label %q contains '.'", label)
+		}
+		labels = append(labels, label)
 		b = b[n:]
 	}
 	return "", fmt.Errorf("dnr: ADN not root-terminated")

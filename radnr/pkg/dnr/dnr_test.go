@@ -4,6 +4,7 @@ package dnr
 import (
 	"bytes"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/puredevotion/coredns-plugins/radnr/pkg/svcparams"
@@ -226,5 +227,41 @@ func TestUnmarshal_MoreTruncations(t *testing.T) {
 				t.Fatalf("expected error for %s", c.name)
 			}
 		})
+	}
+}
+
+// A wire label containing '.' cannot be expressed in the dotted ADN form and
+// would re-encode as a different name, so decoding must reject it, as well as
+// an ADN that is only the root label (Marshal rejects an empty ADN too).
+func TestDecodeADN_RejectsUnrepresentable(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+	}{
+		{"dot in label", []byte{3, 'a', '.', 'b', 0}},
+		{"dot only label", []byte{1, '.', 0}},
+		{"dot in later label", []byte{1, 'a', 3, 'b', '.', 'c', 0}},
+		{"root only", []byte{0}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got, err := decodeADN(c.in); err == nil {
+				t.Fatalf("decodeADN(% x) = %q, want error", c.in, got)
+			}
+		})
+	}
+}
+
+// Marshal refuses IPv4-mapped addresses, so Unmarshal must too; otherwise an
+// accepted option could not be re-encoded.
+func TestUnmarshal_RejectsIPv4MappedAddr(t *testing.T) {
+	b := []byte{144, 5, 0, 1, 0, 0, 0, 1, 0, 3, 1, 'a', 0, 0, 16,
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2, 3, 4, 0, 0}
+	for len(b)%8 != 0 {
+		b = append(b, 0)
+	}
+	b[1] = byte(len(b) / 8)
+	if o, err := Unmarshal(b); err == nil || !strings.Contains(err.Error(), "not IPv6") {
+		t.Fatalf("want not-IPv6 error, got %+v, %v", o, err)
 	}
 }
