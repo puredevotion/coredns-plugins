@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.7.0](https://github.com/puredevotion/coredns-plugins/compare/v0.6.0...v0.7.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* pkg/dnr EncryptedDNS.ADN changed from string to DomainName; construct it with dnr.ParseDomainName or MustParseDomainName.
+
+### Bug Fixes
+
+* **deps:** update patch/minor dependency updates ([#59](https://github.com/puredevotion/coredns-plugins/issues/59)) ([e7f3078](https://github.com/puredevotion/coredns-plugins/commit/e7f307847604a5d2bed2f8f2b2fb446f56c86058))
+
+
+### Miscellaneous Chores
+
+* release 0.7.0 ([#62](https://github.com/puredevotion/coredns-plugins/issues/62)) ([aecf54a](https://github.com/puredevotion/coredns-plugins/commit/aecf54a2562429c007a2f2d667d2e58885f7fee3))
+
+
+### Continuous Integration
+
+* broaden Go native fuzzing across all plugins ([#61](https://github.com/puredevotion/coredns-plugins/issues/61)) ([e626786](https://github.com/puredevotion/coredns-plugins/commit/e626786b5f526ad0cc2472d2902480702114e185))
+
 ## [0.6.0](https://github.com/puredevotion/coredns-plugins/compare/v0.5.0...v0.6.0) (2026-10-24)
 
 
