@@ -13,6 +13,8 @@ import (
 // from a mounted secret/volume; a malformed/rotated cert file must degrade to an
 // error, never a panic). Seeds start from a real valid cert/key pair so the
 // mutator has a well-formed structure to corrupt, not just noise.
+//
+//nolint:gocognit // A fuzz target is a flat list of invariants; splitting it only hides them.
 func FuzzLoadCert(f *testing.F) {
 	dir := f.TempDir()
 	certPath := filepath.Join(dir, "cert.pem")
@@ -52,6 +54,9 @@ func FuzzLoadCert(f *testing.F) {
 		if cert == nil {
 			t.Fatal("loadCert returned nil error and nil cert")
 		}
+		if len(cert.Certificate) == 0 {
+			t.Fatal("loadCert returned a certificate with an empty chain")
+		}
 		if len(names) == 0 {
 			t.Fatal("loadCert returned nil error but no SAN names (should have errored per the no-SAN check)")
 		}
@@ -86,6 +91,9 @@ func FuzzGetCertificate(f *testing.F) {
 	} {
 		f.Add(s)
 	}
+	for _, s := range stringSeeds(f) {
+		f.Add(s)
+	}
 
 	f.Fuzz(func(t *testing.T, serverName string) {
 		got, err := store.GetCertificate(&tls.ClientHelloInfo{ServerName: serverName})
@@ -97,6 +105,18 @@ func FuzzGetCertificate(f *testing.F) {
 		}
 		if got != primary && got != secondary {
 			t.Fatalf("GetCertificate(%q) returned a cert not in the store", serverName)
+		}
+		// Lookup is ASCII-case-insensitive (RFC 6066 §3 / RFC 4343): an exact
+		// name in any case must select its own certificate, not the fallback.
+		switch asciiLower(serverName) {
+		case testSNIPrimary:
+			if got != primary {
+				t.Fatalf("GetCertificate(%q) did not select the primary cert", serverName)
+			}
+		case testSNISecondary:
+			if got != secondary {
+				t.Fatalf("GetCertificate(%q) did not select the secondary cert", serverName)
+			}
 		}
 	})
 }

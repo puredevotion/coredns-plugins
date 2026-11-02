@@ -23,7 +23,7 @@ func benchOption(b *testing.B) EncryptedDNS {
 	return EncryptedDNS{
 		ServicePriority: 1,
 		Lifetime:        3600,
-		ADN:             testADN,
+		ADN:             MustParseDomainName(testADN),
 		Addrs:           []netip.Addr{netip.MustParseAddr("2001:db8::53"), netip.MustParseAddr("2001:db8::1:53")},
 		SvcParams:       sp,
 	}
