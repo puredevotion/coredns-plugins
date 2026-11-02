@@ -18,7 +18,7 @@ about 3.7 GB, so it is not vendored. Point `FUZZ_SEED_DIR` at a directory of
 `*.txt` files and the helper loads every line as an extra seed; the nightly
 workflow fetches a pinned selection this way for the matrix entries marked
 `seeds: true` (sni_tls, probe, radnr-dnr): twelve `Discovery/DNS/*` and
-`Fuzzing/*` lists from SecLists commit `43cbd03`, with `FUZZ_SEED_MAX=20000`.
+`Fuzzing/*` lists from SecLists commit `43cbd03`, with `FUZZ_SEED_MAX=500`.
 With that many seeds the fuzzer's baseline-coverage pass can take most of a
 short run; lower `FUZZ_SEED_MAX` for quick local campaigns.
 

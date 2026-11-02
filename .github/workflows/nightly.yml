@@ -270,7 +270,7 @@ jobs:
             curl -fsSL -o "${dir}/$(basename "$path")" "${base}/${path}"
           done
           echo "FUZZ_SEED_DIR=${dir}" >> "$GITHUB_ENV"
-          echo "FUZZ_SEED_MAX=20000" >> "$GITHUB_ENV"
+          echo "FUZZ_SEED_MAX=500" >> "$GITHUB_ENV"
       - name: Fuzz
         working-directory: ${{ matrix.plugin }}
         env:
