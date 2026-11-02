@@ -16,7 +16,11 @@ so seeds are the only way to feed it known-nasty strings.
 [danielmiessler/SecLists](https://github.com/danielmiessler/SecLists) (MIT) is
 about 3.7 GB, so it is not vendored. Point `FUZZ_SEED_DIR` at a directory of
 `*.txt` files and the helper loads every line as an extra seed; the nightly
-workflow fetches a pinned selection (`Discovery/DNS/*`, `Fuzzing/*`) this way.
+workflow fetches a pinned selection this way for the matrix entries marked
+`seeds: true` (sni_tls, probe, radnr-dnr): twelve `Discovery/DNS/*` and
+`Fuzzing/*` lists from SecLists commit `43cbd03`, with `FUZZ_SEED_MAX=20000`.
+With that many seeds the fuzzer's baseline-coverage pass can take most of a
+short run; lower `FUZZ_SEED_MAX` for quick local campaigns.
 
 ```sh
 FUZZ_SEED_DIR=/path/to/seeds go test -run=NONE -fuzz=FuzzParseQuery -fuzztime=60s .

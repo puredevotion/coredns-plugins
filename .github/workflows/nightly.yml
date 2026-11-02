@@ -217,12 +217,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {id: sni_tls, plugin: sni_tls, pkg: ".", targets: "FuzzGetCertificate:900 FuzzLoadCert:300"}
+          - {id: sni_tls, plugin: sni_tls, pkg: ".", targets: "FuzzGetCertificate:900 FuzzLoadCert:300", seeds: true}
           - {id: cookie, plugin: cookie, pkg: ".", targets: "FuzzVerify:300 FuzzServeDNS:600 FuzzClassify:60"}
           - {id: dynupdate, plugin: dynupdate, pkg: ".", targets: "FuzzServeUpdate:900"}
-          - {id: probe, plugin: probe, pkg: ".", targets: "FuzzParseQuery:180 FuzzParseDNSSD:120 FuzzParseKeyTagQuery:120 FuzzParseEDNSKeyTags:60 FuzzParseReport:180 FuzzParseECHConfigList:120 FuzzECHBuildParse:120"}
+          - {id: probe, plugin: probe, pkg: ".", targets: "FuzzParseQuery:180 FuzzParseDNSSD:120 FuzzParseKeyTagQuery:120 FuzzParseEDNSKeyTags:60 FuzzParseReport:180 FuzzParseECHConfigList:120 FuzzECHBuildParse:120", seeds: true}
           - {id: radnr, plugin: radnr, pkg: ".", targets: "FuzzParseNDP:120"}
-          - {id: radnr-dnr, plugin: radnr, pkg: "./pkg/dnr", targets: "FuzzUnmarshal:300 FuzzMarshalUnmarshal:300"}
+          - {id: radnr-dnr, plugin: radnr, pkg: "./pkg/dnr", targets: "FuzzUnmarshal:300 FuzzMarshalUnmarshal:300", seeds: true}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -241,6 +241,36 @@ jobs:
           key: fuzz-corpus-${{ matrix.id }}-${{ github.run_id }}
           restore-keys: |
             fuzz-corpus-${{ matrix.id }}-
+      - name: Fetch extra fuzz seeds (SecLists)
+        if: matrix.seeds
+        env:
+          SECLISTS_SHA: "43cbd03be467262ca199816e4d2650c42759fa80"
+        run: |
+          set -euo pipefail
+          # Pinned by commit so a green night is reproducible. The targets'
+          # stringSeeds helper loads every *.txt in FUZZ_SEED_DIR; see
+          # fuzz-seeds/README.md. FUZZ_SEED_MAX bounds lines per file so the
+          # baseline-coverage pass stays short.
+          dir="${RUNNER_TEMP}/seeds"
+          mkdir -p "$dir"
+          base="https://raw.githubusercontent.com/danielmiessler/SecLists/${SECLISTS_SHA}"
+          for path in \
+            Discovery/DNS/subdomains-top1million-110000.txt \
+            Discovery/DNS/tlds.txt \
+            Discovery/DNS/namelist.txt \
+            Discovery/DNS/fierce-hostlist.txt \
+            Discovery/DNS/services-names.txt \
+            Discovery/DNS/deepmagic.com-prefixes-top50000.txt \
+            Discovery/DNS/sortedcombined-knock-dnsrecon-fierce-reconng.txt \
+            Discovery/DNS/bitquark-subdomains-top100000.txt \
+            Fuzzing/big-list-of-naughty-strings.txt \
+            Fuzzing/special-chars.txt \
+            Fuzzing/Unicode.txt \
+            Fuzzing/alphanum-case.txt; do
+            curl -fsSL -o "${dir}/$(basename "$path")" "${base}/${path}"
+          done
+          echo "FUZZ_SEED_DIR=${dir}" >> "$GITHUB_ENV"
+          echo "FUZZ_SEED_MAX=20000" >> "$GITHUB_ENV"
       - name: Fuzz
         working-directory: ${{ matrix.plugin }}
         env:
