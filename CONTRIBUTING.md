@@ -34,6 +34,25 @@ Each plugin needs:
 - the RFC's negative cases: malformed SVCB, absent designated resolver, failed
   certificate validation
 
+### Fuzzing
+
+Code that parses or handles untrusted input (wire formats, query names,
+certificate files, UPDATE messages) has a native Go fuzz target (`FuzzXxx` in
+a `_test.go` file). A target must build fresh state per input and assert
+invariants (round trips, atomicity, consistency), not just "does not panic".
+CI runs each target briefly on every PR; `nightly.yml` runs longer campaigns
+with a persisted fuzz cache.
+
+A crasher is a regression test. When fuzzing (locally or from a CI artifact)
+writes a failing input to `<module>/testdata/fuzz/<FuzzName>/<hash>`, fix the
+bug and commit that file with the fix: `go test` replays every file under
+`testdata/fuzz` as a plain unit test, so it then guards against the bug
+returning. Do not delete or hand-edit crasher files.
+
+Run a target locally from its module (or package) directory, for example
+`go test -run=NONE -fuzz='^FuzzServeUpdate$' -fuzztime=30s .` (`-fuzz` accepts
+one package at a time).
+
 ## Plugin layout
 
 One directory per plugin, each with a `README`, a worked `Corefile` example, and

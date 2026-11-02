@@ -293,7 +293,7 @@ func TestDeleteRRsetAndSpecificRecord(t *testing.T) {
 
 	// Class ANY with a concrete type deletes the whole RRset.
 	delset := &dns.ANY{Hdr: dns.RR_Header{
-		Name: "www.example.org.", Rrtype: dns.TypeA, Class: dns.ClassANY, Ttl: 0,
+		Name: wwwName, Rrtype: dns.TypeA, Class: dns.ClassANY, Ttl: 0,
 	}}
 	if got := send(t, d, newUpdate(nil, []dns.RR{delset})); got != dns.RcodeSuccess {
 		t.Fatalf("delete rrset: %s", dns.RcodeToString[got])

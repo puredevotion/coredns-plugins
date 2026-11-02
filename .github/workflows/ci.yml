@@ -104,26 +104,46 @@ jobs:
           cache-dependency-path: sni_tls/go.sum
       # Short smoke run per push. Not a substitute for a long campaign; it
       # catches regressions that break the target itself.
-      - name: Fuzz SNI lookup (60s)
+      - name: Fuzz SNI lookup (60s) and certificate loading (10s)
         working-directory: sni_tls
-        run: go test -run=NONE -fuzz=FuzzGetCertificate -fuzztime=60s ./...
-      - name: Fuzz cookie verification (30s)
+        run: |
+          set -euo pipefail
+          go test -run=NONE -fuzz='^FuzzGetCertificate$' -fuzztime=60s .
+          go test -run=NONE -fuzz='^FuzzLoadCert$' -fuzztime=10s .
+      - name: Fuzz cookie verification (30s), request handling (30s), option classification (10s)
         working-directory: cookie
-        run: go test -run=NONE -fuzz=FuzzVerify -fuzztime=30s ./...
-      - name: Fuzz cookie request handling (30s)
-        working-directory: cookie
-        run: go test -run=NONE -fuzz=FuzzServeDNS -fuzztime=30s ./...
-      - name: Fuzz cookie option classification (10s)
-        working-directory: cookie
-        run: go test -run=NONE -fuzz=FuzzClassify -fuzztime=10s ./...
+        run: |
+          set -euo pipefail
+          go test -run=NONE -fuzz='^FuzzVerify$' -fuzztime=30s .
+          go test -run=NONE -fuzz='^FuzzServeDNS$' -fuzztime=30s .
+          go test -run=NONE -fuzz='^FuzzClassify$' -fuzztime=10s .
+      - name: Fuzz dynamic update handling (30s)
+        working-directory: dynupdate
+        run: go test -run=NONE -fuzz='^FuzzServeUpdate$' -fuzztime=30s .
+      - name: Fuzz probe parsers (10s each)
+        working-directory: probe
+        run: |
+          set -euo pipefail
+          for t in FuzzParseQuery FuzzParseDNSSD FuzzParseKeyTagQuery FuzzParseEDNSKeyTags \
+                   FuzzParseReport FuzzParseECHConfigList FuzzECHBuildParse; do
+            go test -run=NONE -fuzz="^${t}\$" -fuzztime=10s .
+          done
+      - name: Fuzz radnr wire parsers (10s each)
+        working-directory: radnr
+        run: |
+          set -euo pipefail
+          go test -run=NONE -fuzz='^FuzzParseNDP$' -fuzztime=10s .
+          for t in FuzzUnmarshal FuzzMarshalUnmarshal; do
+            go test -run=NONE -fuzz="^${t}\$" -fuzztime=10s ./pkg/dnr
+          done
       - name: Upload crashers
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
           name: fuzz-crashers
           path: |
-            sni_tls/testdata/fuzz/
-            cookie/testdata/fuzz/
+            */testdata/fuzz/
+            */pkg/*/testdata/fuzz/
 
   formal-verification:
     # TLA+ models of the lifecycle and concurrency paths, checked three ways

@@ -1,6 +1,7 @@
 package cookie
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"net"
@@ -567,11 +568,33 @@ func FuzzServeDNS(f *testing.F) {
 			remote = tcpFrom(clientIP)
 		}
 		resp := serve(t, c, query(data, false), remote)
-		if n := len(cookies(t, resp)); n > 1 {
-			t.Fatalf("%d COOKIE options in the response", n)
+		got := cookies(t, resp)
+		if len(got) > 1 {
+			t.Fatalf("%d COOKIE options in the response", len(got))
 		}
 		if tcp && resp.Rcode == dns.RcodeBadCookie {
 			t.Fatal("BADCOOKIE over TCP")
+		}
+
+		// RFC 7873 §5.2.2: a COOKIE option of any length other than 8 or
+		// 16..40 is FORMERR, and carries no cookie of ours.
+		if classify(len(data)) == classMalformed {
+			if resp.Rcode != dns.RcodeFormatError || len(got) != 0 {
+				t.Fatalf("%d-byte option: rcode %s with %d cookies, want FORMERR and none",
+					len(data), dns.RcodeToString[resp.Rcode], len(got))
+			}
+			return
+		}
+		// Anything well-formed gets exactly one cookie back: the client's
+		// own 8 bytes plus a server cookie that verifies under the generating
+		// secret at the current time (RFC 7873 §5.2.3-5.2.5, RFC 9018 §4.3).
+		if len(got) != 1 || len(got[0]) != verifyOptionLen || !bytes.Equal(got[0][:clientCookieLen], data[:clientCookieLen]) {
+			t.Fatalf("response cookie % x for request % x", got, data)
+		}
+		var client [clientCookieLen]byte
+		copy(client[:], data)
+		if !verify(key16(t, secretA), client, got[0][clientCookieLen:], mustAddr(clientIP), c.timestamp()) {
+			t.Fatalf("response server cookie % x does not verify", got[0])
 		}
 	})
 }

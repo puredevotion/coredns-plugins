@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -182,6 +183,50 @@ const (
 	maxTokenLen = 32
 )
 
+// Validate reports whether m is a combination a probe query may carry: only
+// defined modifier bits, and at most one from each mutually exclusive group.
+// ParseQuery enforces exactly this, so a Query it returns always validates.
+func (m Modifier) Validate() error {
+	if m>>len(modifierOrder) != 0 {
+		return fmt.Errorf("probe: modifier bits %b outside the defined set", uint16(m))
+	}
+	for _, group := range conflicts {
+		if bits := m & group; bits != 0 && bits != bits&-bits {
+			return fmt.Errorf("probe: conflicting modifiers %s", bits)
+		}
+	}
+	return nil
+}
+
+// Validate reports whether q is a query ParseQuery could have produced: a
+// lowercase hex token of bounded length and a consistent modifier set. The
+// zero Query is invalid (no token).
+func (q Query) Validate() error {
+	if n := len(q.Token); n < minTokenLen || n > maxTokenLen {
+		return fmt.Errorf("probe: token length %d outside [%d,%d]", n, minTokenLen, maxTokenLen)
+	}
+	for i := 0; i < len(q.Token); i++ {
+		if c := q.Token[i]; (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return fmt.Errorf("probe: token %q is not lowercase hex", q.Token)
+		}
+	}
+	return q.Mods.Validate()
+}
+
+// Sub renders the name below the zone that ParseQuery accepts for q, with the
+// modifiers in canonical order. ParseQuery(q.Sub()) returns q whenever
+// q.Validate() is nil.
+func (q Query) Sub() string {
+	var b strings.Builder
+	for _, name := range modifierOrder {
+		if q.Mods.Has(modifierNames[name]) {
+			b.WriteString("_" + name + ".")
+		}
+	}
+	b.WriteString(q.Token)
+	return b.String()
+}
+
 // ParseQuery parses the part of a qname that sits below the zone. `sub` must
 // already have the zone stripped and must not be fully qualified.
 //
@@ -238,13 +283,13 @@ func ParseQuery(sub string) (Query, bool) {
 		set |= m
 	}
 
-	for _, group := range conflicts {
-		if bits := set & group; bits != 0 && bits != bits&-bits {
-			return Query{}, false // More than one bit from a mutually exclusive group.
-		}
+	q := Query{Token: token, Mods: set}
+	// The same check any hand-built Query goes through (Query.Validate), so parse and render cannot disagree
+	// on which modifier combinations exist.
+	if q.Mods.Validate() != nil {
+		return Query{}, false
 	}
-
-	return Query{Token: token, Mods: set}, true
+	return q, true
 }
 
 // maxModifierLabel bounds the lowercase buffer lookupModifier folds into. The

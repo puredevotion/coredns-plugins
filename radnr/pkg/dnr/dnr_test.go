@@ -4,6 +4,7 @@ package dnr
 import (
 	"bytes"
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/puredevotion/coredns-plugins/radnr/pkg/svcparams"
@@ -24,7 +25,7 @@ func TestMarshal_GoldenBytes_ADNOnly(t *testing.T) {
 	opt := EncryptedDNS{
 		ServicePriority: 1,
 		Lifetime:        3600,
-		ADN:             testADN,
+		ADN:             MustParseDomainName(testADN),
 	}
 	got, err := opt.Marshal()
 	if err != nil {
@@ -60,7 +61,7 @@ func TestMarshal_WithAddrsAndSvcParams(t *testing.T) {
 	opt := EncryptedDNS{
 		ServicePriority: 1,
 		Lifetime:        3600,
-		ADN:             testADN,
+		ADN:             MustParseDomainName(testADN),
 		Addrs:           []netip.Addr{netip.MustParseAddr("fde3:6ad1:6501::240")},
 		SvcParams:       sp,
 	}
@@ -92,7 +93,7 @@ func TestMarshalUnmarshal_RoundTrip(t *testing.T) {
 	in := EncryptedDNS{
 		ServicePriority: 2,
 		Lifetime:        7200,
-		ADN:             testADN,
+		ADN:             MustParseDomainName(testADN),
 		Addrs:           []netip.Addr{netip.MustParseAddr("fde3:6ad1:6501::240")},
 		SvcParams:       sp,
 	}
@@ -117,7 +118,7 @@ func TestMarshalUnmarshal_RoundTrip(t *testing.T) {
 
 func TestMarshal_MultipleAddrs(t *testing.T) {
 	opt := EncryptedDNS{
-		ServicePriority: 1, Lifetime: 60, ADN: "a.b",
+		ServicePriority: 1, Lifetime: 60, ADN: MustParseDomainName("a.b"),
 		Addrs: []netip.Addr{
 			netip.MustParseAddr("fde3:6ad1:6501::240"),
 			netip.MustParseAddr("fde3:6ad1:6501::241"),
@@ -138,9 +139,8 @@ func TestMarshal_Errors(t *testing.T) {
 		name string
 		opt  EncryptedDNS
 	}{
-		{"empty ADN", EncryptedDNS{ServicePriority: 1, Lifetime: 1, ADN: ""}},
-		{"label too long", EncryptedDNS{ADN: string(make([]byte, 64)) + ".com", Lifetime: 1}},
-		{"ipv4 addr rejected", EncryptedDNS{ADN: "a.b", Lifetime: 1, Addrs: []netip.Addr{netip.MustParseAddr("192.0.2.1")}}},
+		{"zero ADN", EncryptedDNS{ServicePriority: 1, Lifetime: 1}},
+		{"ipv4 addr rejected", EncryptedDNS{ADN: MustParseDomainName("a.b"), Lifetime: 1, Addrs: []netip.Addr{netip.MustParseAddr("192.0.2.1")}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -176,14 +176,17 @@ func TestUnmarshal_Errors(t *testing.T) {
 
 func TestEncodeADN_MoreErrors(t *testing.T) {
 	cases := []struct{ name, adn string }{
+		{"empty", ""},
+		{"root only", "."},
 		{"empty label (double dot)", "a..b"},
+		{"leading dot", ".a.b"},
+		{"label too long", strings.Repeat("a", 64) + ".com"},
 		{"name too long", longName()},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			o := EncryptedDNS{ServicePriority: 1, Lifetime: 1, ADN: c.adn}
-			if _, err := o.Marshal(); err == nil {
-				t.Fatalf("expected error for %s", c.name)
+			if d, err := ParseDomainName(c.adn); err == nil {
+				t.Fatalf("ParseDomainName(%q) = %q, want error", c.adn, d)
 			}
 		})
 	}
@@ -198,7 +201,7 @@ func longName() string {
 }
 
 func TestMarshal_TrailingDotADN(t *testing.T) {
-	o := EncryptedDNS{ServicePriority: 1, Lifetime: 1, ADN: "dns.example.com."}
+	o := EncryptedDNS{ServicePriority: 1, Lifetime: 1, ADN: MustParseDomainName("dns.example.com.")}
 	if _, err := o.Marshal(); err != nil {
 		t.Fatalf("trailing dot should be accepted: %v", err)
 	}
@@ -226,5 +229,55 @@ func TestUnmarshal_MoreTruncations(t *testing.T) {
 				t.Fatalf("expected error for %s", c.name)
 			}
 		})
+	}
+}
+
+// A wire label containing '.' cannot be expressed in the dotted ADN form and
+// would re-encode as a different name, so decoding must reject it, as well as
+// an ADN that is only the root label (Marshal rejects an empty ADN too).
+func TestDecodeADN_RejectsUnrepresentable(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+	}{
+		{"dot in label", []byte{3, 'a', '.', 'b', 0}},
+		{"dot only label", []byte{1, '.', 0}},
+		{"dot in later label", []byte{1, 'a', 3, 'b', '.', 'c', 0}},
+		{"root only", []byte{0}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got, err := decodeADN(c.in); err == nil {
+				t.Fatalf("decodeADN(% x) = %q, want error", c.in, got.String())
+			}
+		})
+	}
+}
+
+// Marshal refuses IPv4-mapped addresses, so Unmarshal must too; otherwise an
+// accepted option could not be re-encoded.
+func TestUnmarshal_RejectsIPv4MappedAddr(t *testing.T) {
+	// 5 units of 8 octets: header, ADN "a", one ::ffff:1.2.3.4 address, no SvcParams.
+	b := []byte{
+		144, 5, 0, 1, 0, 0, 0, 1, // Type, Length, priority, lifetime.
+		0, 3, 1, 'a', 0, // ADNLength and ADN.
+		0, 16, // AddrLength.
+		0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 1, 2, 3, 4,
+		0, 0, // SvcParamsLength.
+		0, 0, 0, 0, 0, 0, 0, // Pad to 40 octets.
+	}
+	if o, err := Unmarshal(b); err == nil || !strings.Contains(err.Error(), "not IPv6") {
+		t.Fatalf("want not-IPv6 error, got %+v, %v", o, err)
+	}
+}
+
+// A zoned address has no wire form: Unmarshal can never return the zone, so
+// accepting it in Marshal would break the round trip.
+func TestValidate_RejectsZonedAndZeroAddr(t *testing.T) {
+	for _, a := range []netip.Addr{netip.MustParseAddr("fe80::1%eth0"), {}} {
+		o := EncryptedDNS{ADN: MustParseDomainName("a.b"), Addrs: []netip.Addr{a}}
+		if err := o.Validate(); err == nil {
+			t.Fatalf("Validate accepted address %v", a)
+		}
 	}
 }
