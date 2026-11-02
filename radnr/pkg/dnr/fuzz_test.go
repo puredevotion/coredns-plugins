@@ -15,7 +15,7 @@ import (
 // header.
 func FuzzUnmarshal(f *testing.F) {
 	seed := EncryptedDNS{
-		ADN:             testADN,
+		ADN:             MustParseDomainName(testADN),
 		Addrs:           []netip.Addr{netip.MustParseAddr("2001:db8::1")},
 		SvcParams:       []byte{0, 1, 0, 3, 2, 'h', '2'},
 		ServicePriority: 1,
@@ -65,11 +65,18 @@ func FuzzMarshalUnmarshal(f *testing.F) {
 		f.Add(s, []byte(nil), []byte(nil), uint16(1), uint32(300))
 	}
 	f.Fuzz(func(t *testing.T, adn string, addrBytes, svc []byte, prio uint16, life uint32) {
-		o := EncryptedDNS{ADN: adn, SvcParams: svc, ServicePriority: prio, Lifetime: life}
+		name, nameErr := ParseDomainName(adn)
+		o := EncryptedDNS{ADN: name, SvcParams: svc, ServicePriority: prio, Lifetime: life}
 		for ; len(addrBytes) >= ipv6Size; addrBytes = addrBytes[ipv6Size:] {
 			o.Addrs = append(o.Addrs, netip.AddrFrom16([ipv6Size]byte(addrBytes[:ipv6Size])))
 		}
 		enc, err := o.Marshal()
+		if nameErr != nil && err == nil {
+			t.Fatalf("Marshal accepted an ADN ParseDomainName rejects: %q", adn)
+		}
+		if (o.Validate() == nil) != (err == nil) {
+			t.Fatalf("Validate (%v) and Marshal (%v) disagree", o.Validate(), err)
+		}
 		if err != nil {
 			return
 		}
@@ -77,11 +84,7 @@ func FuzzMarshalUnmarshal(f *testing.F) {
 		if err != nil {
 			t.Fatalf("Marshal output does not decode: %v\n% x", err, enc)
 		}
-		wantADN := o.ADN
-		if n := len(wantADN); n > 0 && wantADN[n-1] == '.' {
-			wantADN = wantADN[:n-1]
-		}
-		if got.ADN != wantADN || got.ServicePriority != prio || got.Lifetime != life ||
+		if got.ADN != o.ADN || got.ServicePriority != prio || got.Lifetime != life ||
 			!bytes.Equal(got.SvcParams, svc) || !slices.Equal(got.Addrs, o.Addrs) {
 			t.Fatalf("round trip mismatch:\n%+v\n%+v", o, got)
 		}

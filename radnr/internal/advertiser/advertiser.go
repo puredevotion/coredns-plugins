@@ -80,10 +80,15 @@ func BuildRA(c *config.Config) (*ndp.RouterAdvertisement, error) {
 		addrs = append(addrs, netip.MustParseAddr(a))
 	}
 
+	adn, err := dnr.ParseDomainName(c.ADN) //nolint:misspell // ADN: RFC 9463 Authentication Domain Name, not a typo for AND
+	if err != nil {
+		return nil, fmt.Errorf("parse ADN: %w", err) //nolint:misspell // ADN: RFC 9463 Authentication Domain Name, not a typo for AND
+	}
+
 	raw, err := dnr.EncryptedDNS{
 		ServicePriority: 1,
 		Lifetime:        defaultLifetime,
-		ADN:             c.ADN, //nolint:misspell // ADN: RFC 9463 Authentication Domain Name, not a typo for AND
+		ADN:             adn, //nolint:misspell // ADN: RFC 9463 Authentication Domain Name, not a typo for AND
 		Addrs:           addrs,
 		SvcParams:       sp,
 	}.Marshal()
