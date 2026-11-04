@@ -7,7 +7,7 @@ toolchain go1.27.3
 require (
 	github.com/coredns/caddy v1.1.4
 	github.com/coredns/coredns v1.15.0
-	github.com/quic-go/quic-go v0.64.1
+	github.com/quic-go/quic-go v0.65.0
 )
 
 require (
