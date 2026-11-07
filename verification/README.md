@@ -78,7 +78,9 @@ differs from the old one exactly where it should.
   its step form `NoRollbackStep`, and the liveness-only config is skipped.
   The two deepest bounded runs (145 and 29 steps) are marked `slow` and run
   only with `APALACHE_SLOW=1`; the inductive proofs below cover the same
-  properties.
+  properties. So are the three passing `ZoneVersionSerial` configs (13 and
+  14 steps, but two concurrent queries make each step wide: one ran for over
+  20 minutes without finishing), likewise covered by inductive proofs.
 
 ### Inductive invariants (`tla/inductive/`, Apalache)
 
@@ -95,11 +97,14 @@ are far beyond what TLC can enumerate:
 | `SniTlsReload_OneLoop` | one poller, no mutex, 50 rotations | 3 rotations |
 | `PluginLifecycle_Registry_X{First,Last}` | 12 reloads | 3 |
 | `DynUpdateAtomicity_DeepCopy` | 15 UPDATEs | 3 |
+| `ZoneVersionSerial_{Bracket,NoCache}` | 3 concurrent queries, 10 serial changes; G1 and G2 | 2 queries, 3 changes |
+| `ZoneVersionSerial_RollbackDuringQuery` | the same, with rollbacks and no bracket; G1 (`IndInvG1`) | 2 queries, 3 changes |
 
 Each proof with a pre-fix counterpart has a **negative control**
 (`expect: refuted`): the same invariant on the v0.4.1 variant
 (`RadnrRA_Year_Original`, `SniTlsReload_ThreeLoopsNoMutex`,
-`DynUpdateAtomicity_Original`) must *not* be provable. That shows the
+`DynUpdateAtomicity_Original`; for `zoneversion`, the single after-lookup
+`ZoneVersionSerial_PostOnly` and the rollback `ZoneVersionSerial_Rollback`) must *not* be provable. That shows the
 invariant really depends on the fix, so the proof is not passing vacuously.
 
 ## Lean proofs (`lean/CorednsPlugins/`)

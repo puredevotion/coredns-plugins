@@ -265,8 +265,8 @@ option is a diagnostic one that almost no client sends.
 | R7, R10, R11: answer, NODATA, NXDOMAIN, referral, wildcard, CNAME out; never non-authoritative, SERVFAIL, REFUSED | `TestResponseCases` | | |
 | R9: at most one option, foreign ones removed | `TestStrayOptionReplaced`, `FuzzServeDNS` | | |
 | R13: lookups carry no option; the request is not modified | `TestRequestNotModified`, `TestNoRequestNoOption` | | |
-| G1: advertised serial existed during the query | `TestSerialChangesAfterAnswer`, `FuzzServeDNS` | `ZoneVersionSerial` `DuringQuery` (all configs, rollback included) | |
-| G2: advertised serial is the answering version's | `TestSerialChangesAfterAnswer`, `TestNegativeAnswerUsesItsOwnSOA`, `FuzzServeDNS` | `AnswerConsistent` (`Bracket`, `NoCache` pass; `PostOnly`, `Rollback` violated, as expected) | `bracket_sound`, `aba_possible` |
+| G1: advertised serial existed during the query | `TestSerialChangesAfterAnswer`, `FuzzServeDNS` | `ZoneVersionSerial` `DuringQuery` (all configs, rollback included); Apalache inductive proof `IndInvG1` (3 queries, 10 changes, rollbacks) | |
+| G2: advertised serial is the answering version's | `TestSerialChangesAfterAnswer`, `TestNegativeAnswerUsesItsOwnSOA`, `FuzzServeDNS` | `AnswerConsistent` (`Bracket`, `NoCache` pass; `PostOnly`, `Rollback` violated, as expected); Apalache inductive proof `IndInv` (3 queries, 10 changes), refuted for `PostOnly` and `Rollback` | `bracket_sound`, `aba_possible` |
 | D3: cache rule | `TestCacheObserve`, `TestCacheFreshness`, `TestProperty_CacheUpdate`, `TestCacheSavesALookup`, `TestRollback` | `CacheNotAhead` | `update_observed`, `update_fresh_monotone`, `update_regression_keeps`, `update_stale_replaces`, `update_advance` |
 | D4: lookup failure withholds | `TestLookupFailure` | | |
 | D5: no allocation on the no-option path | `TestAllocs` | | |

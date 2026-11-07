@@ -182,4 +182,61 @@ AnswerConsistent == \A q \in Q : adv[q] # None => adv[q] = ans[q]
 \* lemma the bracket's soundness rests on.
 CacheNotAhead == ~Rollback => (cache = None \/ cache <= serial)
 
+-----------------------------------------------------------------------------
+
+\* Inductive invariant for Apalache (tla/inductive/ZoneVersionSerial_*.cfg),
+\* for the plugin as built (Bracket, no Rollback; with or without the cache).
+\* It covers every reachable state of instances far larger than TLC's.
+\*
+\* Why the bracket is sound, in one line: while serials only advance,
+\* before[q] <= ans[q] <= serial, so before[q] = serial at Post forces
+\* ans[q] = serial. A rollback breaks the first inequality, a missing
+\* bracket drops the test; inductive/ has both as negative controls.
+MaxSerial == 1 + MaxChanges
+
+IndInv ==
+    /\ changes \in 0..MaxChanges
+    /\ serial = 1 + changes
+    /\ history \in SUBSET (1..MaxSerial)
+    /\ \A i \in 1..MaxSerial : i \in history <=> i <= serial
+    /\ cache \in 0..MaxSerial
+    /\ cache <= serial
+    /\ pc \in [Q -> {"idle", "pre", "main", "post", "done"}]
+    /\ seen \in [Q -> SUBSET (1..MaxSerial)]
+    /\ before \in [Q -> 0..MaxSerial]
+    /\ ans \in [Q -> 0..MaxSerial]
+    /\ adv \in [Q -> 0..MaxSerial]
+    /\ \A q \in Q :
+         /\ seen[q] \subseteq history
+         /\ pc[q] \in Active => serial \in seen[q]
+         /\ pc[q] \in {"main", "post"} => before[q] >= 1 /\ before[q] <= serial
+         /\ pc[q] = "post" =>
+              /\ ans[q] \in seen[q]
+              /\ before[q] <= ans[q]
+              /\ ans[q] <= serial
+         /\ pc[q] # "done" => adv[q] = None
+         /\ adv[q] # None => adv[q] \in seen[q] /\ adv[q] = ans[q]
+
+\* G1 alone needs no assumption: this one holds with rollbacks and without
+\* the bracket (inductive/ZoneVersionSerial_RollbackDuringQuery.cfg).
+IndInvG1 ==
+    /\ changes \in 0..MaxChanges
+    /\ serial \in 1..MaxSerial
+    /\ serial <= 1 + changes
+    /\ history \in SUBSET (1..MaxSerial)
+    /\ serial \in history
+    /\ \A h \in history : h <= 1 + changes
+    /\ cache \in 0..MaxSerial
+    /\ cache = None \/ cache \in history
+    /\ pc \in [Q -> {"idle", "pre", "main", "post", "done"}]
+    /\ seen \in [Q -> SUBSET (1..MaxSerial)]
+    /\ before \in [Q -> 0..MaxSerial]
+    /\ ans \in [Q -> 0..MaxSerial]
+    /\ adv \in [Q -> 0..MaxSerial]
+    /\ \A q \in Q :
+         /\ seen[q] \subseteq history
+         /\ pc[q] \in Active => serial \in seen[q]
+         /\ pc[q] # "done" => adv[q] = None
+         /\ adv[q] # None => adv[q] \in seen[q]
+
 =============================================================================
