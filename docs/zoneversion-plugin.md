@@ -8,39 +8,59 @@ below, which quote RFC 9660.
 <https://www.rfc-editor.org/rfc/rfc9660.txt> on 2026-11-07. Claims about other
 RFCs that were not re-read for this document are marked **UNVERIFIED**.
 
-## The blocker (read this first)
+## The miekg/dns fork (read this first)
 
-With the miekg/dns v1.1.73 library that CoreDNS v1.14.x and v1.15.0 build
-against, **no conformant ZONEVERSION query reaches any plugin.** RFC 9660 §3.1
-has the client send the option empty (OPTION-LENGTH 0). miekg/dns unpacks
+With the upstream miekg/dns v1.1.73 library that CoreDNS v1.14.x and v1.15.0
+build against, **no conformant ZONEVERSION query reaches any plugin.** RFC 9660
+§3.1 has the client send the option empty (OPTION-LENGTH 0). Upstream unpacks
 option 19 as `EDNS0_ZONEVERSION`, whose `unpack` returns `ErrBuf` for fewer
-than two octets. The message therefore fails to unpack, and miekg's
-`Server.serveDNS` answers FORMERR before CoreDNS's handler runs. The current
-`master` of miekg/dns has the same `unpack` (checked 2026-11-07 via
-`raw.githubusercontent.com/miekg/dns/master/edns.go`).
+than two octets. The message fails to unpack, and miekg's `Server.serveDNS`
+answers FORMERR before CoreDNS's handler runs. The `master` of miekg/dns had
+the same `unpack` when checked on 2026-11-07.
 
-The miekg/dns client side has the opposite problem: `EDNS0_ZONEVERSION{}`
-packs LABELCOUNT and TYPE even when they are zero, so a miekg/dns-based
-client sends a two-octet option. RFC 9660 §3.2.1 makes that a FORMERR.
+This module therefore builds against our fork,
+[`github.com/puredevotion/dns`](https://github.com/puredevotion/dns) tag
+`v1.1.73-pd.1`: upstream v1.1.73 plus a fix that unpacks the empty option as
+`EDNS0_ZONEVERSION{Empty: true}` and packs `Empty` back to zero octets (see
+the fork's `PATCHES.md`). `zoneversion/go.mod` has
 
-So, today:
+```
+replace github.com/miekg/dns => github.com/puredevotion/dns v1.1.73-pd.1
+```
+
+A `replace` only applies in the main module, so a CoreDNS build that includes
+this plugin must carry the same `replace` in CoreDNS's own `go.mod`.
+`ci/main.go` (`BuildCoredns`) adds it with `go mod edit -replace` before
+`go mod tidy`. Without it the plugin does not compile (it reads `Empty`), which
+is deliberate: a build against upstream would answer every conformant query
+FORMERR.
+
+The miekg/dns client side still sends two octets for the zero value
+`EDNS0_ZONEVERSION{}` (LABELCOUNT and TYPE, both zero; unchanged in the fork,
+so existing callers keep their wire format). A conformant miekg/dns client
+sets `Empty: true`. RFC 9660 §3.2.1 makes the two-octet query a FORMERR.
+
+With the fork:
 
 | query | what answers | rcode |
 |---|---|---|
-| conformant (`dig +zoneversion`, length 0) | miekg/dns server, before any plugin | FORMERR |
-| miekg/dns client (length 2) | this plugin, per §3.2.1 | FORMERR |
+| conformant (`dig +zoneversion`, or `EDNS0_ZONEVERSION{Empty: true}`, length 0) | this plugin, with the zone's serial | as the zone answers |
+| miekg/dns zero-value struct (length 2) | this plugin, per §3.2.1 | FORMERR |
+| one octet | miekg/dns server, before any plugin (still `ErrBuf`) | FORMERR |
 | no ZONEVERSION option | the zone, untouched | as usual |
 
-`wire_test.go` pins all three: `TestMiekgRejectsEmptyOption` fails as soon as
-a miekg/dns upgrade starts accepting the empty option, which is the signal to
-revisit `optionLength` (it assumes an `EDNS0_ZONEVERSION` in a request had at
-least two octets). `TestLoopbackServer` runs the table above through a real
-`dns.Server` over loopback UDP.
+`wire_test.go` pins this: `TestMiekgUnpacksEmptyOption` fails if the
+`replace` is lost, `TestMiekgPacksEmptyStructAsTwoOctets` pins the two-octet
+client form, and `TestLoopbackServer` runs the table through a real
+`dns.Server` over loopback UDP. `e2e_test.go`'s `TestCoreDNSEndToEnd` starts a
+real CoreDNS server (caddy and `dnsserver`, with `zoneversion` in front of
+`file`) and queries it with a stock `dns.Client` over UDP and TCP: answer,
+NODATA and NXDOMAIN each carry `2 SOA-SERIAL <the zone file's serial>`.
 
-The plugin is still correct for what it does receive, and becomes useful
-end to end once miekg/dns accepts a zero-length option 19. That fix belongs in
-miekg/dns, not in a plugin, and is not part of this change. Whether an
-upstream issue already exists is **UNVERIFIED**.
+Drop the fork, and both `replace` lines, once an upstream miekg/dns release
+that CoreDNS uses accepts a zero-length option 19. The upstream patch is
+prepared on the fork's `upstream-zoneversion-empty-query` branch; it has not
+been offered upstream.
 
 ## Wire format (RFC 9660 §2.1, §4)
 
@@ -279,7 +299,7 @@ option is a diagnostic one that almost no client sends.
 | D3: cache rule | `TestCacheObserve`, `TestCacheFreshness`, `TestProperty_CacheUpdate`, `TestCacheSavesALookup`, `TestRollback`, `TestRegressionCounted` | `CacheNotAhead` (also holds for a store-the-latest rule, since the model's serials only advance when it is checked: it does not back the keep-the-greater choice, which Lean and Go do) | `update_observed`, `update_fresh_monotone`, `update_regression_keeps`, `update_stale_replaces`, `update_advance` |
 | D4: lookup failure withholds (no SOA, not authoritative, or no before-observation) | `TestLookupFailure`, `TestBeforeLookupFailure` | | |
 | D5: no allocation on the no-option path | `TestAllocs` | | |
-| the blocker | `TestMiekgRejectsEmptyOption`, `TestMiekgPacksEmptyStructAsTwoOctets`, `TestLoopbackServer` | | |
+| the miekg/dns fork | `TestMiekgUnpacksEmptyOption`, `TestMiekgPacksEmptyStructAsTwoOctets`, `TestLoopbackServer`, `TestCoreDNSEndToEnd` | | |
 
 The same caveat as the rest of `verification/` applies: the TLA+ model is
 written by hand from `handler.go` and `cache.go`, not extracted from them, and

@@ -34,3 +34,10 @@ require (
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
+
+// Upstream miekg/dns v1.1.73 cannot unpack the empty ZONEVERSION option of a
+// conformant RFC 9660 query (the server answers FORMERR before any plugin
+// runs). Our fork adds EDNS0_ZONEVERSION.Empty; see
+// docs/zoneversion-plugin.md, "The miekg/dns fork". Keep in step with
+// miekgDNSForkReplace in ci/main.go.
+replace github.com/miekg/dns => github.com/puredevotion/dns v1.1.73-pd.1

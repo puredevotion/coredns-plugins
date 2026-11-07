@@ -24,11 +24,13 @@ withheld rather than attached to an answer from another version. The full
 design, every RFC 9660 requirement and what checks it:
 [`docs/zoneversion-plugin.md`](../docs/zoneversion-plugin.md).
 
-> **Blocker.** With miekg/dns v1.1.73 (CoreDNS v1.14.x, v1.15.0), a
-> conformant query (empty option) fails to unpack and is answered FORMERR by
-> the server before any plugin runs. See "The blocker" in the design doc.
-> Until miekg/dns is fixed, the plugin is correct but not reachable by
-> conformant clients.
+> **miekg/dns fork.** Upstream miekg/dns v1.1.73 (CoreDNS v1.14.x, v1.15.0)
+> cannot unpack a conformant query (empty option) and answers FORMERR before
+> any plugin runs. This plugin builds against `github.com/puredevotion/dns`
+> `v1.1.73-pd.1`, which fixes that; a CoreDNS build including it needs
+> `replace github.com/miekg/dns => github.com/puredevotion/dns v1.1.73-pd.1`
+> in CoreDNS's `go.mod` (`ci/main.go` adds it). See "The miekg/dns fork" in
+> the design doc.
 
 ## Syntax
 
