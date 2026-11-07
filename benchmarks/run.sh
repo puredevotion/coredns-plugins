@@ -13,7 +13,7 @@ mkdir -p "$root/benchmarks/results"
 	echo "# go: $(go version)"
 	echo "# count=${COUNT:-8} benchtime=${BENCHTIME:-300ms}"
 } >"$out"
-for m in probe sni_tls dynupdate radnr cookie; do
+for m in probe sni_tls dynupdate radnr cookie zoneversion; do
 	(cd "$root/$m" && go test ./... -run='^$' -bench=. -benchmem \
 		-count="${COUNT:-8}" -benchtime="${BENCHTIME:-300ms}") | grep -E '^(goos|goarch|pkg|cpu|Benchmark)' >>"$out" || true
 done

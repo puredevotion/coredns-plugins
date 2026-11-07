@@ -40,7 +40,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, zoneversion]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -91,7 +91,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, zoneversion]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -111,7 +111,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, zoneversion]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -164,7 +164,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, zoneversion]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -223,6 +223,7 @@ jobs:
           - {id: probe, plugin: probe, pkg: ".", targets: "FuzzParseQuery:180 FuzzParseDNSSD:120 FuzzParseKeyTagQuery:120 FuzzParseEDNSKeyTags:60 FuzzParseReport:180 FuzzParseECHConfigList:120 FuzzECHBuildParse:120", seeds: true}
           - {id: radnr, plugin: radnr, pkg: ".", targets: "FuzzParseNDP:120"}
           - {id: radnr-dnr, plugin: radnr, pkg: "./pkg/dnr", targets: "FuzzUnmarshal:300 FuzzMarshalUnmarshal:300", seeds: true}
+          - {id: zoneversion, plugin: zoneversion, pkg: ".", targets: "FuzzDecode:120 FuzzNewVersion:180 FuzzServeDNS:600", seeds: true}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
