@@ -49,7 +49,9 @@ exterr (R15):
 
 Answer selection (R1, R2, R3, R20, R22):
 * `eqFoldLoop_iff`: Go's byte loop `equalFoldASCII` is equality after ASCII
-  lower-casing (RFC 4343 §3).
+  lower-casing (RFC 4343 §3); `lower_eq_iff`: that lower-casing makes two
+  octets equal exactly when they are equal or the same letter A-Z/a-z, so
+  nothing outside A-Z is folded.
 * `handle_answers_iff`: the plugin answers exactly a QUERY with one question,
   QTYPE 261, QCLASS IN, whose name folds to a configured name; everything else
   is passed on (`only_type_261`, `only_class_IN`, `only_configured_names`).
@@ -523,6 +525,19 @@ theorem ranges_unique : ∀ (a b : List (Nat × Nat)), canon a → canon b →
 def lower (b : Nat) : Nat := if 65 ≤ b ∧ b ≤ 90 then b + 32 else b
 
 def lowerAll (s : List Nat) : List Nat := s.map lower
+
+/-- RFC 4343 §3, stated without `lower`: two octets fold equal exactly when
+they are equal or are the same letter A-Z/a-z in the two cases. Nothing
+outside A-Z is folded (so `[` (91) does not match `{` (123), nor `@` (64)
+match `` ` `` (96)). -/
+theorem lower_eq_iff (a b : Nat) : lower a = lower b ↔
+    a = b ∨ (65 ≤ a ∧ a ≤ 90 ∧ b = a + 32) ∨ (65 ≤ b ∧ b ≤ 90 ∧ a = b + 32) := by
+  unfold lower
+  by_cases ha : 65 ≤ a ∧ a ≤ 90 <;> by_cases hb : 65 ≤ b ∧ b ≤ 90
+  · rw [if_pos ha, if_pos hb]; omega
+  · rw [if_pos ha, if_neg hb]; omega
+  · rw [if_neg ha, if_pos hb]; omega
+  · rw [if_neg ha, if_neg hb]; omega
 
 /-- Go's `equalFoldASCII`: equal length, then byte by byte after folding. -/
 def eqFoldLoop : List Nat → List Nat → Bool
