@@ -350,6 +350,18 @@ admits", which covers both modes.
 | `GeoScoreStaleness_NoExpiry` | violated `NeverServeStale` | with no staleness check, the last score is trusted however old it is |
 | `GeoScoreStaleness_LongTTL` | violated `CacheExposureBound` | `ttl` > `max-staleness` (refused by the validator) lets resolvers hold answers past the bound |
 
+TLC checks each config exhaustively (two endpoints, `max-staleness` 2,
+state-graph depth 18). Apalache type-checks the spec and re-checks the
+three violation configs symbolically. It also proves the inductive
+invariant `IndInv` for `inductive/GeoScoreStaleness_Minute` (four
+endpoints, `max-staleness` 60 s, `ttl` 60): it holds initially, every step
+preserves it, and it implies the three properties, so they hold in every
+reachable state at any depth. The negative control
+`GeoScoreStaleness_Minute_JudgeByFetch` must fail to prove, and does. The
+bounded Apalache re-check of `Fixed` to depth 18 takes about 20 minutes,
+so it is marked `slow` (run it with `APALACHE_SLOW=1`); the inductive proof
+covers the same properties.
+
 The models are written by hand from this document and the Go code. As
 everywhere in `verification/`, a result is a statement about the model, and
 the Go tests check that the code matches it.
