@@ -57,8 +57,10 @@ version of the zone an answer came from, in the same response, so a diagnosis
 is not confused by the zone changing between the answer and a separate SOA
 query. CoreDNS has no support. A positive answer carries no SOA, so the plugin
 brackets it with SOA observations and withholds the option if the serial moved
-mid-query. Design, the guarantee it makes, and a blocker in miekg/dns that
-currently turns every conformant query into a FORMERR before any plugin runs:
+mid-query. Upstream miekg/dns v1.1.73 turns every conformant query into a
+FORMERR before any plugin runs, so this plugin and the image build use our
+fork [`puredevotion/dns`](https://github.com/puredevotion/dns) with the fix.
+Design, the guarantee it makes, and the fork:
 [`docs/zoneversion-plugin.md`](docs/zoneversion-plugin.md).
 
 [RFC 9463]: https://www.rfc-editor.org/rfc/rfc9463.html

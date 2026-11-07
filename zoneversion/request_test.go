@@ -24,6 +24,9 @@ func TestClassify(t *testing.T) {
 		"empty then non-empty":     {&dns.OPT{Option: []dns.EDNS0{emptyOption(), &dns.EDNS0_ZONEVERSION{}}}, askMalformed},
 		"non-empty then empty":     {&dns.OPT{Option: []dns.EDNS0{&dns.EDNS0_ZONEVERSION{}, emptyOption()}}, askMalformed},
 		"response-shaped (6 oct.)": {&dns.OPT{Option: []dns.EDNS0{&dns.EDNS0_ZONEVERSION{LabelCount: 2, Version: strayVersion}}}, askMalformed},
+		"one empty, local form":    {&dns.OPT{Option: []dns.EDNS0{localEmptyOption()}}, askVersion},
+		"empty, both forms":        {&dns.OPT{Option: []dns.EDNS0{emptyOption(), localEmptyOption()}}, askMalformed},
+		"empty ignores fields":     {&dns.OPT{Option: []dns.EDNS0{&dns.EDNS0_ZONEVERSION{Empty: true, LabelCount: 2, Version: strayVersion}}}, askVersion},
 	} {
 		if got := classify(tc.opt); got != tc.want {
 			t.Errorf("%s: classify = %d, want %d", name, got, tc.want)

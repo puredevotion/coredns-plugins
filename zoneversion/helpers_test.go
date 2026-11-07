@@ -211,8 +211,12 @@ func query(name string, qtype uint16, opts ...dns.EDNS0) *dns.Msg {
 }
 
 // EmptyOption is the conformant query option (RFC 9660 §3.1): code 19,
-// length 0, which the miekg/dns types can only represent as EDNS0_LOCAL.
-func emptyOption() dns.EDNS0 { return &dns.EDNS0_LOCAL{Code: dns.EDNS0ZONEVERSION} }
+// length 0, in the form the patched miekg/dns unpacks it to (Empty set).
+func emptyOption() dns.EDNS0 { return &dns.EDNS0_ZONEVERSION{Code: dns.EDNS0ZONEVERSION, Empty: true} }
+
+// LocalEmptyOption is the same option built as EDNS0_LOCAL, which packs its
+// Data verbatim: the only way to express it with upstream miekg/dns.
+func localEmptyOption() dns.EDNS0 { return &dns.EDNS0_LOCAL{Code: dns.EDNS0ZONEVERSION} }
 
 // VersionOf returns the response's ZONEVERSION options.
 func versionOf(m *dns.Msg) []*dns.EDNS0_ZONEVERSION {

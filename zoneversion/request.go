@@ -21,16 +21,21 @@ const (
 // optionLength is the OPTION-LENGTH an option had on the wire, as far as the
 // in-memory form records it, and whether the option is a ZONEVERSION at all.
 //
-// The miekg/dns v1.1.73 library unpacks option 19 as *dns.EDNS0_ZONEVERSION, whose
-// unpack refuses fewer than two octets (ErrBuf), so a ZONEVERSION it hands us
-// always had 2 + len(Version) octets: never the empty query form. The empty
-// form can only reach a handler as *dns.EDNS0_LOCAL with Code 19 (built in
-// process). TestMiekgRejectsEmptyOption pins that behaviour so an upgrade
-// that changes it fails loudly instead of turning every conformant query
-// into a FORMERR here. See docs/zoneversion-plugin.md, "The blocker".
+// This module builds against github.com/puredevotion/dns (a replace in
+// go.mod): miekg/dns v1.1.73 plus a fix that unpacks a zero-length option 19
+// as *dns.EDNS0_ZONEVERSION with Empty set, and packs Empty back to zero
+// octets. Without Empty, the option had 2 + len(Version) octets on the wire.
+// Upstream v1.1.73 refuses the empty form (ErrBuf) and the server answers
+// FORMERR before any plugin runs; TestMiekgUnpacksEmptyOption fails loudly if
+// the replace is lost. An empty option built in process may also arrive as
+// *dns.EDNS0_LOCAL with Code 19. See docs/zoneversion-plugin.md, "The miekg/dns
+// fork".
 func optionLength(o dns.EDNS0) (int, bool) {
 	switch v := o.(type) {
 	case *dns.EDNS0_ZONEVERSION:
+		if v.Empty {
+			return 0, true
+		}
 		return headerLen + len(v.Version), true
 	case *dns.EDNS0_LOCAL:
 		if v.Code == optionCode {

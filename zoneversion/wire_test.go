@@ -11,10 +11,11 @@ import (
 
 // ConformantQuery is the wire form of an RFC 9660 §3.1 query: an OPT RR
 // carrying OPTION-CODE 19 with OPTION-LENGTH 0. Built from EDNS0_LOCAL,
-// which packs its Data verbatim; EDNS0_ZONEVERSION cannot express it.
+// which packs its Data verbatim, so the bytes do not depend on the
+// miekg/dns fork under test.
 func conformantQuery(t *testing.T) []byte {
 	t.Helper()
-	wire, err := query(wwwName, dns.TypeA, emptyOption()).Pack()
+	wire, err := query(wwwName, dns.TypeA, localEmptyOption()).Pack()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -24,16 +25,41 @@ func conformantQuery(t *testing.T) []byte {
 	return wire
 }
 
-// The blocker, pinned. The miekg/dns v1.1.73 library refuses to unpack a
-// zero-length ZONEVERSION option (EDNS0_ZONEVERSION.unpack returns ErrBuf
-// below two octets), so CoreDNS's server answers every conformant
-// ZONEVERSION query FORMERR before any plugin runs. The classify function
-// relies on this: a *dns.EDNS0_ZONEVERSION in a request had at least two
-// octets. If this test starts failing after a miekg/dns upgrade, revisit
-// optionLength and docs/zoneversion-plugin.md "The blocker" first.
-func TestMiekgRejectsEmptyOption(t *testing.T) {
-	if err := new(dns.Msg).Unpack(conformantQuery(t)); err == nil {
-		t.Fatal("miekg/dns now unpacks an empty ZONEVERSION option: revisit optionLength")
+// The former blocker, now fixed and pinned. Upstream miekg/dns v1.1.73
+// refuses to unpack a zero-length ZONEVERSION option (ErrBuf below two
+// octets), so CoreDNS answered every conformant query FORMERR before any
+// plugin ran. This module's go.mod replaces it with
+// github.com/puredevotion/dns, which unpacks the empty option as
+// EDNS0_ZONEVERSION{Empty: true} and packs that back to zero octets. If this test fails, the replace has been lost: see
+// docs/zoneversion-plugin.md, "The miekg/dns fork".
+func TestMiekgUnpacksEmptyOption(t *testing.T) {
+	wire := conformantQuery(t)
+	m := new(dns.Msg)
+	if err := m.Unpack(wire); err != nil {
+		t.Fatalf("miekg/dns refuses the empty ZONEVERSION option (%v): is the puredevotion/dns replace in go.mod?", err)
+	}
+	zv := versionOf(m)
+	if len(zv) != 1 || !zv[0].Empty {
+		t.Fatalf("unpacked options %+v, want one EDNS0_ZONEVERSION with Empty set", m.IsEdns0().Option)
+	}
+	if got := classify(m.IsEdns0()); got != askVersion {
+		t.Fatalf("classify = %d, want askVersion", got)
+	}
+	// And the struct form packs to exactly the same octets.
+	again, err := query(wwwName, dns.TypeA, emptyOption()).Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(again[2:], wire[2:]) { // Past the random message ID.
+		t.Fatalf("EDNS0_ZONEVERSION{Empty: true} packs to % x, want % x", again, wire)
+	}
+	// One octet is still malformed: the server answers FORMERR itself.
+	short := bytes.Clone(wire)
+	short[len(short)-1] = 1  // OPTION-LENGTH 1.
+	short = append(short, 0) // One octet of OPTION-DATA.
+	short[len(short)-6]++    // Low octet of the OPT RR's RDLENGTH, just before the option.
+	if err := new(dns.Msg).Unpack(short); err == nil {
+		t.Fatal("a one-octet ZONEVERSION option unpacked")
 	}
 }
 
@@ -117,16 +143,19 @@ func loopbackServer(t *testing.T, zone *fakeZone) func([]byte) *dns.Msg {
 	}
 }
 
-// End to end over loopback UDP: the conformant query is answered FORMERR by
-// the server itself (the blocker), and the two-octet form by the plugin
-// (RFC 9660 §3.2.1). Neither reaches the zone.
+// End to end over loopback UDP: the conformant query gets the serial, the
+// two-octet form is FORMERR from the plugin (RFC 9660 §3.2.1) and never
+// reaches the zone.
 func TestLoopbackServer(t *testing.T) {
 	zone := newFakeZone()
 	exchange := loopbackServer(t, zone)
 
-	if got := exchange(conformantQuery(t)); got.Rcode != dns.RcodeFormatError {
-		t.Fatalf("conformant query: rcode %s, want FORMERR from the server", dns.RcodeToString[got.Rcode])
+	got := exchange(conformantQuery(t))
+	if got.Rcode != dns.RcodeSuccess {
+		t.Fatalf("conformant query: rcode %s, want NOERROR", dns.RcodeToString[got.Rcode])
 	}
+	wantVersion(t, got, testSerial)
+	before, _ := zone.counts()
 	two, err := query(wwwName, dns.TypeA, &dns.EDNS0_ZONEVERSION{}).Pack()
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +170,7 @@ func TestLoopbackServer(t *testing.T) {
 	if got := exchange(plain); got.Rcode != dns.RcodeSuccess || len(versionOf(got)) != 0 {
 		t.Fatalf("plain query: rcode %s, %d options", dns.RcodeToString[got.Rcode], len(versionOf(got)))
 	}
-	if q, _ := zone.counts(); q != 1 {
-		t.Fatalf("zone saw %d queries, want 1 (only the plain one)", q)
+	if q, _ := zone.counts(); q != before+1 {
+		t.Fatalf("zone saw %d queries after the conformant one, want 1 (the plain one; the FORMERR must not reach it)", q-before)
 	}
 }
