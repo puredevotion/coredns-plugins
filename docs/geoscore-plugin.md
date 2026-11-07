@@ -175,8 +175,9 @@ Guidance for the writer (out of scope for this repository, but its contract):
 
 **R14.** An entry is read through one validator (`ParseEntry`). It refuses
 a value longer than 512 bytes; JSON that is not exactly one object, or has
-anything after it; unknown fields, field names in the wrong case, or a
-missing required field; a `score` that is NaN, infinite, negative, above 1
+anything after it; unknown fields, field names in the wrong case (names
+must match byte for byte; `encoding/json` alone would fold case, even
+Unicode case), a field that appears twice, or a missing required field; a `score` that is NaN, infinite, negative, above 1
 or not representable as a float64 (`1e400`); an `updated` outside its range;
 and a `signal` or `note` outside its alphabet or length. An entry it refuses
 is **invalid**. The whole entry is ignored, it is logged and counted, and the
