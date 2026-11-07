@@ -58,13 +58,15 @@ geoscore NAME {
 `NAME` without a trailing dot is relative to the server block's zone, as in
 a zone file (RFC 1035 §5.1): `geoscore www` in a block for `example.com`
 configures `www.example.com.`. Several `geoscore` blocks may share a server
-block, one per name. All properties except `endpoint` may appear at most once.
+block, one per name; no owner name may be answered by two blocks, so one
+block's `NAME` may not be another's `_geoscore.NAME` rationale name. All properties except `endpoint` may appear at most once.
 
 ## Requirements
 
 ### Which queries are answered
 
-**R1.** The plugin answers a query only when it has exactly one question, of
+**R1.** The plugin answers a query only when its opcode is QUERY (RFC 1035
+§4.1.1; a NOTIFY or UPDATE goes to the backend), it has exactly one question, of
 class IN, whose name is a configured `NAME`, and whose type is A or AAAA,
 **and** at least one endpoint has an address of that family. It also answers
 TXT at `_geoscore.NAME` when `rationale-txt` is set (R23).
@@ -77,6 +79,11 @@ backend behind the plugin (`file`, `dynupdate`, ...). The zone must hold
 `NAME` (for example with a TXT, or with the static A/AAAA the `static`
 fallback also answers). Otherwise the backend answers NXDOMAIN for the other
 types at a name that has A records, which RFC 1034 §4.3.2 does not allow.
+The same holds for `_geoscore.NAME` with `rationale-txt`: only its TXT is
+answered here, so the zone must hold that name too (any record will do),
+or a query for another type at it gets NXDOMAIN from the backend, and a
+resolver that caches that NXDOMAIN, or synthesises denials from NSEC (RFC
+8198), may then deny the TXT as well.
 
 **R3.** Names compare ASCII case-insensitively and no other way (RFC 4343
 §3): no non-ASCII octet folds onto an ASCII one. The answer's owner name is
@@ -115,7 +122,8 @@ fully qualified and lowercase, and is never the root.
 repeated property, a missing or extra argument, an unparsable address,
 duration or number, or anything R5, R6, R9, R13 or R22 refuses (fail closed,
 CONTRIBUTING.md). A block that fails validation never opens a store
-connection.
+connection, and when any block of a server block fails, the stores the
+blocks before it opened are closed again.
 
 **R11.** `store valkey` requires `tls_ca` and has no option to skip
 certificate verification. The scores decide where clients are sent, so a
@@ -128,7 +136,10 @@ is the fallback.
 
 **R12.** The entry for endpoint `ID` lives at the Valkey string key
 `PREFIX:ID`. All of a name's keys are read with one `MGET` per refresh
-(R24). `PREFIX` is 1 to 64 of `[A-Za-z0-9:._-]`.
+(R24); against Valkey Cluster, where a name's keys hash to different slots
+and one `MGET` across slots is refused, the read is one `MGET` per slot,
+and it fails as a whole if any part fails (R25). `PREFIX` is 1 to 64 of
+`[A-Za-z0-9:._-]`.
 
 **R13.** The candidate set has 1 to 16 endpoints and each endpoint has 1 to
 8 addresses per family. `ID` is 1 to 32 of `[a-z0-9-]`, does not start with
@@ -175,8 +186,9 @@ Guidance for the writer (out of scope for this repository, but its contract):
 
 **R14.** An entry is read through one validator (`ParseEntry`). It refuses
 a value longer than 512 bytes; JSON that is not exactly one object, or has
-anything after it; unknown fields, field names in the wrong case, or a
-missing required field; a `score` that is NaN, infinite, negative, above 1
+anything after it; unknown fields, field names in the wrong case (names
+must match byte for byte; `encoding/json` alone would fold case, even
+Unicode case), a field that appears twice, or a missing required field; a `score` that is NaN, infinite, negative, above 1
 or not representable as a float64 (`1e400`); an `updated` outside its range;
 and a `signal` or `note` outside its alphabet or length. An entry it refuses
 is **invalid**. The whole entry is ignored, it is logged and counted, and the
@@ -238,8 +250,19 @@ than `max-staleness + 30 s`.
 **R22.** `ttl` ≤ `max-staleness`, enforced by the validator. An answer is
 never given on a score older than `max-staleness` (R21). A resolver keeps it
 at most `ttl` more, so no client acts on a score older than
-`2 × max-staleness`. The TLA+ variant `LongTTL` breaks the bound when the
-check is removed. The CoreDNS `cache` plugin in front of this one is one
+`2 × max-staleness`, measured on the writer's clock. Measured on the
+plugin's clock the bound is `2 × max-staleness + 30 s`, because R21 accepts
+an entry dated up to 30 s ahead, plus under one second because both clocks
+are compared in whole Unix seconds. The TLA+ model has no clock skew
+(`skew = 0`) and checks the first form. The variant `LongTTL` breaks the
+bound when the check is removed.
+
+The bound is about answers given on a score. The `nodata` fallback's
+negative answer is cached for the SOA-derived TTL of R7, which is the
+zone's and can be far longer than `ttl`; resolvers keep answering NODATA
+for that long after the scores recover. Use `nodata` only with a short SOA
+MINIMUM, or prefer `static` or `servfail` (a SERVFAIL is cached for at most
+5 minutes, RFC 2308 §7.1). The CoreDNS `cache` plugin in front of this one is one
 more such resolver, and it keeps the bound unless `serve_stale` is enabled
 for the zone (see *Placement*).
 
@@ -327,6 +350,7 @@ the validator produces. It proves:
 | `decide_eligible_or_fallback`, `decide_strict_fallback` | an answered endpoint is eligible, or nothing is eligible, the fallback is `static`, and the answer is the first-listed candidate; with `servfail`/`nodata`, only eligible endpoints are ever answered | R17, R20 |
 | `best_max`, `best_first`, `best_spec`, `best_unique`, `best_complete` | best mode is exactly "maximal weight among eligible, earliest on a tie"; that specification picks out one candidate, so best mode is deterministic in (scores, eligibility, tie-break order) | R18 |
 | `best_none_iff`, `pick_none_iff`, `select_none_iff` | nothing is selected exactly when no candidate is eligible | R20 |
+| `eligible_iff`, `decide_strict_fallback_spec` | `eligible` is exactly R15's rule (valid, healthy, at most `skew` ahead, at most `maxStale` behind, weight > 0), so with `servfail`/`nodata` an answered endpoint meets each condition; without this, weakening `eligible` would weaken every theorem above without breaking the build | R15, R17 |
 | `pick_some` | every draw below the total weight selects | R19 |
 | `pick_count` | over the `total` equally likely draws, a candidate is selected exactly `ew c` times: probability `w / Σw` | R19 |
 | `pick_sound` (third part) | a selected candidate has positive effective weight: weighted mode stays in the support | R19 |
@@ -364,7 +388,11 @@ covers the same properties.
 
 The models are written by hand from this document and the Go code. As
 everywhere in `verification/`, a result is a statement about the model, and
-the Go tests check that the code matches it.
+the Go tests check that the code matches it. One limit of the TLA+ model
+in particular: its properties measure an entry's age with the same
+snapshot age the plugin reads, so a bug that stopped snapshot entries
+from ageing at all would pass it. That case is the Go tests' job
+(`TestWriterDeathEndsInFallback`, `TestStoreOutage`).
 
 ## What backs each rule
 
@@ -377,9 +405,9 @@ the Go tests check that the code matches it.
 | R6, R22 | `TestValidateRejects`, `TestParseRejects` | | `CacheExposureBound`, `LongTTL` |
 | R7, R8, R20 | `TestServeFallbacks`, `TestStaticFallbackPerFamily` | `decide_eligible_or_fallback`, `select_none_iff` | `FallbackOnlyWhenNoneEligible` |
 | R9, R10, R11 | `TestParseFull`, `TestParseRejects`, `TestParseValkeyCA`, `TestValidateRationaleNameLength` | | |
-| R12 | `TestMemStore`, `TestValkeyStoreRoundTrip` (needs `GEOSCORE_VALKEY_ADDR`) | | |
+| R12 | `TestMemStore`, `TestValkeyStoreFake` (standalone and cluster), `TestValkeyStoreRoundTrip` (needs `GEOSCORE_VALKEY_ADDR`) | | |
 | R14 | `TestParseEntryRejects`, `TestEntryValidateNonFinite`, `TestProperty_EntryRoundTrip`, `FuzzParseEntry` | | |
-| R15, R17 | `TestIneligibleNeverChosen`, `TestFutureDatedEntry`, `TestWeightRounding`, `FuzzDecide` | `decide_eligible_or_fallback` | `NeverServeStale` |
+| R15, R17 | `TestIneligibleNeverChosen`, `TestFutureDatedEntry`, `TestWeightRounding`, `FuzzDecide` | `decide_eligible_or_fallback`, `eligible_iff`, `decide_strict_fallback_spec` | `NeverServeStale` |
 | R16 | `TestProperty_DecideMembershipAndFallback`, `FuzzDecide`, `FuzzServeDNS` | `decide_mem` | |
 | R18 | `TestBestPicksHighestThenFirstListed`, `TestProperty_BestMatchesSpec` | `best_spec`, `best_unique`, `best_complete` | |
 | R19 | `TestWeightedFollowsDraw`, `TestProperty_WeightedExactDistribution`, `TestProperty_WeightedMonotone` | `pick_count`, `pick_monotone`, `pick_sound` | |

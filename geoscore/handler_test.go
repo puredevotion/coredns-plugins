@@ -108,6 +108,18 @@ func TestServePassesOn(t *testing.T) {
 	if _, err := h.ServeDNS(t.Context(), dnstest.NewRecorder(&test.ResponseWriter{}), req); err != nil || next.calls != 6 {
 		t.Errorf("CHAOS class not passed on: %v", err)
 	}
+	// R1: only standard queries are answered. A NOTIFY or an UPDATE whose
+	// zone section happens to name NAME with type A is not a question to
+	// answer with an endpoint.
+	for _, op := range []int{dns.OpcodeNotify, dns.OpcodeUpdate, dns.OpcodeStatus} {
+		req = new(dns.Msg)
+		req.SetQuestion(testName, dns.TypeA)
+		req.Opcode = op
+		before := next.calls
+		if _, err := h.ServeDNS(t.Context(), dnstest.NewRecorder(&test.ResponseWriter{}), req); err != nil || next.calls != before+1 {
+			t.Errorf("opcode %d not passed on: %v", op, err)
+		}
+	}
 }
 
 func TestServeFallbacks(t *testing.T) {
