@@ -13,6 +13,7 @@ that builds a CoreDNS binary with them compiled in.
 | [`probe`](probe/) | A per-visitor synthetic measurement zone that records what each resolver's query reveals and can answer wrong on purpose (DNSSEC failure modes), plus an RFC 9567 error-report receiver | Implemented and tested |
 | [`zoneversion`](zoneversion/) | RFC 9660 ZONEVERSION: tells a client which SOA serial of the zone produced the authoritative response it asked about, never a serial the zone did not have during the query | Implemented and tested; codec and serial rules proved in Lean, serial race modelled in TLA+. **Unreachable end to end until miekg/dns accepts an empty option 19**, see its doc |
 | [`resinfo`](resinfo/) | Publishes the resolver's capabilities (QNAME minimisation, Extended DNS Errors, an info URL) as an RFC 9606 RESINFO record at its own name and `resolver.arpa`, canonical and validated at startup | Implemented and tested; RDATA codec and answer selection proved in Lean. **Not yet deployed anywhere** |
+| [`geoscore`](geoscore/) | Answers A/AAAA for a name with the endpoint that scores best on a live signal (latency, carbon, cost, health) kept in Valkey by an external writer: best or score-weighted, stale scores expire, documented fallback, optional TXT rationale | Implemented and tested; selection proved in Lean, staleness and fallback model-checked in TLA+. **Not yet deployed anywhere** |
 
 `sni_tls` and `radnr` run in production in the author's homelab (as
 `coredns-radnr`, serving real LAN DNS over DoT/DoH/DoQ). They have real-world
@@ -82,6 +83,7 @@ cd dynupdate && go test -race ./...
 cd probe     && go test -race ./...
 cd zoneversion && go test -race ./...
 cd resinfo   && go test -race ./...
+cd geoscore  && go test -race ./...
 ```
 
 Build a CoreDNS binary with all of them compiled in, via Dagger (from `ci/`):
@@ -165,6 +167,11 @@ queries, and fuzzes the codec and the handler with the zone reloading mid-query.
 produces, that only canonical RDATA decodes, and that exactly RESINFO/IN
 queries for the configured names are answered, with property tests and fuzz
 targets over the wire codec, the `exterr` syntax and request handling.
+`geoscore` checks its selection against the Lean model's specification with
+property tests (best mode, the exact weighted distribution, monotonicity,
+membership and fallback), drives writer death and store outages through a fake
+clock, and carries fuzz targets over score-entry validation, selection,
+Corefile parsing and request handling.
 
 Everything runs offline — `GOPROXY=off go test ./...` passes in every module.
 

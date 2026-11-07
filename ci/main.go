@@ -181,6 +181,21 @@ var pluginCfgPatches = map[string]struct {
 		insertAfterLine: "transfer:transfer",
 		modulePath:      "github.com/puredevotion/coredns-plugins/zoneversion",
 	},
+	// Score-based endpoint selection for one owner name. Slot: immediately
+	// AFTER dnssec:dnssec in v1.14.6's plugin.cfg (docs/geoscore-plugin.md):
+	//
+	//   - after rrl and acl   => they see the query before anything answers;
+	//   - after dnssec        => online signing signs its answers;
+	//   - before the backends => it answers its name and passes everything
+	//     else (and its NODATA fallback's SOA lookup) to the zone behind it.
+	//
+	// dnssec:dnssec is not any other plugin's anchor here, so the map order
+	// of the sed inserts below cannot reorder it against them.
+	"geoscore": {
+		cfgLine:         "geoscore:github.com/puredevotion/coredns-plugins/geoscore",
+		insertAfterLine: "dnssec:dnssec",
+		modulePath:      "github.com/puredevotion/coredns-plugins/geoscore",
+	},
 	"rrl": {
 		cfgLine:         "rrl:github.com/coredns/rrl/plugins/rrl",
 		insertAfterLine: "rewrite:rewrite",

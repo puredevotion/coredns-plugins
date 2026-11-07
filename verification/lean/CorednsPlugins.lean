@@ -6,3 +6,4 @@ import CorednsPlugins.Probe
 import CorednsPlugins.Cookie
 import CorednsPlugins.ZoneVersion
 import CorednsPlugins.Resinfo
+import CorednsPlugins.GeoScore
