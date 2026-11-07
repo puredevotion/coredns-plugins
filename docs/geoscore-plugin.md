@@ -79,6 +79,11 @@ backend behind the plugin (`file`, `dynupdate`, ...). The zone must hold
 `NAME` (for example with a TXT, or with the static A/AAAA the `static`
 fallback also answers). Otherwise the backend answers NXDOMAIN for the other
 types at a name that has A records, which RFC 1034 §4.3.2 does not allow.
+The same holds for `_geoscore.NAME` with `rationale-txt`: only its TXT is
+answered here, so the zone must hold that name too (any record will do),
+or a query for another type at it gets NXDOMAIN from the backend, and a
+resolver that caches that NXDOMAIN, or synthesises denials from NSEC (RFC
+8198), may then deny the TXT as well.
 
 **R3.** Names compare ASCII case-insensitively and no other way (RFC 4343
 §3): no non-ASCII octet folds onto an ASCII one. The answer's owner name is
@@ -245,8 +250,19 @@ than `max-staleness + 30 s`.
 **R22.** `ttl` ≤ `max-staleness`, enforced by the validator. An answer is
 never given on a score older than `max-staleness` (R21). A resolver keeps it
 at most `ttl` more, so no client acts on a score older than
-`2 × max-staleness`. The TLA+ variant `LongTTL` breaks the bound when the
-check is removed. The CoreDNS `cache` plugin in front of this one is one
+`2 × max-staleness`, measured on the writer's clock. Measured on the
+plugin's clock the bound is `2 × max-staleness + 30 s`, because R21 accepts
+an entry dated up to 30 s ahead, plus under one second because both clocks
+are compared in whole Unix seconds. The TLA+ model has no clock skew
+(`skew = 0`) and checks the first form. The variant `LongTTL` breaks the
+bound when the check is removed.
+
+The bound is about answers given on a score. The `nodata` fallback's
+negative answer is cached for the SOA-derived TTL of R7, which is the
+zone's and can be far longer than `ttl`; resolvers keep answering NODATA
+for that long after the scores recover. Use `nodata` only with a short SOA
+MINIMUM, or prefer `static` or `servfail` (a SERVFAIL is cached for at most
+5 minutes, RFC 2308 §7.1). The CoreDNS `cache` plugin in front of this one is one
 more such resolver, and it keeps the bound unless `serve_stale` is enabled
 for the zone (see *Placement*).
 
@@ -372,7 +388,11 @@ covers the same properties.
 
 The models are written by hand from this document and the Go code. As
 everywhere in `verification/`, a result is a statement about the model, and
-the Go tests check that the code matches it.
+the Go tests check that the code matches it. One limit of the TLA+ model
+in particular: its properties measure an entry's age with the same
+snapshot age the plugin reads, so a bug that stopped snapshot entries
+from ageing at all would pass it. That case is the Go tests' job
+(`TestWriterDeathEndsInFallback`, `TestStoreOutage`).
 
 ## What backs each rule
 
