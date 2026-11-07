@@ -44,6 +44,11 @@ type fakeZone struct {
 	// edns.SetSupportedOption) might.
 	echo  bool
 	noSOA bool // The SOA query is answered without an SOA.
+	// SOANotAA answers the SOA query without the AA bit, as a forwarder or
+	// a cache would.
+	soaNotAA bool
+	// FailSOA is how many SOA queries still to answer SERVFAIL (no write).
+	failSOA int
 }
 
 func newFakeZone() *fakeZone { return &fakeZone{serial: testSerial} }
@@ -96,10 +101,18 @@ func (f *fakeZone) ServeDNS(_ context.Context, w dns.ResponseWriter, r *dns.Msg)
 	serial := f.serial
 	f.queries++
 	q := r.Question[0]
+	failSOA := false
 	if q.Qtype == dns.TypeSOA && r.IsEdns0() == nil {
 		f.soaQueries++ // The plugin's own lookups are the only SOA queries without EDNS.
+		if f.failSOA > 0 {
+			f.failSOA--
+			failSOA = true
+		}
 	}
 	f.mu.Unlock()
+	if failSOA {
+		return dns.RcodeServerFailure, nil
+	}
 
 	name := strings.ToLower(q.Name)
 	m := new(dns.Msg)
@@ -120,12 +133,20 @@ func (f *fakeZone) ServeDNS(_ context.Context, w dns.ResponseWriter, r *dns.Msg)
 	if err := w.WriteMsg(m); err != nil {
 		return dns.RcodeServerFailure, fmt.Errorf("fakezone: %w", err)
 	}
+	if name == "twice.example.com." {
+		if err := w.WriteMsg(m.Copy()); err != nil {
+			return dns.RcodeServerFailure, fmt.Errorf("fakezone: %w", err)
+		}
+	}
 	return dns.RcodeSuccess, nil
 }
 
 // Answer fills m for name/qtype in the zone at serial; false means SERVFAIL
 // without writing.
 func (f *fakeZone) answer(m *dns.Msg, name string, qtype uint16, serial uint32) bool {
+	if answerOther(m, name) {
+		return true
+	}
 	soa := soaRR(testApex, serial)
 	switch {
 	case name == testApex && qtype == dns.TypeSOA:
@@ -134,6 +155,7 @@ func (f *fakeZone) answer(m *dns.Msg, name string, qtype uint16, serial uint32) 
 			return true
 		}
 		m.Answer = []dns.RR{soa}
+		m.Authoritative = !f.soaNotAA
 	case name == wwwName && qtype == dns.TypeA:
 		m.Answer = []dns.RR{aRR(name, "192.0.2.1")}
 		m.Ns = []dns.RR{nsRR(testApex, "ns.example.com.")}
@@ -235,4 +257,31 @@ func mustHex(tb testing.TB, s string) []byte {
 // OptionData is a ZONEVERSION option's OPTION-DATA, rebuilt from miekg's fields.
 func optionData(o *dns.EDNS0_ZONEVERSION) []byte {
 	return append([]byte{o.LabelCount, o.Type}, o.Version...)
+}
+
+// AnswerOther fills m for the names that are not example.com's own content,
+// reporting whether name was one of them.
+func answerOther(m *dns.Msg, name string) bool {
+	switch {
+	case name == "deep.example.com." || strings.HasSuffix(name, ".deep.example.com."):
+		// A zone below example.com that the chain also serves (say, auto)
+		// but the plugin is not configured for.
+		if name == "www.deep.example.com." {
+			m.Answer = []dns.RR{aRR(name, "192.0.2.4")}
+			m.Ns = []dns.RR{nsRR("deep.example.com.", "ns.deep.example.com.")}
+			return true
+		}
+		m.Rcode = dns.RcodeNameError
+		m.Ns = []dns.RR{soaRR("deep.example.com.", 99)}
+	case name == "lame.example.com.":
+		// Not authoritative, no answer, the apex's own NS: not a downward
+		// referral (no cut below the apex), whatever produced it.
+		m.Authoritative = false
+		m.Ns = []dns.RR{nsRR(testApex, "ns.example.com.")}
+	case name == "twice.example.com.":
+		// ServeDNS writes this one twice.
+	default:
+		return false
+	}
+	return true
 }

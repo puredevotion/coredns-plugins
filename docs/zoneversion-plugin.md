@@ -220,6 +220,15 @@ Limitations of the slot:
 - `hosts` sits after it. If `hosts` answers names inside a listed zone (AA
   set), those answers are versioned with the zone's serial although `hosts`
   produced them. Do not let `hosts` answer inside a listed zone.
+- A zone **below** a listed zone that the rest of the chain also serves
+  (`auto` with a directory of zones, a second `file` line) is not covered by
+  the listed zone's serial: an answer from `sub.example.com` says nothing about
+  `example.com`'s version. The plugin withholds the option when the response
+  shows it came from such a zone (an SOA or NS RRset in the authority section
+  owned by a name strictly below the listed apex that encloses the QNAME,
+  `fromDeeperZone`), but a positive answer that carries neither (`minimal`)
+  cannot be told apart and would be versioned with the parent's serial. List
+  every zone the chain serves below a listed one.
 - `rewrite` sits before it. RFC 9660 counts LABELCOUNT against the *original*
   QNAME; after a rewrite the plugin sees the rewritten name. A rewrite that
   moves a name across zones gives a LABELCOUNT for the wrong name.
@@ -262,13 +271,13 @@ option is a diagnostic one that almost no client sends.
 | R4: LABELCOUNT ≤ QNAME labels, never root | `TestNewVersion`, `TestDecodeRejects`, `TestParse`, `FuzzNewVersion` | | `decode_root` |
 | R2, R12: FORMERR for a non-empty or repeated option | `TestFormErr`, `TestClassify`, `TestProperty_Classify`, `FuzzServeDNS` | | `classify_version_iff`, `classify_two_malformed`, `classify_nonempty_malformed` |
 | R14: no request, no option, no lookups | `TestNoRequestNoOption`, `FuzzServeDNS` | | `classify_none_iff` |
-| R7, R10, R11: answer, NODATA, NXDOMAIN, referral, wildcard, CNAME out; never non-authoritative, SERVFAIL, REFUSED | `TestResponseCases` | | |
+| R7, R10, R11: answer, NODATA, NXDOMAIN, referral, wildcard, CNAME out; never non-authoritative, SERVFAIL, REFUSED, nor an answer from an unlisted zone below the apex | `TestResponseCases`, `TestMultipleMessages` | | |
 | R9: at most one option, foreign ones removed | `TestStrayOptionReplaced`, `FuzzServeDNS` | | |
 | R13: lookups carry no option; the request is not modified | `TestRequestNotModified`, `TestNoRequestNoOption` | | |
 | G1: advertised serial existed during the query | `TestSerialChangesAfterAnswer`, `FuzzServeDNS` | `ZoneVersionSerial` `DuringQuery` (all configs, rollback included); Apalache inductive proof `IndInvG1` (3 queries, 10 changes, rollbacks) | |
 | G2: advertised serial is the answering version's | `TestSerialChangesAfterAnswer`, `TestNegativeAnswerUsesItsOwnSOA`, `FuzzServeDNS` | `AnswerConsistent` (`Bracket`, `NoCache` pass; `PostOnly`, `Rollback` violated, as expected); Apalache inductive proof `IndInv` (3 queries, 10 changes), refuted for `PostOnly` and `Rollback` | `bracket_sound`, `aba_possible` |
-| D3: cache rule | `TestCacheObserve`, `TestCacheFreshness`, `TestProperty_CacheUpdate`, `TestCacheSavesALookup`, `TestRollback` | `CacheNotAhead` | `update_observed`, `update_fresh_monotone`, `update_regression_keeps`, `update_stale_replaces`, `update_advance` |
-| D4: lookup failure withholds | `TestLookupFailure` | | |
+| D3: cache rule | `TestCacheObserve`, `TestCacheFreshness`, `TestProperty_CacheUpdate`, `TestCacheSavesALookup`, `TestRollback`, `TestRegressionCounted` | `CacheNotAhead` | `update_observed`, `update_fresh_monotone`, `update_regression_keeps`, `update_stale_replaces`, `update_advance` |
+| D4: lookup failure withholds (no SOA, not authoritative, or no before-observation) | `TestLookupFailure`, `TestBeforeLookupFailure` | | |
 | D5: no allocation on the no-option path | `TestAllocs` | | |
 | the blocker | `TestMiekgRejectsEmptyOption`, `TestMiekgPacksEmptyStructAsTwoOctets`, `TestLoopbackServer` | | |
 

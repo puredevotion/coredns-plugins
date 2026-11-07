@@ -188,11 +188,33 @@ func eligible(res *dns.Msg, qname, apex string) bool {
 	if res.Authoritative {
 		switch res.Rcode {
 		case dns.RcodeSuccess, dns.RcodeNameError, dns.RcodeYXDomain:
-			return true
+			return !fromDeeperZone(res, qname, apex)
 		}
 		return false
 	}
 	return isReferral(res, qname, apex)
+}
+
+// fromDeeperZone reports whether an authoritative response shows that it was
+// produced by a zone strictly below apex that encloses qname: an SOA (a
+// negative answer) or an NS RRset (file's authority section on a positive
+// answer) owned by such a name. That zone is served by the rest of the chain
+// but not listed for this plugin (say, `auto` serving sub.example.com in an
+// example.com block), so apex's serial says nothing about the answer and the
+// option is withheld. A positive answer from such a zone that carries neither
+// (minimal responses) cannot be told apart; docs/zoneversion-plugin.md asks
+// the operator to list every zone the chain serves below a listed one.
+func fromDeeperZone(res *dns.Msg, qname, apex string) bool {
+	for _, rr := range res.Ns {
+		h := rr.Header()
+		if h.Rrtype != dns.TypeSOA && h.Rrtype != dns.TypeNS {
+			continue
+		}
+		if !strings.EqualFold(h.Name, apex) && dns.IsSubDomain(apex, h.Name) && dns.IsSubDomain(h.Name, qname) {
+			return true
+		}
+	}
+	return false
 }
 
 // isReferral is RFC 9499's downward referral, out of apex: NOERROR, no

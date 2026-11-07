@@ -37,7 +37,11 @@ zoneversion [ZONES...]
 ```
 
 * **ZONES** the zones this server is authoritative for. Defaults to the
-  server block's zones. The root zone is refused: list real zones.
+  server block's zones. The root zone is refused: list real zones. List
+  every zone the chain serves, including zones below a listed one (an
+  `auto` directory, a second `file`): an answer from `sub.example.com` is
+  not versioned by `example.com`'s serial, and the plugin can only detect
+  that when the response carries the sub-zone's SOA or NS.
 
 ## plugin.cfg ordering
 
