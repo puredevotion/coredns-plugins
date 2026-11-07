@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, resinfo]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
@@ -136,6 +136,13 @@ jobs:
           for t in FuzzUnmarshal FuzzMarshalUnmarshal; do
             go test -run=NONE -fuzz="^${t}\$" -fuzztime=10s ./pkg/dnr
           done
+      - name: Fuzz resinfo RDATA and request handling (10s each)
+        working-directory: resinfo
+        run: |
+          set -euo pipefail
+          for t in FuzzDecodeWire FuzzPair FuzzParseExtErr FuzzServeDNS; do
+            go test -run=NONE -fuzz="^${t}\$" -fuzztime=10s .
+          done
       - name: Upload crashers
         if: failure()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
@@ -188,7 +195,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, resinfo]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -296,7 +303,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, resinfo]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -361,7 +368,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, resinfo]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
