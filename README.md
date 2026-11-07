@@ -11,6 +11,7 @@ that builds a CoreDNS binary with them compiled in.
 | [`cookie`](cookie/) | DNS Cookies (RFC 7873) with the interoperable SipHash-2-4 server cookie of RFC 9018: validates and issues cookies, BADCOOKIE in `enforce` mode, three-stage secret rollover, per-case counters | Implemented and tested; protocol rules modelled in TLA+ and Lean. **Not yet deployed anywhere** |
 | [`dynupdate`](dynupdate/) | Serves a zone from memory and accepts RFC 2136 dynamic updates for it, e.g. from an ACME client's DNS-01 solver, with a `mutable` type allow-list | Implemented and tested; update rules proved in Lean. In-memory only, see its README |
 | [`probe`](probe/) | A per-visitor synthetic measurement zone that records what each resolver's query reveals and can answer wrong on purpose (DNSSEC failure modes), plus an RFC 9567 error-report receiver | Implemented and tested |
+| [`geoscore`](geoscore/) | Answers A/AAAA for a name with the endpoint that scores best on a live signal (latency, carbon, cost, health) kept in Valkey by an external writer: best or score-weighted, stale scores expire, documented fallback, optional TXT rationale | Implemented and tested; selection proved in Lean, staleness and fallback model-checked in TLA+. **Not yet deployed anywhere** |
 
 `sni_tls` and `radnr` run in production in the author's homelab (as
 `coredns-radnr`, serving real LAN DNS over DoT/DoH/DoQ). They have real-world
@@ -67,6 +68,7 @@ cd radnr     && go test -race ./...
 cd cookie    && go test -race ./...
 cd dynupdate && go test -race ./...
 cd probe     && go test -race ./...
+cd geoscore  && go test -race ./...
 ```
 
 Build a CoreDNS binary with all of them compiled in, via Dagger (from `ci/`):
@@ -140,6 +142,12 @@ byte, checks the 1-hour/5-minute window across the 2106 timestamp wrap, runs a
 request through the handler for each RFC 7873 §5.2 case in both modes and both
 transports, and carries fuzz targets over option classification, cookie
 verification and request handling.
+
+`geoscore` checks its selection against the Lean model's specification with
+property tests (best mode, the exact weighted distribution, monotonicity,
+membership and fallback), drives writer death and store outages through a fake
+clock, and carries fuzz targets over score-entry validation, selection,
+Corefile parsing and request handling.
 
 Everything runs offline — `GOPROXY=off go test ./...` passes in every module.
 
