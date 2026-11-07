@@ -1,6 +1,7 @@
 package resinfo
 
 import (
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -156,6 +157,25 @@ func TestDecodeRejectsNonCanonical(t *testing.T) {
 	} {
 		if _, err := Decode(txt); err == nil {
 			t.Errorf("%s: Decode(%q) accepted", name, txt)
+		}
+	}
+}
+
+// A length octet that claims even one octet more than is left is an error,
+// including the off-by-one case where the claim equals the remaining length
+// counting the length octet itself. Each input is copied into a slice with
+// exactly its own capacity, so an over-long slice would panic rather than
+// read past the end unnoticed.
+func TestDecodeWireRejectsTruncated(t *testing.T) {
+	for _, in := range []string{
+		"\x01",
+		"\x08qnamemi",
+		"\x08qnamemin\x01",
+		"\x08qnamemin\x06deleg",
+	} {
+		rdata := slices.Clip([]byte(in))
+		if _, err := DecodeWire(rdata); !errors.Is(err, errTruncated) {
+			t.Errorf("DecodeWire(%q) = %v, want errTruncated", in, err)
 		}
 	}
 }
