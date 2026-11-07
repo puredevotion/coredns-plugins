@@ -58,7 +58,8 @@ geoscore NAME {
 `NAME` without a trailing dot is relative to the server block's zone, as in
 a zone file (RFC 1035 §5.1): `geoscore www` in a block for `example.com`
 configures `www.example.com.`. Several `geoscore` blocks may share a server
-block, one per name. All properties except `endpoint` may appear at most once.
+block, one per name; no owner name may be answered by two blocks, so one
+block's `NAME` may not be another's `_geoscore.NAME` rationale name. All properties except `endpoint` may appear at most once.
 
 ## Requirements
 
@@ -115,7 +116,8 @@ fully qualified and lowercase, and is never the root.
 repeated property, a missing or extra argument, an unparsable address,
 duration or number, or anything R5, R6, R9, R13 or R22 refuses (fail closed,
 CONTRIBUTING.md). A block that fails validation never opens a store
-connection.
+connection, and when any block of a server block fails, the stores the
+blocks before it opened are closed again.
 
 **R11.** `store valkey` requires `tls_ca` and has no option to skip
 certificate verification. The scores decide where clients are sent, so a
