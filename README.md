@@ -11,6 +11,8 @@ that builds a CoreDNS binary with them compiled in.
 | [`cookie`](cookie/) | DNS Cookies (RFC 7873) with the interoperable SipHash-2-4 server cookie of RFC 9018: validates and issues cookies, BADCOOKIE in `enforce` mode, three-stage secret rollover, per-case counters | Implemented and tested; protocol rules modelled in TLA+ and Lean. **Not yet deployed anywhere** |
 | [`dynupdate`](dynupdate/) | Serves a zone from memory and accepts RFC 2136 dynamic updates for it, e.g. from an ACME client's DNS-01 solver, with a `mutable` type allow-list | Implemented and tested; update rules proved in Lean. In-memory only, see its README |
 | [`probe`](probe/) | A per-visitor synthetic measurement zone that records what each resolver's query reveals and can answer wrong on purpose (DNSSEC failure modes), plus an RFC 9567 error-report receiver | Implemented and tested |
+| [`zoneversion`](zoneversion/) | RFC 9660 ZONEVERSION: tells a client which SOA serial of the zone produced the authoritative response it asked about, never a serial the zone did not have during the query | Implemented and tested; codec and serial rules proved in Lean, serial race modelled in TLA+. **Unreachable end to end until miekg/dns accepts an empty option 19**, see its doc |
+| [`resinfo`](resinfo/) | Publishes the resolver's capabilities (QNAME minimisation, Extended DNS Errors, an info URL) as an RFC 9606 RESINFO record at its own name and `resolver.arpa`, canonical and validated at startup | Implemented and tested; RDATA codec and answer selection proved in Lean. **Not yet deployed anywhere** |
 | [`geoscore`](geoscore/) | Answers A/AAAA for a name with the endpoint that scores best on a live signal (latency, carbon, cost, health) kept in Valkey by an external writer: best or score-weighted, stale scores expire, documented fallback, optional TXT rationale | Implemented and tested; selection proved in Lean, staleness and fallback model-checked in TLA+. **Not yet deployed anywhere** |
 
 `sni_tls` and `radnr` run in production in the author's homelab (as
@@ -52,6 +54,17 @@ limits and what each rule is checked by: [`docs/cookie-plugin.md`](docs/cookie-p
 
 [#6187]: https://github.com/coredns/coredns/issues/6187
 
+**`zoneversion`** — RFC 9660 lets a client ask an authoritative server which
+version of the zone an answer came from, in the same response, so a diagnosis
+is not confused by the zone changing between the answer and a separate SOA
+query. CoreDNS has no support. A positive answer carries no SOA, so the plugin
+brackets it with SOA observations and withholds the option if the serial moved
+mid-query. Upstream miekg/dns v1.1.73 turns every conformant query into a
+FORMERR before any plugin runs, so this plugin and the image build use our
+fork [`puredevotion/dns`](https://github.com/puredevotion/dns) with the fix.
+Design, the guarantee it makes, and the fork:
+[`docs/zoneversion-plugin.md`](docs/zoneversion-plugin.md).
+
 [RFC 9463]: https://www.rfc-editor.org/rfc/rfc9463.html
 
 ## Building
@@ -68,6 +81,8 @@ cd radnr     && go test -race ./...
 cd cookie    && go test -race ./...
 cd dynupdate && go test -race ./...
 cd probe     && go test -race ./...
+cd zoneversion && go test -race ./...
+cd resinfo   && go test -race ./...
 cd geoscore  && go test -race ./...
 ```
 
@@ -143,6 +158,15 @@ request through the handler for each RFC 7873 §5.2 case in both modes and both
 transports, and carries fuzz targets over option classification, cookie
 verification and request handling.
 
+`zoneversion` reproduces the RFC 9660 §5 example option byte for byte, runs
+every §3.2 response case (answer, NODATA, NXDOMAIN, referral, wildcard, CNAME
+out of the zone, non-authoritative, SERVFAIL) and every §3.2.1 FORMERR case
+through the handler, pins the miekg/dns behaviour that blocks conformant
+queries, and fuzzes the codec and the handler with the zone reloading mid-query.
+`resinfo` checks that miekg/dns packs exactly the RDATA its own encoder
+produces, that only canonical RDATA decodes, and that exactly RESINFO/IN
+queries for the configured names are answered, with property tests and fuzz
+targets over the wire codec, the `exterr` syntax and request handling.
 `geoscore` checks its selection against the Lean model's specification with
 property tests (best mode, the exact weighted distribution, monotonicity,
 membership and fallback), drives writer death and store outages through a fake

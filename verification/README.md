@@ -36,7 +36,8 @@ the spec or proof that checks it, and the models were audited against the
 RFC texts themselves, section by section: RFC 1035, 1982, 2136, 2181, 3007,
 4034, 4343, 4861, 6066, 8106, 8145, 8415, 8945, 9460, 9461, 9462, 9463 and
 9525 (which obsoletes 6125), plus RFC 7873 and 9018 for the `cookie` plugin
-(the sections it implements: 7873 §4-§7.1, 9018 §3-§6 and Appendix A). Where the plugins cite a section, the citation
+(the sections it implements: 7873 §4-§7.1, 9018 §3-§6 and Appendix A), and
+RFC 9606 with RFC 6763 §6.1-§6.5 for the `resinfo` plugin. Where the plugins cite a section, the citation
 was checked too. What the audit found that this change does not fix is
 listed at the end, under "Open findings".
 
@@ -61,6 +62,7 @@ differs from the old one exactly where it should.
 | `DynUpdateAtomicity.tla` | `dynupdate` `serveUpdate` with records as shared heap cells, and a zone rebuild that can fail | a SERVFAIL'd UPDATE changes nothing; the records prerequisites see are the records served |
 | `CookieRollout.tla` | `cookie` RFC 9018 §5 three-stage Server Secret rollout across an anycast set (3 servers, a config reload per step), with a variant that switches to the new secret before every server has learned it, one that forgets the old secret before the 1-hour window has passed, and one where a reload only adds to the verify list | every cookie inside its window is accepted by every server of the set; a removed secret never verifies |
 | `CookieBootstrap.tla` | `cookie` RFC 7873 §5.2.3 / §5.3 client bootstrap and retry against a server in permissive or enforce mode, over UDP and TCP, with server restarts (secret changes) and an inconsistent anycast set; plus the BADCOOKIE-over-TCP loop §5.2.3 warns about | no BADCOOKIE over TCP; at most 2 BADCOOKIEs per query; a query in flight is eventually answered |
+| `ZoneVersionSerial.tla` | `zoneversion` `serveVersioned`, `lookup` and the serial cache (`cache.go`): two concurrent ZONEVERSION queries while the zone's SOA serial advances (and, in a variant, is rolled back), with the cache entry expiring at any moment; variants without the before/after bracket and without the cache | **G1** the advertised serial is one the zone had while the query was in progress, never invented or stale (holds even with rollbacks); **G2** it is the serial of the version that produced the answer (holds while serials only advance; violated by a single after-lookup, and by a rollback, as expected) |
 | `GeoScoreStaleness.tla` | `geoscore` score lifecycle: a writer stamping entries with its own clock and stopping at any point, a store failing at any point, the plugin's snapshot (`instance.go` `current`/`fetch`), answers, and a resolver cache of the answer TTL; variants that judge freshness by the last fetch, ignore age, or allow TTL > max-staleness | an endpoint answer is never on a stale, unhealthy or zero-weight score; the fallback is taken only when nothing is eligible; no resolver holds an answer on a score older than 2 × max-staleness |
 
 ### Three checkers
@@ -76,6 +78,11 @@ differs from the old one exactly where it should.
   line gives the bound and the properties. Apalache does not check
   fairness, so it sees only the safety part: `NoRollback` is checked in
   its step form `NoRollbackStep`, and the liveness-only config is skipped.
+  The two deepest bounded runs (145 and 29 steps) are marked `slow` and run
+  only with `APALACHE_SLOW=1`; the inductive proofs below cover the same
+  properties. So are the three passing `ZoneVersionSerial` configs (13 and
+  14 steps, but two concurrent queries make each step wide: one ran for over
+  20 minutes without finishing), likewise covered by inductive proofs.
   The two deepest bounded runs (145 and 29 steps) and `GeoScoreStaleness_Fixed`
   (18 steps, about 20 minutes) are marked `slow` and run only with
   `APALACHE_SLOW=1`; the inductive proofs below cover the same properties.
@@ -95,11 +102,15 @@ are far beyond what TLC can enumerate:
 | `SniTlsReload_OneLoop` | one poller, no mutex, 50 rotations | 3 rotations |
 | `PluginLifecycle_Registry_X{First,Last}` | 12 reloads | 3 |
 | `DynUpdateAtomicity_DeepCopy` | 15 UPDATEs | 3 |
+| `ZoneVersionSerial_{Bracket,NoCache}` | 3 concurrent queries, 10 serial changes; G1 and G2 | 2 queries, 3 changes |
+| `ZoneVersionSerial_RollbackDuringQuery` | the same, with rollbacks and no bracket; G1 (`IndInvG1`) | 2 queries, 3 changes |
 | `GeoScoreStaleness_Minute` | four endpoints, max-staleness 60 s, ttl 60, any depth | two endpoints, max-staleness 2, depth 18 |
 
 Each proof with a pre-fix counterpart has a **negative control**
 (`expect: refuted`): the same invariant on the v0.4.1 variant
 (`RadnrRA_Year_Original`, `SniTlsReload_ThreeLoopsNoMutex`,
+`DynUpdateAtomicity_Original`; for `zoneversion`, the single after-lookup
+`ZoneVersionSerial_PostOnly` and the rollback `ZoneVersionSerial_Rollback`) must *not* be provable. That shows the
 `DynUpdateAtomicity_Original`, `GeoScoreStaleness_Minute_JudgeByFetch`) must *not* be provable. That shows the
 invariant really depends on the fix, so the proof is not passing vacuously.
 
@@ -113,6 +124,8 @@ invariant really depends on the fix, so the proof is not passing vacuously.
 | `DynUpdate.lean` | `dynupdate` `apply`, `applyAdd`, `applyDeleteRRset`, `applyDeleteRecord` | **every update section keeps a zone well-formed** under RFC 2136 §3.4.2.2–4's SOA, CNAME and apex rules: one SOA, at the apex; ≥1 apex NS; CNAME exclusivity; ≤1 CNAME per name. Plus counterexamples, by evaluation, for the v0.4.1 add rules. Not modelled (so not claimed): WKS, case-insensitive names inside RDATA, RRset TTL uniformity |
 | `Cookie.lean` | `cookie` `classify`, `hashInput`, `serverCookie`, `verify`, `inWindow` | option lengths 8 and 16..40 exactly (RFC 7873 §5.2.2); the 20/32-byte SipHash input is injective in (client cookie, version, reserved, timestamp, IP), also across IPv4/IPv6, and without the 24-byte length gate a 36-byte IPv4 option collides with an IPv6 input (RFC 9018 §4.4); the timestamp window (1 h back, 5 min ahead) under RFC 1982 equals the unbounded-integer rule across the 2³² wrap, with exact edges (§4.3); construct-then-verify succeeds inside the window, Reserved is hashed but not enforced (§4.2), a bad length or version never verifies; a cookie never verifies for another IP or secret, **conditional on a collision-free hash (stated as `HInj`)**; SipHash-2-4 (little-endian output) reproduces the SipHash paper and RFC 9018 Appendix A.1 to A.4 vectors, kernel-checked, no `native_decide` |
 | `Probe.lean` | `probe` `ParseQuery`, `parseToken`, `ParseKeyTagQuery`, `FormatKeyTagQuery` | `ParseQuery` is ASCII-case-insensitive exactly as RFC 4343 §3 defines it (safe under 0x20 randomisation) for any modifier table; RFC 8145 §5.1 key-tag labels round-trip, sorted, for every tag list that fits a 63-octet label — 1 to 12 tags (RFC 1035 §2.3.4) |
+| `ZoneVersion.lean` | `zoneversion` `Version.Encode`, `Decode`, `classify`, `update` | **`Decode(Encode(v)) = v`** for every valid version and **`Encode(Decode(b)) = b`** for every option `Decode` accepts; always 6 octets (RFC 9660 §4); any other length or TYPE, and LABELCOUNT 0, refused; the §5 example byte for byte; a request gets a version iff it carries exactly one empty ZONEVERSION option, none iff it carries none, FORMERR otherwise (§3.1, §3.2.1); the serial cache never stores an unobserved serial and never moves a fresh entry backwards in RFC 1982 order (reusing `Serial.lean`); a serial that only advances by less than 2^32 in total and shows the same value twice did not move in between (`bracket_sound`), and without that bound three RFC 1982 increments bring it back (`aba_possible`) |
+| `Resinfo.lean` | `resinfo` `AppendWire`, `unpackStrings`, `Pair.String`, `splitPair`, `keyKind`, `validate`, `Decode`, `equalFoldASCII`, `answers`/`reply`; the canonical shape `CanonicalRanges` emits (not the function) | RFC 9606 RDATA: **`Decode(Strings(i)) = i`** for every valid `i`, and whatever `Decode` accepts re-encodes to the exact input octets (only canonical RDATA decodes); every string at most 255 octets and the RDATA at most 65535 (RFC 1035 §3.3); a key without `=` splits back off at the first `=` whatever the value holds (RFC 6763 §6.3); keys strictly increasing, so none repeats, and two valid lists with the same pairs are equal, so the RDATA depends only on the configured set (RFC 9606 §3, "SHOULD expose a consistent RESINFO"); a canonical `exterr` range list is determined by the codes it covers; the handler answers exactly RESINFO/IN QUERYs whose name ASCII-folds (RFC 4343 §3) to a configured name, with AA and exactly one record carrying the configured RDATA (RFC 9606 §3), and passes everything else on. Not modelled: the `CanonicalRanges` merge itself, per-key value rules, decimal rendering, URL canonical form (Go-tested) |
 | `GeoScore.lean` | `geoscore` `classify`, `pickBest`, `pickWeighted`, `decide` | the answer is always in the validated candidate set; an answered endpoint is eligible (valid, healthy, fresh, weight > 0, pinned field by field by `eligible_iff`) unless nothing is and the fallback is `static`, which answers the first-listed one; best mode is exactly "maximal weight, earliest on a tie" and that specification has a unique solution, so it is deterministic in (scores, tie-break order); weighted mode selects each candidate on exactly `w` of the `Σw` draws (so never outside the support) and is monotone in a candidate's own weight |
 
 Every theorem depends only on Lean's standard axioms (`propext`,

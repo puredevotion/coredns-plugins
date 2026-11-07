@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/puredevotion/coredns-plugins/compare/v0.7.1...v0.7.2) (2026-11-07)
+
+
+### Bug Fixes
+
+* **ci:** floor klauspost/compress at v1.20.2 in the CoreDNS image build ([#66](https://github.com/puredevotion/coredns-plugins/issues/66)) ([7162127](https://github.com/puredevotion/coredns-plugins/commit/71621276c22462fb983233f84ec9ed8fafd7c496))
+
 ## [0.7.1](https://github.com/puredevotion/coredns-plugins/compare/v0.7.0...v0.7.1) (2026-11-07)
 
 

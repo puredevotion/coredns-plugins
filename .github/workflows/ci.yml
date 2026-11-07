@@ -53,7 +53,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie, geoscore]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, resinfo, zoneversion, geoscore]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
@@ -73,7 +73,7 @@ jobs:
 
       - name: Test with race detector
         working-directory: ${{ matrix.plugin }}
-        run: go test -race -covermode=atomic -coverprofile=cover.out ./...
+        run: go test -race -shuffle=on -covermode=atomic -coverprofile=cover.out ./...
 
       # Proves the tree needs no network at build time. Deps come from the
       # module cache populated above; GOFLAGS=-mod=mod + GOPROXY=off fails
@@ -136,6 +136,20 @@ jobs:
           for t in FuzzUnmarshal FuzzMarshalUnmarshal; do
             go test -run=NONE -fuzz="^${t}\$" -fuzztime=10s ./pkg/dnr
           done
+      - name: Fuzz zoneversion option codec and request handling (10s, 10s, 30s)
+        working-directory: zoneversion
+        run: |
+          set -euo pipefail
+          go test -run=NONE -fuzz='^FuzzDecode$' -fuzztime=10s .
+          go test -run=NONE -fuzz='^FuzzNewVersion$' -fuzztime=10s .
+          go test -run=NONE -fuzz='^FuzzServeDNS$' -fuzztime=30s .
+      - name: Fuzz resinfo RDATA and request handling (10s each)
+        working-directory: resinfo
+        run: |
+          set -euo pipefail
+          for t in FuzzDecodeWire FuzzPair FuzzParseExtErr FuzzServeDNS; do
+            go test -run=NONE -fuzz="^${t}\$" -fuzztime=10s .
+          done
       - name: Fuzz geoscore entry validation, selection, Corefile and request handling (10s each)
         working-directory: geoscore
         run: |
@@ -195,7 +209,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie, geoscore]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, resinfo, zoneversion, geoscore]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -303,7 +317,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie, geoscore]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, resinfo, zoneversion, geoscore]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7
@@ -368,7 +382,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        plugin: [radnr, sni_tls, probe, dynupdate, cookie, geoscore]
+        plugin: [radnr, sni_tls, probe, dynupdate, cookie, resinfo, zoneversion, geoscore]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7

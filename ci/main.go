@@ -117,6 +117,21 @@ var pluginCfgPatches = map[string]struct {
 		insertAfterLine: "tsig:tsig",
 		modulePath:      "github.com/puredevotion/coredns-plugins/cookie",
 	},
+	// RFC 9606 resolver information (RESINFO). Slot: immediately AFTER
+	// chaos:chaos in v1.14.6's plugin.cfg (docs/resinfo-plugin.md):
+	//
+	//   - before forward => a RESINFO query for the resolver's own name is
+	//     answered here, never sent upstream ("not subject to recursive
+	//     resolution", RFC 9606 §3);
+	//   - before cache   => the answer is always the configured one;
+	//   - next to chaos  => the other plugin that answers for the server
+	//     itself. Its own anchor, so its position does not depend on the
+	//     order in which other insertions after tsig:tsig are applied.
+	"resinfo": {
+		cfgLine:         "resinfo:github.com/puredevotion/coredns-plugins/resinfo",
+		insertAfterLine: "chaos:chaos",
+		modulePath:      "github.com/puredevotion/coredns-plugins/resinfo",
+	},
 	// Response Rate Limiting — the amplification-abuse mitigation that gates
 	// any public exposure of an authoritative zone we serve (homelab
 	// docs/plans/authoritative-dns-hivre.md Phase 2). That plan assumed this
@@ -147,6 +162,24 @@ var pluginCfgPatches = map[string]struct {
 		cfgLine:         "probe:github.com/puredevotion/coredns-plugins/probe",
 		insertAfterLine: "file:file",
 		modulePath:      "github.com/puredevotion/coredns-plugins/probe",
+	},
+	// RFC 9660 ZONEVERSION. Slot: immediately AFTER transfer:transfer, so
+	// BEFORE every plugin that serves a zone (hosts, dynupdate, file, probe,
+	// auto, secondary, sign) and AFTER cache (docs/zoneversion-plugin.md):
+	//
+	//   - before the zone backends => it sees their responses and can ask
+	//     them for the zone's SOA through the rest of the chain;
+	//   - after cache              => a cache hit (OPT stripped, served from
+	//     some earlier zone version) is answered without the option, rather
+	//     than with a serial looked up now for an answer cached then;
+	//   - after transfer           => AXFR/IXFR never reach it.
+	//
+	// transfer:transfer is not any other plugin's anchor here, so the
+	// map-order of the sed inserts below cannot reorder it against them.
+	"zoneversion": {
+		cfgLine:         "zoneversion:github.com/puredevotion/coredns-plugins/zoneversion",
+		insertAfterLine: "transfer:transfer",
+		modulePath:      "github.com/puredevotion/coredns-plugins/zoneversion",
 	},
 	// Score-based endpoint selection for one owner name. Slot: immediately
 	// AFTER dnssec:dnssec in v1.14.6's plugin.cfg (docs/geoscore-plugin.md):
@@ -412,6 +445,11 @@ func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 // `go generate` (regenerates zplugin.go/zdirectives.go per coredns.go's
 // //go:generate directives), and builds the coredns binary. Returns the
 // built binary as a File so Containerize can wrap it into a runtime image.
+// miekgDNSForkReplace is the go mod edit -replace argument that points
+// github.com/miekg/dns at our fork with the RFC 9660 empty-option fix; see
+// BuildCoredns and docs/zoneversion-plugin.md, "The miekg/dns fork".
+const miekgDNSForkReplace = "github.com/miekg/dns=github.com/puredevotion/dns@v1.1.73-pd.1"
+
 func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Directory, corednsVersion string) (*dagger.File, error) {
 	tag := "v" + corednsVersion
 
@@ -504,6 +542,18 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 		// fixed in 1.20.2, failed the image's grype gate at 1.20.1.
 		WithExec([]string{"go", "get", "golang.org/x/text@v0.41.0", "google.golang.org/grpc@v1.83.2",
 			"go.etcd.io/etcd/client/pkg/v3@v3.6.15", "github.com/klauspost/compress@v1.20.2"}).
+		// Build the whole binary against our miekg/dns fork. Upstream
+		// v1.1.73 cannot unpack the empty ZONEVERSION option a conformant
+		// RFC 9660 query carries, so CoreDNS's server answers FORMERR before
+		// any plugin runs; the fork accepts it (and zoneversion reads its
+		// EDNS0_ZONEVERSION.Empty, so it does not compile without it). A
+		// replace only takes effect in the main module, so zoneversion's own
+		// go.mod replace is ignored here and the CoreDNS go.mod needs this
+		// one. It must come before go mod tidy. The fork is v1.1.73-based:
+		// if a CoreDNS bump resolves a newer miekg/dns, rebase the fork first
+		// (see PATCHES.md in github.com/puredevotion/dns) rather than let this
+		// downgrade it. Keep in step with zoneversion/go.mod.
+		WithExec([]string{"go", "mod", "edit", "-replace", miekgDNSForkReplace}).
 		WithExec([]string{"go", "mod", "tidy"}).
 		WithExec([]string{"go", "build", "-o", "/coredns-out/coredns", "."}).
 		// radnr needs a raw ICMPv6 socket (CAP_NET_RAW) to send Router
