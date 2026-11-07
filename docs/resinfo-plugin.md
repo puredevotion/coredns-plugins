@@ -72,7 +72,7 @@ visible), **T** tightened here beyond the RFC.
 | R22 | RFC 4343 §3 | Names compare equal under ASCII case folding only | I: the name match folds A-Z onto a-z and nothing else (the KELVIN SIGN does not match `k`), without allocating; the answer is owned by the query name exactly as sent, so 0x20 randomisation round-trips | Lean `eqFoldLoop_iff`, `handle_case_insensitive`; `TestEqualFoldASCII`, `TestAnswersConfiguredName` |
 | R23 | RFC 6891 §7 | A response to a request with an OPT RR carries one | I: CoreDNS's `SizeAndDo`; a reply over the client's size is truncated (`Scrub`), not dropped | `TestEDNSAndRD`, `TestTruncatesOverUDP` |
 | R24 | RFC 2181 §8 | TTLs are 0 to 2^31 - 1 | I: `ttl` outside that range is refused; default 3600 | `TestParseTTLBounds`, `TestParseRejects` |
-| R25 | IANA registry, `deleg` | "The presence of the key indicates that the DELEG protocol is supported. (TEMPORARY - registered 2026-08-24, expires 2027-08-24)" | I as a boolean key. **UNVERIFIED**: the shape is taken from the registry's description; draft-ietf-deleg-11 itself was not read. CoreDNS does not implement DELEG, so publishing `deleg` would be a false claim today; it is accepted because it is registered | `TestNewAccepts` |
+| R25 | IANA registry, `deleg` | "The presence of the key indicates that the DELEG protocol is supported. (TEMPORARY - registered 2026-08-24, expires 2027-08-24)" | I as a boolean key. Checked against draft-ietf-deleg-11 §6.1 (fetched from ietf.org on 2026-11-07): "A resolver which supports [RFC9606] SHOULD add the "deleg" key if it supports DELEG protocol", and "if there is no '=' in a key, then it is a boolean attribute, simply identified as being present with no value". CoreDNS does not implement DELEG, so publishing `deleg` would be a false claim today; it is accepted because it is registered | `TestNewAccepts` |
 
 ## Wire format and canonical form
 
@@ -131,9 +131,12 @@ only (R19) removes both the amplification question and the forgery one.
 `verification/lean/CorednsPlugins/Resinfo.lean` (core Lean 4, no Mathlib, no
 `sorry`, only the standard axioms) models `AppendWire`/`unpackStrings`,
 `Pair.String`/`splitPair`, `keyKind`'s syntax check, `validate`, `Decode`,
-`CanonicalRanges`' output shape, `equalFoldASCII` and `answers`/`reply`. The
-theorem names are in the table above. Abstracted, and checked by Go tests
-instead: the per-key value rules (an arbitrary predicate in the model), the
+the canonical shape of an `exterr` range list, `equalFoldASCII` and
+`answers`/`reply`. The theorem names are in the table above. Abstracted, and
+checked by Go tests instead: the `CanonicalRanges` function itself (the model
+proves only that a list of the canonical shape is unique for its codes; that
+`CanonicalRanges` produces that shape and keeps the codes is
+`TestProperty_ExtErrCanonical`), the per-key value rules (an arbitrary predicate in the model), the
 decimal rendering of `exterr`, `net/url`'s canonical form, `escapeTXT`, and
 CoreDNS's EDNS and truncation handling.
 
