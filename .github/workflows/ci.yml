@@ -73,7 +73,7 @@ jobs:
 
       - name: Test with race detector
         working-directory: ${{ matrix.plugin }}
-        run: go test -race -covermode=atomic -coverprofile=cover.out ./...
+        run: go test -race -shuffle=on -covermode=atomic -coverprofile=cover.out ./...
 
       # Proves the tree needs no network at build time. Deps come from the
       # module cache populated above; GOFLAGS=-mod=mod + GOPROXY=off fails

@@ -6,7 +6,6 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/expfmt"
 )
 
@@ -69,22 +68,46 @@ func TestLabelHelpersAreThreeValued(t *testing.T) {
 // the distribution toward zero and make the resolvers behaving BEST appear to be
 // the ones leaking least — a different and false claim.
 func TestECSHistogramExcludesDeclined(t *testing.T) {
-	before := testutil.CollectAndCount(probeECSPrefixBits)
+	// Count samples, not series: the histogram is a process-wide global, so a
+	// /24 series recorded by an earlier test (or an earlier -count iteration, or
+	// a -shuffle order) already exists and the series count would never grow.
+	before := ecsSamples(t)
 
 	recordMetrics(&Observation{Transport: TransportUDP, EDNS: true, ECS: true, ECSScope: 0, ECSFamily: 1})
-	if got := testutil.CollectAndCount(probeECSPrefixBits); got != before {
-		t.Errorf("declined disclosure created a histogram series: count %d -> %d", before, got)
+	if got := ecsSamples(t); got != before {
+		t.Errorf("declined disclosure was recorded: samples %d -> %d", before, got)
 	}
 
 	recordMetrics(&Observation{Transport: TransportUDP, EDNS: true, ECS: false})
-	if got := testutil.CollectAndCount(probeECSPrefixBits); got != before {
-		t.Errorf("silent resolver created a histogram series: count %d -> %d", before, got)
+	if got := ecsSamples(t); got != before {
+		t.Errorf("silent resolver was recorded: samples %d -> %d", before, got)
 	}
 
 	recordMetrics(&Observation{Transport: TransportUDP, EDNS: true, ECS: true, ECSScope: 24, ECSFamily: 1})
-	if got := testutil.CollectAndCount(probeECSPrefixBits); got <= before {
-		t.Errorf("a real disclosure was not recorded: count %d -> %d", before, got)
+	if got := ecsSamples(t); got != before+1 {
+		t.Errorf("a real disclosure was not recorded: samples %d -> %d", before, got)
 	}
+}
+
+// ecsSamples is the total number of observations in the ECS prefix histogram
+// across all its series, read through an isolated registry like metricDump.
+func ecsSamples(t *testing.T) uint64 {
+	t.Helper()
+	reg := prometheus.NewPedanticRegistry()
+	if err := reg.Register(probeECSPrefixBits); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatalf("gather: %v", err)
+	}
+	var n uint64
+	for _, mf := range mfs {
+		for _, m := range mf.GetMetric() {
+			n += m.GetHistogram().GetSampleCount()
+		}
+	}
+	return n
 }
 
 // TestObservationsCounterLabels checks the counter increments with the labels
