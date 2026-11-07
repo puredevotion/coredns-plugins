@@ -12,6 +12,7 @@ that builds a CoreDNS binary with them compiled in.
 | [`dynupdate`](dynupdate/) | Serves a zone from memory and accepts RFC 2136 dynamic updates for it, e.g. from an ACME client's DNS-01 solver, with a `mutable` type allow-list | Implemented and tested; update rules proved in Lean. In-memory only, see its README |
 | [`probe`](probe/) | A per-visitor synthetic measurement zone that records what each resolver's query reveals and can answer wrong on purpose (DNSSEC failure modes), plus an RFC 9567 error-report receiver | Implemented and tested |
 | [`zoneversion`](zoneversion/) | RFC 9660 ZONEVERSION: tells a client which SOA serial of the zone produced the authoritative response it asked about, never a serial the zone did not have during the query | Implemented and tested; codec and serial rules proved in Lean, serial race modelled in TLA+. **Unreachable end to end until miekg/dns accepts an empty option 19**, see its doc |
+| [`resinfo`](resinfo/) | Publishes the resolver's capabilities (QNAME minimisation, Extended DNS Errors, an info URL) as an RFC 9606 RESINFO record at its own name and `resolver.arpa`, canonical and validated at startup | Implemented and tested; RDATA codec and answer selection proved in Lean. **Not yet deployed anywhere** |
 
 `sni_tls` and `radnr` run in production in the author's homelab (as
 `coredns-radnr`, serving real LAN DNS over DoT/DoH/DoQ). They have real-world
@@ -80,6 +81,7 @@ cd cookie    && go test -race ./...
 cd dynupdate && go test -race ./...
 cd probe     && go test -race ./...
 cd zoneversion && go test -race ./...
+cd resinfo   && go test -race ./...
 ```
 
 Build a CoreDNS binary with all of them compiled in, via Dagger (from `ci/`):
@@ -159,6 +161,10 @@ every §3.2 response case (answer, NODATA, NXDOMAIN, referral, wildcard, CNAME
 out of the zone, non-authoritative, SERVFAIL) and every §3.2.1 FORMERR case
 through the handler, pins the miekg/dns behaviour that blocks conformant
 queries, and fuzzes the codec and the handler with the zone reloading mid-query.
+`resinfo` checks that miekg/dns packs exactly the RDATA its own encoder
+produces, that only canonical RDATA decodes, and that exactly RESINFO/IN
+queries for the configured names are answered, with property tests and fuzz
+targets over the wire codec, the `exterr` syntax and request handling.
 
 Everything runs offline — `GOPROXY=off go test ./...` passes in every module.
 

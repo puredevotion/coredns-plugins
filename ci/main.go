@@ -117,6 +117,21 @@ var pluginCfgPatches = map[string]struct {
 		insertAfterLine: "tsig:tsig",
 		modulePath:      "github.com/puredevotion/coredns-plugins/cookie",
 	},
+	// RFC 9606 resolver information (RESINFO). Slot: immediately AFTER
+	// chaos:chaos in v1.14.6's plugin.cfg (docs/resinfo-plugin.md):
+	//
+	//   - before forward => a RESINFO query for the resolver's own name is
+	//     answered here, never sent upstream ("not subject to recursive
+	//     resolution", RFC 9606 §3);
+	//   - before cache   => the answer is always the configured one;
+	//   - next to chaos  => the other plugin that answers for the server
+	//     itself. Its own anchor, so its position does not depend on the
+	//     order in which other insertions after tsig:tsig are applied.
+	"resinfo": {
+		cfgLine:         "resinfo:github.com/puredevotion/coredns-plugins/resinfo",
+		insertAfterLine: "chaos:chaos",
+		modulePath:      "github.com/puredevotion/coredns-plugins/resinfo",
+	},
 	// Response Rate Limiting — the amplification-abuse mitigation that gates
 	// any public exposure of an authoritative zone we serve (homelab
 	// docs/plans/authoritative-dns-hivre.md Phase 2). That plan assumed this

@@ -5,3 +5,4 @@ import CorednsPlugins.DynUpdate
 import CorednsPlugins.Probe
 import CorednsPlugins.Cookie
 import CorednsPlugins.ZoneVersion
+import CorednsPlugins.Resinfo
