@@ -85,10 +85,34 @@ func parse(c *caddy.Controller) (config, error) {
 	if cfg.info, err = New(pairs...); err != nil {
 		return cfg, err
 	}
+	if err := replyFits(cfg.names, cfg.info); err != nil {
+		return cfg, err
+	}
 	if n := cfg.info.WireLen(); n > warnRDATA {
 		log.Warningf("RESINFO RDATA is %d octets; RFC 6763 §6.2 does not recommend more than %d", n, warnRDATA)
 	}
 	return cfg, nil
+}
+
+// replyFits checks that the answer for every name fits in one DNS message
+// (65535 octets, RFC 1035 §4.2.2), compressed and with an OPT RR, as it
+// would go out over TCP. RDATA up to 65535 octets is valid on its own, but
+// with the header, question and owner around it a record near that limit
+// can never be sent: CoreDNS would truncate it to an empty TC reply even
+// over TCP, so the plugin would answer every RESINFO query with nothing.
+func replyFits(names []string, info Info) error {
+	r := newResInfo(names, info, 0)
+	for _, n := range names {
+		req := new(dns.Msg)
+		req.SetQuestion(n, dns.TypeRESINFO)
+		m := r.reply(req)
+		m.SetEdns0(dns.MaxMsgSize, false)
+		m.Compress = true
+		if l := m.Len(); l > dns.MaxMsgSize {
+			return fmt.Errorf("the RESINFO reply for %s is %d octets, over the %d of a DNS message (RFC 1035 §4.2.2)", n, l, dns.MaxMsgSize)
+		}
+	}
+	return nil
 }
 
 // directivePair turns one block line into the pair it publishes.

@@ -1,6 +1,7 @@
 package resinfo
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -160,6 +161,34 @@ func TestParseTTLBounds(t *testing.T) {
 		if err != nil || got != want {
 			t.Errorf("parseTTL(%s) = %d, %v", in, got, err)
 		}
+	}
+}
+
+// RDATA at the 65535-octet RDLENGTH limit is a valid Info, but its reply
+// cannot fit in a 65535-octet message; CoreDNS would send an empty TC reply
+// even over TCP. Such a Corefile must not load. 255 full strings (65280
+// octets) leave room for the reply and must still load.
+func TestParseRejectsReplyOverMessageSize(t *testing.T) {
+	val := strings.Repeat("v", MaxString-len("temp-000 "))
+	corefile := func(extra string) string {
+		var b strings.Builder
+		b.WriteString("resinfo resolver.example.net {\n")
+		for i := range 255 {
+			fmt.Fprintf(&b, "temp-%03d %s\n", i, val)
+		}
+		b.WriteString(extra + "}")
+		return b.String()
+	}
+	cfg, err := parse(controller(corefile("")))
+	if err != nil {
+		t.Fatalf("65280 octets of RDATA: %v", err)
+	}
+	if cfg.info.WireLen() != 255*256 {
+		t.Fatalf("WireLen = %d", cfg.info.WireLen())
+	}
+	over := corefile("temp-zzz " + strings.Repeat("w", 254-len("temp-zzz=")) + "\n")
+	if _, err := parse(controller(over)); err == nil {
+		t.Fatal("accepted a RESINFO record whose reply exceeds 65535 octets")
 	}
 }
 
