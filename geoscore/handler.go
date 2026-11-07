@@ -23,7 +23,7 @@ func (*GeoScore) Name() string { return pluginName }
 // name (for a family some endpoint has), and TXT at its `_geoscore.` sibling
 // when rationale-txt is on. Everything else goes to the next plugin.
 func (h *GeoScore) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
-	if len(r.Question) != 1 || r.Question[0].Qclass != dns.ClassINET {
+	if r.Opcode != dns.OpcodeQuery || len(r.Question) != 1 || r.Question[0].Qclass != dns.ClassINET {
 		return plugin.NextOrFailure(pluginName, h.Next, ctx, w, r) //nolint:wrapcheck // the next plugin's own result
 	}
 	q := r.Question[0]

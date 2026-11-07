@@ -65,7 +65,8 @@ block's `NAME` may not be another's `_geoscore.NAME` rationale name. All propert
 
 ### Which queries are answered
 
-**R1.** The plugin answers a query only when it has exactly one question, of
+**R1.** The plugin answers a query only when its opcode is QUERY (RFC 1035
+§4.1.1; a NOTIFY or UPDATE goes to the backend), it has exactly one question, of
 class IN, whose name is a configured `NAME`, and whose type is A or AAAA,
 **and** at least one endpoint has an address of that family. It also answers
 TXT at `_geoscore.NAME` when `rationale-txt` is set (R23).
