@@ -483,9 +483,12 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 		// higher version across the merged CoreDNS+plugin module graph, so
 		// pin the floor directly rather than depend on MVS resolving it the
 		// way we expect. Keep in step with the floors each plugin's own
-		// go.mod now carries.
+		// go.mod now carries. klauspost/compress is only transitive for our
+		// modules (go mod tidy drops a requirement they do not import), so
+		// this line is the only place its floor can live: GO-2026-6865, High,
+		// fixed in 1.20.2, failed the image's grype gate at 1.20.1.
 		WithExec([]string{"go", "get", "golang.org/x/text@v0.41.0", "google.golang.org/grpc@v1.83.2",
-			"go.etcd.io/etcd/client/pkg/v3@v3.6.15"}).
+			"go.etcd.io/etcd/client/pkg/v3@v3.6.15", "github.com/klauspost/compress@v1.20.2"}).
 		WithExec([]string{"go", "mod", "tidy"}).
 		WithExec([]string{"go", "build", "-o", "/coredns-out/coredns", "."}).
 		// radnr needs a raw ICMPv6 socket (CAP_NET_RAW) to send Router
