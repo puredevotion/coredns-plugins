@@ -9,7 +9,7 @@ statement, error returns becoming `none`.
 
 Requirement ids (R…) refer to docs/zoneversion-plugin.md.
 
-* **Codec (R3, R4, R14, R15).** `encode` is `Version.Encode`: LABELCOUNT,
+* **Codec (R3, R4, R16, R17).** `encode` is `Version.Encode`: LABELCOUNT,
   TYPE 0 (SOA-SERIAL), then the serial big-endian (RFC 9660 §2.1 Figure 1,
   §4). `decode` is `Decode`. Proved: the option is always 6 octets
   (`encode_length`, §4 "MUST be set to "6""), `decode (encode v) = v` for
@@ -17,7 +17,7 @@ Requirement ids (R…) refer to docs/zoneversion-plugin.md.
   byte string `decode` accepts (`encode_decode`), and `decode` refuses every
   other length and every other TYPE. The §5 example is checked by
   evaluation (`rfc9660_example`).
-* **Request classification (R11, R12).** `classify` is the Go loop over the
+* **Request classification (R2, R12, R14).** `classify` is the Go loop over the
   OPT RR's options, as (code, length) pairs. Proved: it answers "version"
   exactly when the request carries one ZONEVERSION option and it is empty
   (`classify_version_iff`), "none" exactly when it carries none
@@ -75,7 +75,7 @@ def decode : List Nat → Option (Nat × Nat)
     if ty = 0 ∧ valid lc then some (lc, unbe32 a b c d) else none
   | _ => none
 
-/-- R14: an SOA-SERIAL option is always six octets. -/
+/-- R16: an SOA-SERIAL option is always six octets. -/
 theorem encode_length (lc s : Nat) : (encode lc s).length = 6 := rfl
 
 theorem unbe32_be32 (s : Nat) (h : s < M) :
@@ -83,7 +83,7 @@ theorem unbe32_be32 (s : Nat) (h : s < M) :
   unfold unbe32; omega
 
 /-- Round trip one way: whatever valid version is encoded decodes back to
-itself (R3, R15: the serial is copied exactly). -/
+itself (R3, R17: the serial is copied exactly). -/
 theorem decode_encode (lc s : Nat) (hv : valid lc) (hs : s < M) :
     decode (encode lc s) = some (lc, s) := by
   simp [encode, be32, decode, hv, unbe32_be32 s hs]
@@ -210,7 +210,7 @@ theorem loop_empty_single (os : List (Nat × Nat)) (s : Nat) (e : Bool) (l : Nat
       exact loop_empty_nil os _ _ hrest
     · rename_i hc; rw [if_neg hc] at h; exact ih s e h
 
-/-- R11/R12: the plugin answers with a version exactly when the request
+/-- R2/R12: the plugin answers with a version exactly when the request
 carries one ZONEVERSION option and it is empty (§3.1). -/
 theorem classify_version_iff (opts : List (Nat × Nat)) :
     classify opts = .version ↔ zvLens opts = [0] := by
@@ -250,7 +250,7 @@ theorem classify_version_iff (opts : List (Nat × Nat)) :
     rw [hs, he]
     rfl
 
-/-- §3.2.2: no ZONEVERSION option in the request, no version. -/
+/-- R14, §3.2.2: no ZONEVERSION option in the request, no version. -/
 theorem classify_none_iff (opts : List (Nat × Nat)) :
     classify opts = .none ↔ zvLens opts = [] := by
   have hs := loop_seen opts 0 false

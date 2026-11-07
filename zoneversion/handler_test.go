@@ -8,6 +8,7 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/miekg/dns"
+	dto "github.com/prometheus/client_model/go"
 )
 
 // Serve runs one query through a fresh plugin in front of zone.
@@ -72,6 +73,9 @@ func TestResponseCases(t *testing.T) {
 		{"referral at the cut", "child.example.com.", dns.RcodeSuccess, dns.TypeA, true},
 		{"CNAME into another zone", cnameName, dns.RcodeNameError, dns.TypeA, true},
 		{"not authoritative", fwdName, dns.RcodeSuccess, dns.TypeA, false},
+		{"not authoritative, apex NS only", "lame.example.com.", dns.RcodeSuccess, dns.TypeA, false},
+		{"NXDOMAIN from an unlisted zone below", "nx.deep.example.com.", dns.RcodeNameError, dns.TypeA, false},
+		{"answer from an unlisted zone below", "www.deep.example.com.", dns.RcodeSuccess, dns.TypeA, false},
 		{"SERVFAIL", "fail.example.com.", dns.RcodeServerFailure, dns.TypeA, false},
 		{"REFUSED", "refused.example.com.", dns.RcodeRefused, dns.TypeA, false},
 	} {
@@ -213,6 +217,49 @@ func TestLookupFailure(t *testing.T) {
 	zone := newFakeZone()
 	zone.noSOA = true
 	wantNoVersion(t, serve(t, newTestPlugin(zone), query(wwwName, dns.TypeA, emptyOption())))
+
+	zone = newFakeZone()
+	zone.soaNotAA = true
+	wantNoVersion(t, serve(t, newTestPlugin(zone), query(wwwName, dns.TypeA, emptyOption())))
+}
+
+// A failed before-lookup leaves nothing to bracket against, even when the
+// after-lookup returns serial 0 (the zero value of a missing observation).
+func TestBeforeLookupFailure(t *testing.T) {
+	zone := newFakeZone()
+	zone.setSerial(0)
+	zone.failSOA = 1
+	wantNoVersion(t, serve(t, newTestPlugin(zone), query(wwwName, dns.TypeA, emptyOption())))
+	// The failed query's after-lookup was an observation: the next one brackets.
+	wantVersion(t, serve(t, newTestPlugin(zone), query(wwwName, dns.TypeA, emptyOption())), 0)
+}
+
+// A response of several messages is passed on, none of them versioned.
+func TestMultipleMessages(t *testing.T) {
+	w := &recorder{}
+	z := newTestPlugin(newFakeZone())
+	if _, err := z.ServeDNS(context.Background(), w, query("twice.example.com.", dns.TypeA, emptyOption())); err != nil {
+		t.Fatal(err)
+	}
+	if len(w.msgs) != 2 {
+		t.Fatalf("%d messages, want 2", len(w.msgs))
+	}
+	for _, m := range w.msgs {
+		wantNoVersion(t, m)
+	}
+}
+
+// A rollback is counted.
+func TestRegressionCounted(t *testing.T) {
+	zone := newFakeZone()
+	z := newTestPlugin(zone)
+	wantVersion(t, serve(t, z, query(wwwName, dns.TypeA, emptyOption())), testSerial)
+	before := counterValue(t)
+	zone.setSerial(testSerial - 1)
+	serve(t, z, query(wwwName, dns.TypeA, emptyOption()))
+	if got := counterValue(t) - before; got < 1 {
+		t.Fatalf("serial_regressions_total rose by %v, want at least 1", got)
+	}
 }
 
 // A stray ZONEVERSION from another plugin is replaced, never duplicated
@@ -292,4 +339,13 @@ func (h *rawWriter) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		return dns.RcodeServerFailure, fmt.Errorf("raw: %w", err)
 	}
 	return rcode, nil
+}
+
+func counterValue(t *testing.T) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := regressions.Write(&m); err != nil {
+		t.Fatal(err)
+	}
+	return m.GetCounter().GetValue()
 }
