@@ -148,6 +148,24 @@ var pluginCfgPatches = map[string]struct {
 		insertAfterLine: "file:file",
 		modulePath:      "github.com/puredevotion/coredns-plugins/probe",
 	},
+	// RFC 9660 ZONEVERSION. Slot: immediately AFTER transfer:transfer, so
+	// BEFORE every plugin that serves a zone (hosts, dynupdate, file, probe,
+	// auto, secondary, sign) and AFTER cache (docs/zoneversion-plugin.md):
+	//
+	//   - before the zone backends => it sees their responses and can ask
+	//     them for the zone's SOA through the rest of the chain;
+	//   - after cache              => a cache hit (OPT stripped, served from
+	//     some earlier zone version) is answered without the option, rather
+	//     than with a serial looked up now for an answer cached then;
+	//   - after transfer           => AXFR/IXFR never reach it.
+	//
+	// transfer:transfer is not any other plugin's anchor here, so the
+	// map-order of the sed inserts below cannot reorder it against them.
+	"zoneversion": {
+		cfgLine:         "zoneversion:github.com/puredevotion/coredns-plugins/zoneversion",
+		insertAfterLine: "transfer:transfer",
+		modulePath:      "github.com/puredevotion/coredns-plugins/zoneversion",
+	},
 	"rrl": {
 		cfgLine:         "rrl:github.com/coredns/rrl/plugins/rrl",
 		insertAfterLine: "rewrite:rewrite",
