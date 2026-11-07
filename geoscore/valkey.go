@@ -63,27 +63,31 @@ func NewValkeyStore(cfg ValkeyConfig) (*ValkeyStore, error) {
 	return &ValkeyStore{client: client}, nil
 }
 
-// Get implements Store with a single MGET.
+// Get implements Store with MGET. Against a standalone or sentinel server
+// that is one MGET for all keys. Against Valkey Cluster the keys usually
+// hash to different slots, and a single MGET across slots is refused (the
+// valkey-go command builder panics on it), so valkey.MGet sends one MGET per
+// slot instead; any failed part fails the whole read.
 func (s *ValkeyStore) Get(ctx context.Context, keys []string) ([][]byte, error) {
 	if s.client == nil {
 		return nil, errStoreClosed
 	}
-	c := s.client
-	msgs, err := c.Do(ctx, c.B().Mget().Key(keys...).Build()).ToArray()
+	msgs, err := valkey.MGet(s.client, ctx, keys)
 	if err != nil {
 		return nil, fmt.Errorf("geoscore: valkey MGET: %w", err)
 	}
-	if len(msgs) != len(keys) {
-		return nil, fmt.Errorf("geoscore: valkey MGET returned %d values for %d keys", len(msgs), len(keys))
-	}
 	out := make([][]byte, len(keys))
-	for i := range msgs {
-		if msgs[i].IsNil() {
+	for i, k := range keys {
+		m, ok := msgs[k]
+		if !ok {
+			return nil, fmt.Errorf("geoscore: valkey MGET returned no value for %s", k)
+		}
+		if m.IsNil() {
 			continue
 		}
-		b, err := msgs[i].AsBytes()
+		b, err := m.AsBytes()
 		if err != nil {
-			return nil, fmt.Errorf("geoscore: valkey value for %s: %w", keys[i], err)
+			return nil, fmt.Errorf("geoscore: valkey value for %s: %w", k, err)
 		}
 		out[i] = b
 	}

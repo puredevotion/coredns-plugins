@@ -128,7 +128,10 @@ is the fallback.
 
 **R12.** The entry for endpoint `ID` lives at the Valkey string key
 `PREFIX:ID`. All of a name's keys are read with one `MGET` per refresh
-(R24). `PREFIX` is 1 to 64 of `[A-Za-z0-9:._-]`.
+(R24); against Valkey Cluster, where a name's keys hash to different slots
+and one `MGET` across slots is refused, the read is one `MGET` per slot,
+and it fails as a whole if any part fails (R25). `PREFIX` is 1 to 64 of
+`[A-Za-z0-9:._-]`.
 
 **R13.** The candidate set has 1 to 16 endpoints and each endpoint has 1 to
 8 addresses per family. `ID` is 1 to 32 of `[a-z0-9-]`, does not start with
@@ -378,7 +381,7 @@ the Go tests check that the code matches it.
 | R6, R22 | `TestValidateRejects`, `TestParseRejects` | | `CacheExposureBound`, `LongTTL` |
 | R7, R8, R20 | `TestServeFallbacks`, `TestStaticFallbackPerFamily` | `decide_eligible_or_fallback`, `select_none_iff` | `FallbackOnlyWhenNoneEligible` |
 | R9, R10, R11 | `TestParseFull`, `TestParseRejects`, `TestParseValkeyCA`, `TestValidateRationaleNameLength` | | |
-| R12 | `TestMemStore`, `TestValkeyStoreRoundTrip` (needs `GEOSCORE_VALKEY_ADDR`) | | |
+| R12 | `TestMemStore`, `TestValkeyStoreFake` (standalone and cluster), `TestValkeyStoreRoundTrip` (needs `GEOSCORE_VALKEY_ADDR`) | | |
 | R14 | `TestParseEntryRejects`, `TestEntryValidateNonFinite`, `TestProperty_EntryRoundTrip`, `FuzzParseEntry` | | |
 | R15, R17 | `TestIneligibleNeverChosen`, `TestFutureDatedEntry`, `TestWeightRounding`, `FuzzDecide` | `decide_eligible_or_fallback` | `NeverServeStale` |
 | R16 | `TestProperty_DecideMembershipAndFallback`, `FuzzDecide`, `FuzzServeDNS` | `decide_mem` | |
