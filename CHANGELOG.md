@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.1](https://github.com/puredevotion/coredns-plugins/compare/v0.7.0...v0.7.1) (2026-11-07)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/quic-go/quic-go to v0.65.0 ([#63](https://github.com/puredevotion/coredns-plugins/issues/63)) ([ca7a6e3](https://github.com/puredevotion/coredns-plugins/commit/ca7a6e30b8b48eaf5ce6ac13991a7125ffcc6481))
+
+
+### Performance Improvements
+
+* cut allocations in ADN decode and ASCII lowercasing ([#65](https://github.com/puredevotion/coredns-plugins/issues/65)) ([411e550](https://github.com/puredevotion/coredns-plugins/commit/411e550b483097ce47c922ed6e032f77abccb20f))
+
 ## [0.7.0](https://github.com/puredevotion/coredns-plugins/compare/v0.6.0...v0.7.0) (2026-11-02)
 
 
