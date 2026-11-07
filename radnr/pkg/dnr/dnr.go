@@ -13,6 +13,7 @@
 package dnr
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -313,23 +314,29 @@ func Unmarshal(b []byte) (EncryptedDNS, error) {
 // decodeADN parses DNS wire-format labels into a DomainName. Only wire-level
 // framing is checked here; name rules are DomainName's.
 func decodeADN(b []byte) (DomainName, error) {
-	var labels []string
+	// Build the dotted form directly: one allocation instead of a label slice,
+	// a string per label and a Join.
+	var name strings.Builder
+	name.Grow(len(b))
 	for len(b) > 0 {
 		n := int(b[0])
 		b = b[1:]
 		if n == 0 {
-			return ParseDomainName(strings.Join(labels, "."))
+			return ParseDomainName(name.String())
 		}
 		if n > len(b) {
 			return DomainName{}, fmt.Errorf("dnr: ADN label length %d exceeds remaining", n)
 		}
-		label := string(b[:n])
+		label := b[:n]
 		// A '.' inside a wire label cannot be expressed in the dotted form
 		// DomainName holds, and would re-encode as a different name.
-		if strings.Contains(label, ".") {
+		if bytes.IndexByte(label, '.') >= 0 {
 			return DomainName{}, fmt.Errorf("dnr: ADN label %q contains '.'", label)
 		}
-		labels = append(labels, label)
+		if name.Len() > 0 {
+			name.WriteByte('.')
+		}
+		name.Write(label)
 		b = b[n:]
 	}
 	return DomainName{}, errors.New("dnr: ADN not root-terminated")

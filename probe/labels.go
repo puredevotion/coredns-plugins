@@ -341,18 +341,23 @@ func parseToken(l string) (string, bool) {
 // ASCII (RFC 4343), and unicode.ToLower would additionally fold non-ASCII bytes
 // that have no business appearing in these labels.
 func toLowerASCII(s string) string {
-	var b []byte
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if c >= 'A' && c <= 'Z' {
-			if b == nil {
-				b = []byte(s)
-			}
-			b[i] = c + ('a' - 'A')
-		}
+	i := 0
+	for i < len(s) && (s[i] < 'A' || s[i] > 'Z') {
+		i++
 	}
-	if b == nil {
+	if i == len(s) {
 		return s
 	}
-	return string(b)
+	// One allocation: Builder hands its buffer to String() without a copy.
+	var b strings.Builder
+	b.Grow(len(s))
+	b.WriteString(s[:i])
+	for ; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
 }
