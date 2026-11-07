@@ -334,6 +334,7 @@ the validator produces. It proves:
 | `decide_eligible_or_fallback`, `decide_strict_fallback` | an answered endpoint is eligible, or nothing is eligible, the fallback is `static`, and the answer is the first-listed candidate; with `servfail`/`nodata`, only eligible endpoints are ever answered | R17, R20 |
 | `best_max`, `best_first`, `best_spec`, `best_unique`, `best_complete` | best mode is exactly "maximal weight among eligible, earliest on a tie"; that specification picks out one candidate, so best mode is deterministic in (scores, eligibility, tie-break order) | R18 |
 | `best_none_iff`, `pick_none_iff`, `select_none_iff` | nothing is selected exactly when no candidate is eligible | R20 |
+| `eligible_iff`, `decide_strict_fallback_spec` | `eligible` is exactly R15's rule (valid, healthy, at most `skew` ahead, at most `maxStale` behind, weight > 0), so with `servfail`/`nodata` an answered endpoint meets each condition; without this, weakening `eligible` would weaken every theorem above without breaking the build | R15, R17 |
 | `pick_some` | every draw below the total weight selects | R19 |
 | `pick_count` | over the `total` equally likely draws, a candidate is selected exactly `ew c` times: probability `w / Σw` | R19 |
 | `pick_sound` (third part) | a selected candidate has positive effective weight: weighted mode stays in the support | R19 |
@@ -386,7 +387,7 @@ the Go tests check that the code matches it.
 | R9, R10, R11 | `TestParseFull`, `TestParseRejects`, `TestParseValkeyCA`, `TestValidateRationaleNameLength` | | |
 | R12 | `TestMemStore`, `TestValkeyStoreFake` (standalone and cluster), `TestValkeyStoreRoundTrip` (needs `GEOSCORE_VALKEY_ADDR`) | | |
 | R14 | `TestParseEntryRejects`, `TestEntryValidateNonFinite`, `TestProperty_EntryRoundTrip`, `FuzzParseEntry` | | |
-| R15, R17 | `TestIneligibleNeverChosen`, `TestFutureDatedEntry`, `TestWeightRounding`, `FuzzDecide` | `decide_eligible_or_fallback` | `NeverServeStale` |
+| R15, R17 | `TestIneligibleNeverChosen`, `TestFutureDatedEntry`, `TestWeightRounding`, `FuzzDecide` | `decide_eligible_or_fallback`, `eligible_iff`, `decide_strict_fallback_spec` | `NeverServeStale` |
 | R16 | `TestProperty_DecideMembershipAndFallback`, `FuzzDecide`, `FuzzServeDNS` | `decide_mem` | |
 | R18 | `TestBestPicksHighestThenFirstListed`, `TestProperty_BestMatchesSpec` | `best_spec`, `best_unique`, `best_complete` | |
 | R19 | `TestWeightedFollowsDraw`, `TestProperty_WeightedExactDistribution`, `TestProperty_WeightedMonotone` | `pick_count`, `pick_monotone`, `pick_sound` | |

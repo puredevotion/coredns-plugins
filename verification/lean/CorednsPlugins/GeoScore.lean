@@ -715,6 +715,27 @@ theorem decide_strict_fallback {p : Params} {m : Mode} {fb : Fallback} {cs : Lis
   · exact h1
   · exact absurd h2 hfb
 
+/-- [R15] `eligible` is exactly the rule of the design, spelled out field by
+field: the key exists and the entry is valid, `healthy` is true, the
+writer's timestamp is at most `skew` ahead and at most `maxStale` behind,
+and the weight is positive. Every theorem above is stated with `eligible`;
+this pins that definition to R15, so dropping any one condition from it
+breaks the build instead of silently weakening those theorems. -/
+theorem eligible_iff {p : Params} {c : Cand} :
+    eligible p c = true ↔
+      c.valid = true ∧ c.healthy = true ∧ c.updated ≤ p.now + p.skew ∧
+        p.now ≤ c.updated + p.maxStale ∧ 0 < c.w := by
+  simp [eligible, fresh, and_assoc]
+
+/-- [R17, R20] With `servfail` or `nodata`, an answered endpoint is valid,
+healthy, neither stale nor future-dated, and of positive weight. -/
+theorem decide_strict_fallback_spec {p : Params} {m : Mode} {fb : Fallback}
+    {cs : List Cand} {r : Nat} {c : Cand} (hfb : fb ≠ .static)
+    (h : outcome p m fb cs r = .answer c) :
+    c.valid = true ∧ c.healthy = true ∧ c.updated ≤ p.now + p.skew ∧
+      p.now ≤ c.updated + p.maxStale ∧ 0 < c.w :=
+  eligible_iff.mp (decide_strict_fallback hfb h)
+
 /-! ## Evaluated examples (kernel-checked by `decide`) -/
 
 private def pNow : Params := { now := 1000, maxStale := 300, skew := 30 }
@@ -730,6 +751,10 @@ example : best pNow [us, eu, ap] = some us := by decide
 example : eligible pNow ap = false := by decide
 example : eligible pNow { eu with updated := 1031 } = false := by decide
 example : eligible pNow { eu with updated := 1030 } = true := by decide
+/-- Unhealthy, invalid and zero-weight entries are ineligible. -/
+example : eligible pNow { eu with healthy := false } = false := by decide
+example : eligible pNow { eu with valid := false } = false := by decide
+example : eligible pNow { eu with w := 0 } = false := by decide
 /-- Weighted: draws 0..8299 select eu, 8300..16599 select us, ap never. -/
 example : pick pNow [eu, us, ap] 8299 = some eu := by decide
 example : pick pNow [eu, us, ap] 8300 = some us := by decide
