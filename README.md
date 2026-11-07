@@ -11,6 +11,7 @@ that builds a CoreDNS binary with them compiled in.
 | [`cookie`](cookie/) | DNS Cookies (RFC 7873) with the interoperable SipHash-2-4 server cookie of RFC 9018: validates and issues cookies, BADCOOKIE in `enforce` mode, three-stage secret rollover, per-case counters | Implemented and tested; protocol rules modelled in TLA+ and Lean. **Not yet deployed anywhere** |
 | [`dynupdate`](dynupdate/) | Serves a zone from memory and accepts RFC 2136 dynamic updates for it, e.g. from an ACME client's DNS-01 solver, with a `mutable` type allow-list | Implemented and tested; update rules proved in Lean. In-memory only, see its README |
 | [`probe`](probe/) | A per-visitor synthetic measurement zone that records what each resolver's query reveals and can answer wrong on purpose (DNSSEC failure modes), plus an RFC 9567 error-report receiver | Implemented and tested |
+| [`resinfo`](resinfo/) | Publishes the resolver's capabilities (QNAME minimisation, Extended DNS Errors, an info URL) as an RFC 9606 RESINFO record at its own name and `resolver.arpa`, canonical and validated at startup | Implemented and tested; RDATA codec and answer selection proved in Lean. **Not yet deployed anywhere** |
 
 `sni_tls` and `radnr` run in production in the author's homelab (as
 `coredns-radnr`, serving real LAN DNS over DoT/DoH/DoQ). They have real-world
@@ -67,6 +68,7 @@ cd radnr     && go test -race ./...
 cd cookie    && go test -race ./...
 cd dynupdate && go test -race ./...
 cd probe     && go test -race ./...
+cd resinfo   && go test -race ./...
 ```
 
 Build a CoreDNS binary with all of them compiled in, via Dagger (from `ci/`):
@@ -140,6 +142,11 @@ byte, checks the 1-hour/5-minute window across the 2106 timestamp wrap, runs a
 request through the handler for each RFC 7873 §5.2 case in both modes and both
 transports, and carries fuzz targets over option classification, cookie
 verification and request handling.
+
+`resinfo` checks that miekg/dns packs exactly the RDATA its own encoder
+produces, that only canonical RDATA decodes, and that exactly RESINFO/IN
+queries for the configured names are answered, with property tests and fuzz
+targets over the wire codec, the `exterr` syntax and request handling.
 
 Everything runs offline — `GOPROXY=off go test ./...` passes in every module.
 
