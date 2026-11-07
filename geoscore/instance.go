@@ -2,7 +2,7 @@ package geoscore
 
 import (
 	"context"
-	"math/rand/v2"
+	"math/rand/v2" // nosemgrep: go.lang.security.audit.crypto.math-random-used -- weighted-mode load spreading (rnd), not a security-sensitive value: the answers are public and a predictable pick gives an attacker nothing
 	"net"
 	"sync"
 	"sync/atomic"
