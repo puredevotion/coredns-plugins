@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.0](https://github.com/puredevotion/coredns-plugins/compare/v0.7.2...v0.8.0) (2026-11-07)
+
+
+### Features
+
+* **geoscore:** score-based A/AAAA endpoint selection from live signals in Valkey ([#70](https://github.com/puredevotion/coredns-plugins/issues/70)) ([7c71dcb](https://github.com/puredevotion/coredns-plugins/commit/7c71dcb55faacb20b1e45a734c68190f748fb32b))
+* **resinfo:** RFC 9606 resolver information (RESINFO) plugin ([#69](https://github.com/puredevotion/coredns-plugins/issues/69)) ([6e10bdf](https://github.com/puredevotion/coredns-plugins/commit/6e10bdf1283d4f39bbf25ad6705c0ac4e8dbdb3d))
+* **zoneversion:** RFC 9660 ZONEVERSION plugin, specified and verified ([#71](https://github.com/puredevotion/coredns-plugins/issues/71)) ([3459d88](https://github.com/puredevotion/coredns-plugins/commit/3459d88cfd2ac4745b522691984bd78173e02741))
+
 ## [0.7.2](https://github.com/puredevotion/coredns-plugins/compare/v0.7.1...v0.7.2) (2026-11-07)
 
 
