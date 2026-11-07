@@ -42,7 +42,7 @@ geoscore NAME {
 * `key` **PREFIX**: endpoint ID's score is at `PREFIX:ID`. The default is `geoscore:` followed by NAME without its trailing dot.
 * `mode`: `best` (the default) or `weighted`.
 * `max-staleness` **DURATION** is how old a score may be, by its own `updated` timestamp, and still be used. It is whole seconds from 1s to 24h, and defaults to `5m`.
-* `ttl` **SECONDS** is the TTL of the answers, 30 by default. It must not exceed `max-staleness`, so a cached answer is never acted on more than `2 × max-staleness` after its score was computed.
+* `ttl` **SECONDS** is the TTL of the answers, 30 by default. It must not exceed `max-staleness`, so a cached answer is never acted on more than `2 × max-staleness` after its score was computed (by the writer's clock; a writer clock up to 30 s fast adds those 30 s).
 * `fallback` is what to answer when no endpoint is eligible. `static` (the default) answers the first-listed endpoint, `servfail` answers SERVFAIL, and `nodata` answers NOERROR with no answer and the zone's SOA, which it gets from the next plugin. Without an SOA, `nodata` answers SERVFAIL instead.
 * `refresh` **DURATION** is how often the snapshot of the scores is re-read, on demand (default `1s`, from 100ms up to `max-staleness`).
 * `timeout` **DURATION** bounds one store read (default `100ms`). Only one query per `refresh` interval does the read; the others answer from the snapshot.

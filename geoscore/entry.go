@@ -67,6 +67,8 @@ var (
 	errEntryTooLong  = errors.New("geoscore: entry longer than 512 bytes")
 	errEntryMissing  = errors.New("geoscore: entry lacks score, healthy or updated")
 	errEntryTrailing = errors.New("geoscore: trailing data after the entry")
+	errEntryField    = errors.New("geoscore: entry has unknown field")
+	errEntryDupField = errors.New("geoscore: entry repeats field")
 )
 
 // ParseEntry decodes and validates one stored entry. It is the only way the
@@ -74,6 +76,9 @@ var (
 func ParseEntry(b []byte) (Entry, error) {
 	if len(b) > maxEntryBytes {
 		return Entry{}, errEntryTooLong
+	}
+	if err := checkFieldNames(b); err != nil {
+		return Entry{}, err
 	}
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.DisallowUnknownFields()
@@ -92,6 +97,50 @@ func ParseEntry(b []byte) (Entry, error) {
 		return Entry{}, err
 	}
 	return e, nil
+}
+
+// entryFields are the field names of the schema, spelled exactly.
+var entryFields = [...]string{"score", "healthy", "updated", "signal", "note"}
+
+// checkFieldNames refuses a top-level member whose name is not spelled
+// exactly as in entryFields, or that appears twice (R14). By itself,
+// encoding/json matches names case-insensitively, with Unicode folding
+// ("SCORE" and "ſcore" both set score), and lets a repeated member silently
+// override the first, so a writer bug or a second JSON parser could read a different score
+// from the same bytes. Anything that is not a JSON object is left to Decode
+// to refuse.
+func checkFieldNames(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return nil //nolint:nilerr // Not an object: Decode reports it.
+	}
+	var seen [len(entryFields)]bool
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return nil //nolint:nilerr // Malformed: Decode reports it.
+		}
+		name, ok := tok.(string)
+		if !ok {
+			return nil // Not reachable for a well-formed object; Decode reports it.
+		}
+		i := 0
+		for i < len(entryFields) && entryFields[i] != name {
+			i++
+		}
+		if i == len(entryFields) {
+			return fmt.Errorf("%w %q", errEntryField, name)
+		}
+		if seen[i] {
+			return fmt.Errorf("%w %q", errEntryDupField, name)
+		}
+		seen[i] = true
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return nil //nolint:nilerr // Malformed: Decode reports it.
+		}
+	}
+	return nil
 }
 
 // Validate reports whether e is an entry the plugin may select on: a finite

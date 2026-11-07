@@ -55,31 +55,54 @@ type block struct {
 }
 
 // parse reads every geoscore block of a server block into one handler. The
-// zone is the server block's zone.
+// zone is the server block's zone. If any block fails, the stores of the
+// blocks already built are closed: setup returns an error, so OnShutdown is
+// never registered and nothing else would close them.
 func parse(c *caddy.Controller, zone string) (*GeoScore, error) {
 	h := &GeoScore{}
+	if err := h.parseBlocks(c, zone); err != nil {
+		for _, g := range h.instances {
+			if cerr := g.store.Close(); cerr != nil {
+				log.Warningf("%s: closing store after a setup error: %v", g.cfg.Name, cerr)
+			}
+		}
+		return nil, err
+	}
+	return h, nil
+}
+
+func (h *GeoScore) parseBlocks(c *caddy.Controller, zone string) error {
+	// Every owner name a block answers: NAME, and _geoscore.NAME with
+	// rationale-txt. One name answered by two blocks would be served by
+	// whichever comes first, so it is refused.
 	names := map[string]bool{}
 	for c.Next() {
 		args := c.RemainingArgs()
 		if len(args) != 1 {
-			return nil, c.ArgErr() //nolint:wrapcheck // caddy's own argument error
+			return c.ArgErr() //nolint:wrapcheck // caddy's own argument error
 		}
 		zone = lowerASCII(zone)
 		b := block{cfg: DefaultConfig(qualify(lowerASCII(args[0]), zone), zone)}
 		if err := b.parseBody(c); err != nil {
-			return nil, err
+			return err
 		}
-		if names[b.cfg.Name] {
-			return nil, fmt.Errorf("geoscore: %s configured twice", b.cfg.Name)
+		owned := []string{b.cfg.Name}
+		if b.cfg.RationaleTXT {
+			owned = append(owned, rationaleLabel+b.cfg.Name)
 		}
-		names[b.cfg.Name] = true
+		for _, n := range owned {
+			if names[n] {
+				return fmt.Errorf("geoscore: %s configured twice", n)
+			}
+			names[n] = true
+		}
 		g, err := b.build()
 		if err != nil {
-			return nil, err
+			return err
 		}
 		h.instances = append(h.instances, g)
 	}
-	return h, nil
+	return nil
 }
 
 func (b *block) parseBody(c *caddy.Controller) error {
