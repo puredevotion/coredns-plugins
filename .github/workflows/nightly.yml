@@ -133,7 +133,7 @@ jobs:
       - run: |
           set -euo pipefail
           url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl -sSfL -o /tmp/gitleaks.tar.gz "$url"
+          curl --retry 6 --retry-delay 10 --retry-all-errors -sSfL -o /tmp/gitleaks.tar.gz "$url"
           echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
@@ -145,7 +145,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - run: |
           set -euo pipefail
-          curl -sSfL -o /tmp/opengrep \
+          curl --retry 6 --retry-delay 10 --retry-all-errors -sSfL -o /tmp/opengrep \
             "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86"
           echo "${OPENGREP_SHA256}  /tmp/opengrep" | sha256sum -c -
           sudo install -m 0755 /tmp/opengrep /usr/local/bin/opengrep
@@ -198,7 +198,7 @@ jobs:
         run: |
           set -euo pipefail
           url="https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
-          curl -sSfL -o /tmp/grype.tar.gz "$url"
+          curl --retry 6 --retry-delay 10 --retry-all-errors -sSfL -o /tmp/grype.tar.gz "$url"
           echo "${GRYPE_SHA256}  /tmp/grype.tar.gz" | sha256sum -c -
           tar -xzf /tmp/grype.tar.gz -C /tmp grype
           sudo install -m 0755 /tmp/grype /usr/local/bin/grype
@@ -270,7 +270,7 @@ jobs:
             Fuzzing/special-chars.txt \
             Fuzzing/Unicode.txt \
             Fuzzing/alphanum-case.txt; do
-            curl -fsSL -o "${dir}/$(basename "$path")" "${base}/${path}"
+            curl --retry 6 --retry-delay 10 --retry-all-errors -fsSL -o "${dir}/$(basename "$path")" "${base}/${path}"
           done
           echo "FUZZ_SEED_DIR=${dir}" >> "$GITHUB_ENV"
           echo "FUZZ_SEED_MAX=500" >> "$GITHUB_ENV"
@@ -307,7 +307,7 @@ jobs:
         run: |
           set -euo pipefail
           url="https://github.com/dagger/dagger/releases/download/v${DAGGER_VERSION}/dagger_v${DAGGER_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL -o /tmp/dagger.tar.gz "$url"
+          curl --retry 6 --retry-delay 10 --retry-all-errors -fsSL -o /tmp/dagger.tar.gz "$url"
           echo "${DAGGER_SHA256}  /tmp/dagger.tar.gz" | sha256sum -c -
           tar -xzf /tmp/dagger.tar.gz -C /tmp dagger
           sudo install -m 0755 /tmp/dagger /usr/local/bin/dagger
