@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/puredevotion/coredns-plugins/compare/v0.8.0...v0.9.0) (2026-11-08)
+
+
+### Features
+
+* **probe:** big_requires_cookie, so _big cannot be reflected ([#76](https://github.com/puredevotion/coredns-plugins/issues/76)) ([3afc23a](https://github.com/puredevotion/coredns-plugins/commit/3afc23ade4ec0910748d7c00bda5c22a02f07e92))
+
 ## [0.8.0](https://github.com/puredevotion/coredns-plugins/compare/v0.7.2...v0.8.0) (2026-11-07)
 
 
