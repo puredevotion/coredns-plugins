@@ -37,7 +37,18 @@ APALACHE_SHA256=83ab873d4dc0f8b607aeea6df0bfebf604f90b4b39f2d464357125698970365c
 
 fetch() { # url sha256 dest
   mkdir -p "$(dirname "$3")"
-  curl -fsSL -o "$3.part" "$1"
+  # github.com/<repo>/releases/download/<tag>/<asset> (the web route) returned 504 for
+  # hours while the API route kept working, so prefer `gh release download` when gh is
+  # present and authenticated (GH_TOKEN, as in CI), and fall back to curl otherwise.
+  if command -v gh >/dev/null 2>&1 && [[ $1 =~ ^https://github\.com/([^/]+/[^/]+)/releases/download/([^/]+)/(.+)$ ]]; then
+    local repo=${BASH_REMATCH[1]} tag=${BASH_REMATCH[2]} asset=${BASH_REMATCH[3]} n
+    for n in 1 2 3 4 5; do
+      gh release download "$tag" -R "$repo" -p "$asset" -O "$3.part" --clobber 2>/dev/null && break
+      rm -f "$3.part"
+      [[ $n -lt 5 ]] && sleep 10
+    done
+  fi
+  [[ -s $3.part ]] || curl --retry 6 --retry-delay 10 --retry-all-errors -fsSL -o "$3.part" "$1"
   echo "$2  $3.part" | sha256sum -c --quiet
   mv "$3.part" "$3"
 }

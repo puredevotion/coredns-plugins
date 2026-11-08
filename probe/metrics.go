@@ -38,6 +38,16 @@ var (
 		Help:      "Observed probe queries, by resolver protocol state.",
 	}, []string{"proto", "family", "do", "co", "deleg", "ecs", "zoneversion"})
 
+	// ProbeBigRequests counts `_big` TXT queries once big_requires_cookie is on,
+	// by outcome (truncated, served): how many would have been reflectable and
+	// were not. Two values, so the cardinality is fixed.
+	probeBigRequests = promauto.NewCounterVec(prometheus.CounterOpts{
+		Namespace: plugin.Namespace,
+		Subsystem: pluginName,
+		Name:      "big_requests_total",
+		Help:      "Big-answer TXT queries with big_requires_cookie on, by outcome.",
+	}, []string{"outcome"})
+
 	// ProbeECSPrefixBits is the distribution of disclosed prefix lengths.
 	//
 	// A histogram rather than a gauge because the interesting question is the

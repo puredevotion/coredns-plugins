@@ -35,6 +35,7 @@ import (
 	"time"
 
 	"github.com/coredns/coredns/plugin"
+	"github.com/coredns/coredns/plugin/metadata"
 	clog "github.com/coredns/coredns/plugin/pkg/log"
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
@@ -88,6 +89,15 @@ type Probe struct {
 	ECHConfigList []byte
 	// BigSize is the payload size the `_big` modifier aims for, in bytes.
 	BigSize int
+
+	// BigNeedsCookie makes `_big` over UDP answerable only to a client that
+	// proved its address with a valid DNS server cookie (RFC 7873/9018): anyone
+	// else gets TC=1 and an empty answer, which is no bigger than the query. A
+	// spoofed source address cannot present a cookie that was issued to it, so
+	// this is what turns `_big` from a reflector into a demonstration. Needs the
+	// cookie plugin before this one and the metadata plugin; without them the
+	// status is never "valid" and every UDP `_big` is truncated, which fails safe.
+	BigNeedsCookie bool
 	// TTL applies to every synthesised record. Small by default: these answers
 	// describe one moment for one visitor and must not linger in caches, or a
 	// second visit reports the first visit's findings.
@@ -187,7 +197,55 @@ func (p *Probe) ServeDNS(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	obs := p.observeAndRecord(state, w, r, q, raw)
 
+	// After recording on purpose: an unproven `_big` over UDP is still a
+	// measurement ("a resolver asked for the big answer"), it just must not be
+	// answered with the big payload.
+	if p.bigNeedsProof(ctx, state, q) {
+		probeBigRequests.WithLabelValues(bigTruncated).Inc()
+		return p.respond(state, w, r, dns.RcodeSuccess, nil, nil, true)
+	}
+	if p.BigNeedsCookie && q.Mods.Has(ModBig) && state.QType() == dns.TypeTXT {
+		probeBigRequests.WithLabelValues(bigServed).Inc()
+	}
+
 	return p.respondForQuery(state, w, r, qname, q, &obs)
+}
+
+// Outcomes of a `_big` TXT query when big_requires_cookie is on.
+const (
+	bigTruncated = "truncated" // UDP, no valid server cookie: TC=1, empty answer.
+	bigServed    = "served"    // TCP, or UDP with a valid cookie.
+)
+
+// bigNeedsProof reports whether this query must be truncated instead of
+// answered: `_big` TXT over a connectionless transport from a client that has
+// not shown a valid server cookie. TCP, DoT, DoH and DoQ complete a handshake,
+// so the source address is real and the big answer is safe to send.
+func (p *Probe) bigNeedsProof(ctx context.Context, state *request.Request, q Query) bool {
+	if !p.BigNeedsCookie || !q.Mods.Has(ModBig) || state.QType() != dns.TypeTXT {
+		return false
+	}
+	if state.Proto() != "udp" {
+		return false
+	}
+	return !cookieProven(ctx)
+}
+
+// cookieProven reads the cookie plugin's verdict from request metadata. Only a
+// cookie that verified (under the current or a verify-only secret) counts;
+// absence of the metadata, an unknown value, or a missing cookie plugin all
+// mean "not proven".
+func cookieProven(ctx context.Context) bool {
+	f := metadata.ValueFunc(ctx, "cookie/status")
+	if f == nil {
+		return false
+	}
+	switch f() {
+	case "valid", "valid_previous":
+		return true
+	default:
+		return false
+	}
 }
 
 // observeAndRecord builds the Observation for one probe query, folds in the

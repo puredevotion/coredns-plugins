@@ -26,6 +26,7 @@ func init() { plugin.Register(pluginName, setup) }
 //	    max_tokens N
 //	    max_per_token N
 //	    big_size BYTES
+//	    big_requires_cookie
 //	    agent_domain NAME
 //	    agent_ttl SECONDS
 //	}
@@ -301,6 +302,11 @@ func applyDirective(c *caddy.Controller, p *Probe, st *parseState) error {
 			return c.Err("agent_ttl must be greater than zero")
 		}
 		p.AgentTTL = v
+	case "big_requires_cookie":
+		// A bare flag. Needs the cookie plugin (before this one) and the
+		// metadata plugin in the same server block; setup cannot see either, so
+		// the failure mode is built into the handler: no verdict means truncate.
+		return parseFlag(c, &p.BigNeedsCookie)
 	case "big_size":
 		v, err := parseIntArg(c)
 		if err != nil {
@@ -423,6 +429,16 @@ func buildStore(c *caddy.Controller, vc ValkeyConfig, ttl time.Duration, maxToke
 	}
 	vc.TTL, vc.MaxPerToken = ttl, maxPerToken
 	return NewValkeyStore(vc)
+}
+
+// parseFlag sets *dst for a directive that takes no argument and rejects one.
+func parseFlag(c *caddy.Controller, dst *bool) error {
+	if c.NextArg() {
+		//nolint:wrapcheck // caddyfile Dispenser errors are already user-facing config errors
+		return c.ArgErr()
+	}
+	*dst = true
+	return nil
 }
 
 func parseIntArg(c *caddy.Controller) (int, error) {
