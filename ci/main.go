@@ -450,6 +450,24 @@ func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 // BuildCoredns and docs/zoneversion-plugin.md, "The miekg/dns fork".
 const miekgDNSForkReplace = "github.com/miekg/dns=github.com/puredevotion/dns@v1.1.73-pd.1"
 
+// miekgDNSForkBase is the upstream version the fork is built on. The build
+// fails when CoreDNS resolves a NEWER miekg/dns: the replace would silently
+// downgrade it, so the fork has to be rebased first (PATCHES.md in the fork).
+const miekgDNSForkBase = "v1.1.73"
+
+// guardForkBase fails unless the miekg/dns version the CoreDNS go.mod resolves
+// is at most the fork's base. sort -V orders semantic versions.
+const guardForkBase = `set -eu
+v=$(go list -m -f '{{.Version}}' github.com/miekg/dns)
+base=` + miekgDNSForkBase + `
+top=$(printf '%s\n%s\n' "$v" "$base" | sort -V | tail -n 1)
+if [ "$top" != "$base" ]; then
+  echo "CoreDNS resolves miekg/dns $v, newer than our fork's base $base: rebase github.com/puredevotion/dns onto it and bump miekgDNSForkReplace/miekgDNSForkBase before this build can proceed (a replace would silently downgrade it)." >&2
+  exit 1
+fi
+echo "miekg/dns $v <= fork base $base: replace is safe"
+`
+
 // rrlForkReplace points the third-party rrl at our fork, whose only change is
 // dropping the per-client-IP label from its two "exceeded" counters (the series
 // were never deleted, so a flood of spoofed sources grew them without bound and
@@ -560,6 +578,7 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 		// if a CoreDNS bump resolves a newer miekg/dns, rebase the fork first
 		// (see PATCHES.md in github.com/puredevotion/dns) rather than let this
 		// downgrade it. Keep in step with zoneversion/go.mod.
+		WithExec([]string{"sh", "-c", guardForkBase}).
 		WithExec([]string{"go", "mod", "edit", "-replace", miekgDNSForkReplace}).
 		// Same mechanism for rrl (see rrlForkReplace). The pinned `go get` of
 		// the upstream version above still runs first; this swaps in the fork's
