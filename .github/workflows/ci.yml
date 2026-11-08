@@ -179,10 +179,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Install Lean
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          url="https://github.com/leanprover/lean4/releases/download/v${LEAN_VERSION}/lean-${LEAN_VERSION}-linux.tar.zst"
-          curl --retry 6 --retry-delay 10 --retry-all-errors -sSfL -o "$RUNNER_TEMP/lean.tar.zst" "$url"
+          for attempt in 1 2 3 4 5; do
+            gh release download "v${LEAN_VERSION}" -R leanprover/lean4 -p "lean-${LEAN_VERSION}-linux.tar.zst" -O "$RUNNER_TEMP/lean.tar.zst" --clobber && break
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep 15
+          done
           echo "${LEAN_SHA256}  $RUNNER_TEMP/lean.tar.zst" | sha256sum -c -
           tar --zstd -xf "$RUNNER_TEMP/lean.tar.zst" -C "$RUNNER_TEMP"
           echo "$RUNNER_TEMP/lean-${LEAN_VERSION}-linux/bin" >> "$GITHUB_PATH"
@@ -344,10 +349,15 @@ jobs:
           fetch-depth: 0
 
       - name: Install gitleaks
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
-          curl --retry 6 --retry-delay 10 --retry-all-errors -sSfL -o /tmp/gitleaks.tar.gz "$url"
+          for attempt in 1 2 3 4 5; do
+            gh release download "v${GITLEAKS_VERSION}" -R gitleaks/gitleaks -p "gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -O /tmp/gitleaks.tar.gz --clobber && break
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep 15
+          done
           echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz" | sha256sum -c -
           tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
           sudo install /tmp/gitleaks /usr/local/bin/gitleaks
@@ -417,10 +427,15 @@ jobs:
         # fetched from a branch. Piping an unverified script into a shell to
         # install the tool that scans for vulnerabilities inverts the point of
         # the job.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          url="https://github.com/anchore/grype/releases/download/v${GRYPE_VERSION}/grype_${GRYPE_VERSION}_linux_amd64.tar.gz"
-          curl --retry 6 --retry-delay 10 --retry-all-errors -sSfL -o /tmp/grype.tar.gz "$url"
+          for attempt in 1 2 3 4 5; do
+            gh release download "v${GRYPE_VERSION}" -R anchore/grype -p "grype_${GRYPE_VERSION}_linux_amd64.tar.gz" -O /tmp/grype.tar.gz --clobber && break
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep 15
+          done
           echo "${GRYPE_SHA256}  /tmp/grype.tar.gz" | sha256sum -c -
           tar -xzf /tmp/grype.tar.gz -C /tmp grype
           sudo install -m 0755 /tmp/grype /usr/local/bin/grype
@@ -438,10 +453,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Install opengrep
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          curl --retry 6 --retry-delay 10 --retry-all-errors -sSfL -o /tmp/opengrep \
-            "https://github.com/opengrep/opengrep/releases/download/v${OPENGREP_VERSION}/opengrep_manylinux_x86"
+          for attempt in 1 2 3 4 5; do
+            gh release download "v${OPENGREP_VERSION}" -R opengrep/opengrep -p "opengrep_manylinux_x86" -O /tmp/opengrep --clobber && break
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep 15
+          done
           echo "${OPENGREP_SHA256}  /tmp/opengrep" | sha256sum -c -
           sudo install -m 0755 /tmp/opengrep /usr/local/bin/opengrep
       - name: Clone opengrep-rules
@@ -486,10 +506,15 @@ jobs:
         # tarball straight from GitHub instead: no dependency on a
         # third-party redirect staying up, and it's the same artifact the
         # install script would have fetched anyway.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          url="https://github.com/dagger/dagger/releases/download/v${DAGGER_VERSION}/dagger_v${DAGGER_VERSION}_linux_amd64.tar.gz"
-          curl --retry 6 --retry-delay 10 --retry-all-errors -fsSL -o /tmp/dagger.tar.gz "$url"
+          for attempt in 1 2 3 4 5; do
+            gh release download "v${DAGGER_VERSION}" -R dagger/dagger -p "dagger_v${DAGGER_VERSION}_linux_amd64.tar.gz" -O /tmp/dagger.tar.gz --clobber && break
+            [ "$attempt" -lt 5 ] || exit 1
+            sleep 15
+          done
           echo "${DAGGER_SHA256}  /tmp/dagger.tar.gz" | sha256sum -c -
           tar -xzf /tmp/dagger.tar.gz -C /tmp dagger
           sudo install -m 0755 /tmp/dagger /usr/local/bin/dagger
