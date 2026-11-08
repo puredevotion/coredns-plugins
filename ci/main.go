@@ -450,6 +450,13 @@ func (m *CorednsPluginsCi) buildBase() *dagger.Container {
 // BuildCoredns and docs/zoneversion-plugin.md, "The miekg/dns fork".
 const miekgDNSForkReplace = "github.com/miekg/dns=github.com/puredevotion/dns@v1.1.73-pd.1"
 
+// rrlForkReplace points the third-party rrl at our fork, whose only change is
+// dropping the per-client-IP label from its two "exceeded" counters (the series
+// were never deleted, so a flood of spoofed sources grew them without bound and
+// ran CoreDNS out of its memory limit). Metric names are unchanged; the label is
+// now the configured zone. See github.com/puredevotion/rrl PATCHES.md.
+const rrlForkReplace = "github.com/coredns/rrl=github.com/puredevotion/rrl@v0.0.1-pd.1"
+
 func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Directory, corednsVersion string) (*dagger.File, error) {
 	tag := "v" + corednsVersion
 
@@ -554,6 +561,10 @@ func (m *CorednsPluginsCi) BuildCoredns(ctx context.Context, source *dagger.Dire
 		// (see PATCHES.md in github.com/puredevotion/dns) rather than let this
 		// downgrade it. Keep in step with zoneversion/go.mod.
 		WithExec([]string{"go", "mod", "edit", "-replace", miekgDNSForkReplace}).
+		// Same mechanism for rrl (see rrlForkReplace). The pinned `go get` of
+		// the upstream version above still runs first; this swaps in the fork's
+		// code for it. Before go mod tidy, like the one above.
+		WithExec([]string{"go", "mod", "edit", "-replace", rrlForkReplace}).
 		WithExec([]string{"go", "mod", "tidy"}).
 		WithExec([]string{"go", "build", "-o", "/coredns-out/coredns", "."}).
 		// radnr needs a raw ICMPv6 socket (CAP_NET_RAW) to send Router
