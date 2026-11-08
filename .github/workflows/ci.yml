@@ -176,6 +176,9 @@ jobs:
     # direction fails here. tla2tools.jar and Apalache are pinned and
     # checksummed in verification/run.sh. See verification/README.md.
     runs-on: ubuntu-latest
+    env:
+      # verification/run.sh fetches tla2tools and Apalache with `gh release download`.
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       - name: Install Lean
