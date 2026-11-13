@@ -2,7 +2,7 @@ module github.com/puredevotion/coredns-plugins/zoneversion
 
 go 1.27.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/coredns/caddy v1.1.4
@@ -40,4 +40,4 @@ require (
 // runs). Our fork adds EDNS0_ZONEVERSION.Empty; see
 // docs/zoneversion-plugin.md, "The miekg/dns fork". Keep in step with
 // miekgDNSForkReplace in ci/main.go.
-replace github.com/miekg/dns => github.com/puredevotion/dns v1.1.73-pd.1
+replace github.com/miekg/dns => github.com/puredevotion/dns v1.1.73
