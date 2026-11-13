@@ -2,7 +2,7 @@ module github.com/puredevotion/coredns-plugins/geoscore
 
 go 1.27.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/coredns/caddy v1.1.4
