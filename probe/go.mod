@@ -2,15 +2,15 @@ module github.com/puredevotion/coredns-plugins/probe
 
 go 1.27.0
 
-toolchain go1.27.3
+toolchain go1.27.4
 
 require (
 	github.com/coredns/caddy v1.1.4
 	github.com/coredns/coredns v1.15.0
 	github.com/miekg/dns v1.1.73
 	github.com/prometheus/client_golang v1.25.0
-	github.com/prometheus/common v0.73.1
-	github.com/valkey-io/valkey-go v1.0.79
+	github.com/prometheus/common v0.74.0
+	github.com/valkey-io/valkey-go v1.0.80
 )
 
 require (
@@ -23,7 +23,7 @@ require (
 	github.com/kylelemons/godebug v1.1.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
-	github.com/pandatix/go-abnf v0.5.3 // indirect
+	github.com/pandatix/go-abnf v0.5.5 // indirect
 	github.com/pires/go-proxyproto v0.15.0 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
@@ -31,8 +31,8 @@ require (
 	github.com/quic-go/quic-go v0.64.1 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/net v0.62.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260928230214-8a89bd6388cc // indirect
 	google.golang.org/grpc v1.84.0 // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
