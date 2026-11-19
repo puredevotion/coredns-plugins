@@ -40,4 +40,4 @@ require (
 // runs). Our fork adds EDNS0_ZONEVERSION.Empty; see
 // docs/zoneversion-plugin.md, "The miekg/dns fork". Keep in step with
 // miekgDNSForkReplace in ci/main.go.
-replace github.com/miekg/dns => github.com/puredevotion/dns v1.1.73
+replace github.com/miekg/dns => github.com/puredevotion/dns v1.1.73-pd.1
