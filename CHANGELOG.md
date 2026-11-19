@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.1](https://github.com/puredevotion/coredns-plugins/compare/v0.9.0...v0.9.1) (2026-11-19)
+
+
+### Bug Fixes
+
+* **deps:** bump Go toolchain to 1.27.4 (GO-2026-6859) ([#82](https://github.com/puredevotion/coredns-plugins/issues/82)) ([28fd3bb](https://github.com/puredevotion/coredns-plugins/commit/28fd3bba2587b0bc5f5c27dec98b45a595c1cdfd))
+* **deps:** update patch/minor dependency updates ([#78](https://github.com/puredevotion/coredns-plugins/issues/78)) ([f9f0c12](https://github.com/puredevotion/coredns-plugins/commit/f9f0c125a387dfac78262af5ccd0f367885c2bb9))
+
 ## [0.9.0](https://github.com/puredevotion/coredns-plugins/compare/v0.8.0...v0.9.0) (2026-11-08)
 
 
