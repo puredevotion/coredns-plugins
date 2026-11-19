@@ -1,29 +1,21 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
-  ],
-  "postUpdateOptions": [
-    "gomodTidy"
-  ],
+  "extends": ["config:recommended"],
+  "postUpdateOptions": ["gomodTidy"],
   "customManagers": [
     {
-      "description": "golangci-lint image pinned as a named const in ci/main.go \u2014 not a file Renovate's built-in managers look inside.",
+      "description": "golangci-lint image pinned as a named const in ci/main.go — not a file Renovate's built-in managers look inside.",
       "customType": "regex",
-      "managerFilePatterns": [
-        "/^ci\\/main\\.go$/"
-      ],
+      "managerFilePatterns": ["/^ci\\/main\\.go$/"],
       "matchStrings": [
         "golangciLintImage = \"(?<depName>golangci/golangci-lint):(?<currentValue>v[^\"]+)\""
       ],
       "datasourceTemplate": "docker"
     },
     {
-      "description": "gitleaks image, same pin dafs's own ci/main.go tracks \u2014 kept in lockstep across the ecosystem, so bump both repos together when Renovate opens either PR.",
+      "description": "gitleaks image, same pin dafs's own ci/main.go tracks — kept in lockstep across the ecosystem, so bump both repos together when Renovate opens either PR.",
       "customType": "regex",
-      "managerFilePatterns": [
-        "/^ci\\/main\\.go$/"
-      ],
+      "managerFilePatterns": ["/^ci\\/main\\.go$/"],
       "matchStrings": [
         "gitleaksImage = \"(?<depName>ghcr\\.io/gitleaks/gitleaks):(?<currentValue>v[^\"]+)\""
       ],
@@ -32,9 +24,7 @@
     {
       "description": "cyclonedx-gomod version used to generate the SBOM.",
       "customType": "regex",
-      "managerFilePatterns": [
-        "/^ci\\/main\\.go$/"
-      ],
+      "managerFilePatterns": ["/^ci\\/main\\.go$/"],
       "matchStrings": [
         "cyclonedxGomodVersion = \"(?<currentValue>v[^\"]+)\""
       ],
@@ -44,9 +34,7 @@
     {
       "description": "Opengrep release binary + rules ref.",
       "customType": "regex",
-      "managerFilePatterns": [
-        "/^ci\\/main\\.go$/"
-      ],
+      "managerFilePatterns": ["/^ci\\/main\\.go$/"],
       "matchStrings": [
         "opengrepVersion = \"(?<currentValue>v[^\"]+)\""
       ],
@@ -56,36 +44,22 @@
   ],
   "packageRules": [
     {
-      "description": "golang:1.26 in ci/main.go's goBase/buildBase should track this repo's go.mod, not bump ahead of it unattended \u2014 leave that one manual.",
-      "matchFileNames": [
-        "ci/main.go"
-      ],
-      "matchDatasources": [
-        "docker"
-      ],
-      "matchPackageNames": [
-        "golang"
-      ],
+      "description": "golang:1.26 in ci/main.go's goBase/buildBase should track this repo's go.mod, not bump ahead of it unattended — leave that one manual.",
+      "matchFileNames": ["ci/main.go"],
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["golang"],
       "enabled": false
     },
     {
-      "description": "github.com/coredns/caddy's v2.x tags declare their own module path as github.com/caddyserver/caddy/v2 (the real, much larger upstream Caddy web server) rather than github.com/coredns/caddy/v2 \u2014 a path collision, not a genuine v2 release of this fork's tiny Caddyfile-tokenizer library, which is still v1.1.x. Renovate can't tell the difference and keeps reopening a bump that fails go mod tidy and would pull in the wrong dependency entirely if forced through.",
-      "matchDatasources": [
-        "go"
-      ],
-      "matchPackageNames": [
-        "github.com/coredns/caddy"
-      ],
+      "description": "github.com/coredns/caddy's v2.x tags declare their own module path as github.com/caddyserver/caddy/v2 (the real, much larger upstream Caddy web server) rather than github.com/coredns/caddy/v2 — a path collision, not a genuine v2 release of this fork's tiny Caddyfile-tokenizer library, which is still v1.1.x. Renovate can't tell the difference and keeps reopening a bump that fails go mod tidy and would pull in the wrong dependency entirely if forced through.",
+      "matchDatasources": ["go"],
+      "matchPackageNames": ["github.com/coredns/caddy"],
       "allowedVersions": "<2.0.0"
     },
     {
-      "description": "github.com/puredevotion/dns is our miekg/dns fork, pinned by a replace directive to a -pd.N release that carries the patch (EDNS0_ZONEVERSION.Empty). Renovate reads v1.1.73-pd.1 as older than v1.1.73 and proposes dropping the patch; that breaks zoneversion. Bump it by hand when the fork is rebased.",
-      "matchDatasources": [
-        "go"
-      ],
-      "matchPackageNames": [
-        "github.com/puredevotion/dns"
-      ],
+      "description": "github.com/puredevotion/dns is our miekg/dns fork, pinned by a replace directive to a -pd.N release that carries the patch (EDNS0_ZONEVERSION.Empty). Renovate reads v1.1.73-pd.1 as older than v1.1.73 and proposes dropping the patch, which breaks zoneversion. Bump it by hand when the fork is rebased.",
+      "matchDatasources": ["go"],
+      "matchPackageNames": ["github.com/puredevotion/dns"],
       "enabled": false
     }
   ]
