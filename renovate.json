@@ -55,6 +55,12 @@
       "matchDatasources": ["go"],
       "matchPackageNames": ["github.com/coredns/caddy"],
       "allowedVersions": "<2.0.0"
+    },
+    {
+      "description": "github.com/puredevotion/dns is our miekg/dns fork, pinned by a replace directive to a -pd.N release that carries the patch (EDNS0_ZONEVERSION.Empty). Renovate reads v1.1.73-pd.1 as older than v1.1.73 and proposes dropping the patch, which breaks zoneversion. Bump it by hand when the fork is rebased.",
+      "matchDatasources": ["go"],
+      "matchPackageNames": ["github.com/puredevotion/dns"],
+      "enabled": false
     }
   ]
 }
