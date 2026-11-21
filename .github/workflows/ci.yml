@@ -62,16 +62,22 @@ jobs:
           go-version-file: ${{ matrix.plugin }}/go.mod
           cache-dependency-path: ${{ matrix.plugin }}/go.sum
 
+      # vet, tests (race + the offline hermetic gate) and coverage run only on pushes to main
+      # and the weekly schedule, for every author (bots included): the pre-push hook runs
+      # gofmt, go vet and go test in every plugin module before a branch leaves a machine.
+      # The tidy check stays on every event; it is cheap and the hook does not run it.
       - name: Verify module graph is tidy
         working-directory: ${{ matrix.plugin }}
         run: |
           go mod tidy -diff
 
       - name: Vet
+        if: github.event_name != 'pull_request'
         working-directory: ${{ matrix.plugin }}
         run: go vet ./...
 
       - name: Test with race detector
+        if: github.event_name != 'pull_request'
         working-directory: ${{ matrix.plugin }}
         run: go test -race -shuffle=on -covermode=atomic -coverprofile=cover.out ./...
 
@@ -79,6 +85,7 @@ jobs:
       # module cache populated above; GOFLAGS=-mod=mod + GOPROXY=off fails
       # loudly if anything still wants to be fetched.
       - name: Test offline (hermetic gate)
+        if: github.event_name != 'pull_request'
         working-directory: ${{ matrix.plugin }}
         env:
           # QUOTED. Bare `off` is a YAML 1.1 boolean, so this reached Go as
@@ -91,6 +98,7 @@ jobs:
         run: go test ./...
 
       - name: Coverage summary
+        if: github.event_name != 'pull_request'
         working-directory: ${{ matrix.plugin }}
         run: go tool cover -func=cover.out | tail -1
 
