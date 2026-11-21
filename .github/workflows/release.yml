@@ -198,4 +198,4 @@ jobs:
             "Source: ${GITHUB_REPOSITORY}@${GITHUB_SHA}
           Run: ${RUN_URL}
           Image: ${IMAGE}:${VERSION}@${DIGEST} (CoreDNS ${COREDNS_VERSION})" \
-            "zot.home.arpa/homelab/coredns-plugins~zot.home.arpa/puredevotion/coredns-plugins=${VERSION}"
+            "@coredns-plugins=${VERSION}"
