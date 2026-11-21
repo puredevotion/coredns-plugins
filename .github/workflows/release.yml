@@ -166,7 +166,6 @@ jobs:
   deploy:
     needs: [version, image]
     runs-on: ubuntu-latest
-    environment: homelab-release
     steps:
       - name: mint homelab-scoped installation token
         id: app
