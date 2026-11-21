@@ -72,9 +72,12 @@ func dialSNIStrict(t *testing.T, ln net.Listener, sni string) error {
 			t.Logf("close client conn: %v", closeErr)
 		}
 	}
-	<-acceptErr // Ensure server-side handshake goroutine finished before the next dial.
+	srvErr := <-acceptErr // also orders the next dial after this server handshake
 	if dialErr != nil {
 		return fmt.Errorf("dial sni %q: %w", sni, dialErr)
+	}
+	if srvErr != nil {
+		return fmt.Errorf("server handshake sni %q: %w", sni, srvErr)
 	}
 	return nil
 }
@@ -99,9 +102,12 @@ func dialNoSNIStrict(t *testing.T, ln net.Listener) error {
 	if closeErr := client.Close(); closeErr != nil {
 		t.Logf("close client: %v", closeErr)
 	}
-	<-acceptErr
+	srvErr := <-acceptErr
 	if hsErr != nil {
 		return fmt.Errorf("handshake with no sni: %w", hsErr)
+	}
+	if srvErr != nil {
+		return fmt.Errorf("server handshake with no sni: %w", srvErr)
 	}
 	return nil
 }
@@ -148,9 +154,12 @@ func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 			InsecureSkipVerify: true, //nolint:gosec // self-signed test certs; only the served identity/success is asserted
 		}}
 		rawConn, dialErr := dialer.DialContext(context.Background(), "tcp", ln.Addr().String())
-		<-acceptErr
+		srvErr := <-acceptErr
 		if dialErr != nil {
 			return nil, fmt.Errorf("dial sni %q: %w", sni, dialErr)
+		}
+		if srvErr != nil {
+			return nil, fmt.Errorf("server handshake sni %q: %w", sni, srvErr)
 		}
 		conn, ok := rawConn.(*tls.Conn)
 		if !ok {

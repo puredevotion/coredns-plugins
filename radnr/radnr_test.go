@@ -285,8 +285,8 @@ func TestNopConn_Methods(t *testing.T) {
 		done <- err
 	}()
 	select {
-	case <-done:
-		t.Fatal("nopConn.ReadFrom returned before Close")
+	case err := <-done:
+		t.Fatalf("nopConn.ReadFrom returned before Close (err=%v)", err)
 	case <-time.After(30 * time.Millisecond):
 	}
 	if err := c.Close(); err != nil {
