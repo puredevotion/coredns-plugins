@@ -72,7 +72,7 @@ func dialSNIStrict(t *testing.T, ln net.Listener, sni string) error {
 			t.Logf("close client conn: %v", closeErr)
 		}
 	}
-	srvErr := <-acceptErr // also orders the next dial after this server handshake
+	srvErr := <-acceptErr // Also orders the next dial after this server handshake.
 	if dialErr != nil {
 		return fmt.Errorf("dial sni %q: %w", sni, dialErr)
 	}
@@ -144,31 +144,7 @@ func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 		}
 	}()
 
-	dial := func(sni string) (*tls.Conn, error) {
-		t.Helper()
-		acceptErr := make(chan error, 1)
-		go acceptAndHandshakeReporting(ln, acceptErr)
-
-		dialer := &tls.Dialer{Config: &tls.Config{
-			ServerName:         sni,
-			InsecureSkipVerify: true, //nolint:gosec // self-signed test certs; only the served identity/success is asserted
-		}}
-		rawConn, dialErr := dialer.DialContext(context.Background(), "tcp", ln.Addr().String())
-		srvErr := <-acceptErr
-		if dialErr != nil {
-			return nil, fmt.Errorf("dial sni %q: %w", sni, dialErr)
-		}
-		if srvErr != nil {
-			return nil, fmt.Errorf("server handshake sni %q: %w", sni, srvErr)
-		}
-		conn, ok := rawConn.(*tls.Conn)
-		if !ok {
-			return nil, fmt.Errorf("dialled conn is not *tls.Conn: %T", rawConn)
-		}
-		return conn, nil
-	}
-
-	conn, err := dial(concreteHost)
+	conn, err := dialWildcardStrict(t, ln, concreteHost)
 	if err != nil {
 		t.Fatalf("SNI=%q: expected wildcard cert to match via a real handshake, got error: %v", concreteHost, err)
 	}
@@ -180,7 +156,34 @@ func TestStrict_EndToEnd_WildcardSNI(t *testing.T) {
 		t.Logf("close client conn: %v", closeErr)
 	}
 
-	if _, err := dial(bareDomain); err == nil {
+	if _, err := dialWildcardStrict(t, ln, bareDomain); err == nil {
 		t.Errorf("SNI=%q: bare domain must NOT match its own wildcard cert, and strict mode must reject it -- handshake unexpectedly succeeded", bareDomain)
 	}
+}
+
+// dialWildcardStrict dials ln with the given SNI over a real TLS handshake and
+// returns the client conn; split out of TestStrict_EndToEnd_WildcardSNI to keep
+// it within funlen.
+func dialWildcardStrict(t *testing.T, ln net.Listener, sni string) (*tls.Conn, error) {
+	t.Helper()
+	acceptErr := make(chan error, 1)
+	go acceptAndHandshakeReporting(ln, acceptErr)
+
+	dialer := &tls.Dialer{Config: &tls.Config{
+		ServerName:         sni,
+		InsecureSkipVerify: true, //nolint:gosec // self-signed test certs; only the served identity/success is asserted
+	}}
+	rawConn, dialErr := dialer.DialContext(context.Background(), "tcp", ln.Addr().String())
+	srvErr := <-acceptErr
+	if dialErr != nil {
+		return nil, fmt.Errorf("dial sni %q: %w", sni, dialErr)
+	}
+	if srvErr != nil {
+		return nil, fmt.Errorf("server handshake sni %q: %w", sni, srvErr)
+	}
+	conn, ok := rawConn.(*tls.Conn)
+	if !ok {
+		return nil, fmt.Errorf("dialled conn is not *tls.Conn: %T", rawConn)
+	}
+	return conn, nil
 }
