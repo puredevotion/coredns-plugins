@@ -34,8 +34,8 @@ env:
   # The rule set publishes no release tags at all, so a commit is the only
   # stable ref — a tag pin there would be a guess dressed as a pin.
   OPENGREP_RULES_SHA: "f1d2b562b414783763fd02a6ed2736eaed622efa"
-  DAGGER_VERSION: "0.21.7"
-  DAGGER_SHA256: "44430afc6f9c390fc47c4f352b15de9309a5e97ebd1ae563839617d6df8e8cc5"
+  DAGGER_VERSION: "0.21.12"
+  DAGGER_SHA256: "1c8a2949b461c488506e5e668d6e3a0ff3b90ad588fb151f9a8fe77845bc9d7f"
   # v1.1.4 vendored x/tools/go/ssa v0.29.0, which panics ("unexpected expr:
   # *ast.KeyValueExpr") building SSA against go1.27+ source that uses the
   # newly-allowed promoted-field keyed composite literals. v1.8.0 vendors
@@ -303,10 +303,10 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
         with:
           path: custom-gcl
-          key: custom-gcl-v2.14.0-${{ hashFiles('.custom-gcl.yml') }}
+          key: custom-gcl-v2.15.0-${{ hashFiles('.custom-gcl.yml') }}
       - name: Install golangci-lint (for its `custom` subcommand)
         if: steps.cache.outputs.cache-hit != 'true'
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
       - name: Build custom-gcl (bundles the nilaway plugin)
         if: steps.cache.outputs.cache-hit != 'true'
         run: golangci-lint custom
